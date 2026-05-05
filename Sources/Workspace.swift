@@ -587,7 +587,10 @@ extension Workspace {
             guard let markdownPanel = panel as? MarkdownPanel else { return nil }
             terminalSnapshot = nil
             browserSnapshot = nil
-            markdownSnapshot = SessionMarkdownPanelSnapshot(filePath: markdownPanel.filePath)
+            markdownSnapshot = SessionMarkdownPanelSnapshot(
+                filePath: markdownPanel.filePath,
+                editMode: markdownPanel.editMode
+            )
         }
 
         let persistedMetadata: [String: PersistedJSONValue]?
@@ -815,7 +818,8 @@ extension Workspace {
                 inPane: paneId,
                 filePath: snapshot.markdown?.filePath,
                 focus: false,
-                panelId: restoredPanelId
+                panelId: restoredPanelId,
+                editMode: snapshot.markdown?.editMode ?? false
             ) else {
                 return nil
             }
@@ -5899,7 +5903,9 @@ final class Workspace: Identifiable, ObservableObject {
         // without waiting on Combine's main-queue delivery.
         declareMarkdownTitleFromPanel(markdownPanel)
 
-        let subscription = markdownPanel.$displayTitle
+        var subs: [AnyCancellable] = []
+
+        markdownPanel.$displayTitle
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self, weak markdownPanel] newTitle in
@@ -5937,7 +5943,36 @@ final class Workspace: Identifiable, ObservableObject {
                     hasCustomTitle: self.panelCustomTitles[markdownPanel.id] != nil
                 )
             }
-        panelSubscriptions[markdownPanel.id] = subscription
+            .store(in: &subs)
+
+        // Forward dirty-buffer state to the bonsplit tab so the dirty dot
+        // reflects unsaved edits. dirtyContent and content are both
+        // @Published, so observing either covers buffer mutation and save
+        // commits respectively. The .receive(on: main) hop ensures isDirty
+        // is read after the property has been updated.
+        markdownPanel.$dirtyContent
+            .map { _ in () }
+            .merge(with: markdownPanel.$content.map { _ in () })
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak markdownPanel] in
+                guard let self, let markdownPanel,
+                      let tabId = self.surfaceIdFromPanelId(markdownPanel.id) else { return }
+                self.bonsplitController.updateTab(tabId, isDirty: markdownPanel.isDirty)
+            }
+            .store(in: &subs)
+
+        panelSubscriptions[markdownPanel.id] = AnyCancellable {
+            subs.forEach { $0.cancel() }
+        }
+    }
+
+    /// Force-flush every dirty markdown panel synchronously. Called from
+    /// `applicationWillTerminate` so unsaved edits land on disk before quit.
+    func flushDirtyMarkdownBuffers() {
+        for panel in panels.values {
+            guard let markdownPanel = panel as? MarkdownPanel else { continue }
+            try? markdownPanel.flushSave()
+        }
     }
 
     private func browserRemoteWorkspaceStatusSnapshot() -> BrowserRemoteWorkspaceStatus? {
@@ -7795,11 +7830,12 @@ final class Workspace: Identifiable, ObservableObject {
         orientation: SplitOrientation,
         insertFirst: Bool = false,
         filePath: String? = nil,
-        focus: Bool = true
+        focus: Bool = true,
+        editMode: Bool = false
     ) -> MarkdownPanel? {
         guard let paneId = paneIdForPanel(panelId) else { return nil }
 
-        let markdownPanel = MarkdownPanel(workspaceId: id, filePath: filePath)
+        let markdownPanel = MarkdownPanel(workspaceId: id, filePath: filePath, editMode: editMode)
         panels[markdownPanel.id] = markdownPanel
         panelTitles[markdownPanel.id] = markdownPanel.displayTitle
 
@@ -7847,13 +7883,14 @@ final class Workspace: Identifiable, ObservableObject {
         inPane paneId: PaneID,
         filePath: String? = nil,
         focus: Bool? = nil,
-        panelId: UUID? = nil
+        panelId: UUID? = nil,
+        editMode: Bool = false
     ) -> MarkdownPanel? {
         let shouldFocusNewTab = focus ?? (bonsplitController.focusedPaneId == paneId)
         let previousFocusedPanelId = focusedPanelId
         let previousHostedView = focusedTerminalPanel?.hostedView
 
-        let markdownPanel = MarkdownPanel(id: panelId, workspaceId: id, filePath: filePath)
+        let markdownPanel = MarkdownPanel(id: panelId, workspaceId: id, filePath: filePath, editMode: editMode)
         panels[markdownPanel.id] = markdownPanel
         panelTitles[markdownPanel.id] = markdownPanel.displayTitle
 

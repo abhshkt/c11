@@ -90,6 +90,19 @@ The panel automatically re-renders when the file changes on disk. This works wit
 
 If the file is deleted, the panel shows a "file unavailable" state. During atomic replace, the panel attempts automatic reconnection within its short retry window. If the file returns later, close and reopen the panel.
 
+## Editing (operator-only)
+
+Markdown panels can be edited in place. Click the pencil icon in the file-path header to enter edit mode; click the eye icon to return to preview.
+
+- Edits save automatically 600 ms after you stop typing, and immediately on Cmd-S, blur, panel close, or app quit.
+- Saves are atomic; the live-reload watcher does not bounce on the panel's own writes.
+- Syntax characters (`#`, `**`, backticks) stay visible while editing — this is iA-Writer-style highlighting, not WYSIWYG.
+- If a third party rewrites the file while you have unsaved edits, your edits stay in the buffer; the next save overwrites the external change. Save before stepping away if you don't want last-write-wins.
+- Edit mode persists across session restore — the panel comes back in whichever mode the operator left it.
+- Cmd-F opens the editor's find bar inside the surface.
+
+**Agents do not toggle edit mode.** Agents continue to write files directly via shell — the file watcher reloads the panel automatically. The editor exists for the operator to make small in-place tweaks alongside agent output, not as an agent-driven primitive.
+
 ## Agent Integration
 
 ### Opening a plan file

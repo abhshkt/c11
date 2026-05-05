@@ -334,6 +334,10 @@ struct SessionMarkdownPanelSnapshot: Codable, Sendable {
     /// (empty state — not yet bound to a file). Unbound panels are not
     /// recreated on restore; see Workspace.createPanel(from:inPane:).
     var filePath: String?
+
+    /// Whether the panel was last shown in edit mode. Optional with default
+    /// nil so older snapshots decode cleanly; nil resolves to false at use.
+    var editMode: Bool?
 }
 
 struct SessionPanelSnapshot: Codable, Sendable {

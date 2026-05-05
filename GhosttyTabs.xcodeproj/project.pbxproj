@@ -59,6 +59,8 @@
 		D8019BF0A1B2C3D4E5F60718 /* WorkspaceBlueprintMarkdownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8019BF1A1B2C3D4E5F60718 /* WorkspaceBlueprintMarkdownTests.swift */; };
 		D801ABF0A1B2C3D4E5F60718 /* WorkspaceSnapshotSet.swift in Sources */ = {isa = PBXBuildFile; fileRef = D801ABF1A1B2C3D4E5F60718 /* WorkspaceSnapshotSet.swift */; };
 		D801BBF0A1B2C3D4E5F60718 /* WorkspaceSnapshotSetCodableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D801BBF1A1B2C3D4E5F60718 /* WorkspaceSnapshotSetCodableTests.swift */; };
+		CC110003 /* MarkdownSyntaxTokenizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC110004 /* MarkdownSyntaxTokenizerTests.swift */; };
+		CC110007 /* MarkdownPanelEditModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC110008 /* MarkdownPanelEditModeTests.swift */; };
 		D7011BF0A1B2C3D4E5F60718 /* PaneMetadataStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7011BF1A1B2C3D4E5F60718 /* PaneMetadataStoreTests.swift */; };
 		D7012BF0A1B2C3D4E5F60718 /* PaneMetadataPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7012BF1A1B2C3D4E5F60718 /* PaneMetadataPersistenceTests.swift */; };
 		D7015BF0A1B2C3D4E5F60718 /* DefaultGridSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7015BF1A1B2C3D4E5F60718 /* DefaultGridSettingsTests.swift */; };
@@ -116,6 +118,8 @@
 		A58689DE /* MermaidRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A537C229 /* MermaidRenderer.swift */; };
 		A58689DF /* FencedCodeRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A537C22A /* FencedCodeRenderer.swift */; };
 		A5001421 /* MarkdownPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001419 /* MarkdownPanelView.swift */; };
+		CC110001 /* MarkdownSyntaxTokenizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC110002 /* MarkdownSyntaxTokenizer.swift */; };
+		CC110005 /* MarkdownEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC110006 /* MarkdownEditorView.swift */; };
 		A5001290 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = A5001291 /* MarkdownUI */; };
 		A5001405 /* PanelContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001415 /* PanelContentView.swift */; };
 		A5001406 /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001416 /* Workspace.swift */; };
@@ -366,6 +370,8 @@
 		D8019BF1A1B2C3D4E5F60718 /* WorkspaceBlueprintMarkdownTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceBlueprintMarkdownTests.swift; sourceTree = "<group>"; };
 		D801ABF1A1B2C3D4E5F60718 /* WorkspaceSnapshotSet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSnapshotSet.swift; sourceTree = "<group>"; };
 		D801BBF1A1B2C3D4E5F60718 /* WorkspaceSnapshotSetCodableTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSnapshotSetCodableTests.swift; sourceTree = "<group>"; };
+		CC110004 /* MarkdownSyntaxTokenizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownSyntaxTokenizerTests.swift; sourceTree = "<group>"; };
+		CC110008 /* MarkdownPanelEditModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownPanelEditModeTests.swift; sourceTree = "<group>"; };
 		D8017BF1A1B2C3D4E5F60718 /* Blueprints */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Blueprints; sourceTree = "<group>"; };
 		D8017BF0A1B2C3D4E5F60718 /* Blueprints in Resources */ = {isa = PBXBuildFile; fileRef = D8017BF1A1B2C3D4E5F60718 /* Blueprints */; };
 		D7011BF1A1B2C3D4E5F60718 /* PaneMetadataStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneMetadataStoreTests.swift; sourceTree = "<group>"; };
@@ -446,6 +452,8 @@
 		A537C229 /* MermaidRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/MermaidRenderer.swift; sourceTree = "<group>"; };
 		A537C22A /* FencedCodeRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/FencedCodeRenderer.swift; sourceTree = "<group>"; };
 		A5001419 /* MarkdownPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/MarkdownPanelView.swift; sourceTree = "<group>"; };
+		CC110002 /* MarkdownSyntaxTokenizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/MarkdownSyntaxTokenizer.swift; sourceTree = "<group>"; };
+		CC110006 /* MarkdownEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/MarkdownEditorView.swift; sourceTree = "<group>"; };
 		A5001416 /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
 		A5C11006 /* AgentChip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentChip.swift; sourceTree = "<group>"; };
 		A5C11008 /* AgentChipBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentChipBadge.swift; sourceTree = "<group>"; };
@@ -771,6 +779,8 @@
 				A537C229 /* MermaidRenderer.swift */,
 				A537C22A /* FencedCodeRenderer.swift */,
 				A5001419 /* MarkdownPanelView.swift */,
+				CC110002 /* MarkdownSyntaxTokenizer.swift */,
+				CC110006 /* MarkdownEditorView.swift */,
 				A5001510 /* CmuxWebView.swift */,
 				A5001415 /* PanelContentView.swift */,
 				A5001211 /* UpdateController.swift */,
@@ -939,6 +949,8 @@
 				D8016BF1A1B2C3D4E5F60718 /* WorkspaceSnapshotBrowserMarkdownRoundTripTests.swift */,
 				D8019BF1A1B2C3D4E5F60718 /* WorkspaceBlueprintMarkdownTests.swift */,
 				D801BBF1A1B2C3D4E5F60718 /* WorkspaceSnapshotSetCodableTests.swift */,
+				CC110004 /* MarkdownSyntaxTokenizerTests.swift */,
+				CC110008 /* MarkdownPanelEditModeTests.swift */,
 					D70B3BF1A1B2C3D4E5F60720 /* CLIAdvisoryConnectivityTests.swift */,
 					A5C36031 /* StatusBarButtonDisplayTests.swift */,
 					D7101BF1A1B2C3D4E5F60718 /* MailboxLayoutTests.swift */,
@@ -1185,6 +1197,8 @@
 				A58689DE /* MermaidRenderer.swift in Sources */,
 				A58689DF /* FencedCodeRenderer.swift in Sources */,
 				A5001421 /* MarkdownPanelView.swift in Sources */,
+				CC110001 /* MarkdownSyntaxTokenizer.swift in Sources */,
+				CC110005 /* MarkdownEditorView.swift in Sources */,
 				A5001500 /* CmuxWebView.swift in Sources */,
 				A5001405 /* PanelContentView.swift in Sources */,
 				A5001201 /* UpdateController.swift in Sources */,
@@ -1324,6 +1338,8 @@
 					D8016BF0A1B2C3D4E5F60718 /* WorkspaceSnapshotBrowserMarkdownRoundTripTests.swift in Sources */,
 					D8019BF0A1B2C3D4E5F60718 /* WorkspaceBlueprintMarkdownTests.swift in Sources */,
 					D801BBF0A1B2C3D4E5F60718 /* WorkspaceSnapshotSetCodableTests.swift in Sources */,
+					CC110003 /* MarkdownSyntaxTokenizerTests.swift in Sources */,
+					CC110007 /* MarkdownPanelEditModeTests.swift in Sources */,
 					D70B3BF0A1B2C3D4E5F60720 /* CLIAdvisoryConnectivityTests.swift in Sources */,
 				);
 				runOnlyForDeploymentPostprocessing = 0;

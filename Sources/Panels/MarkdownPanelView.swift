@@ -63,18 +63,38 @@ struct MarkdownPanelView: View {
     // MARK: - Content
 
     private var markdownContentView: some View {
+        VStack(spacing: 0) {
+            filePathHeader
+                .padding(.horizontal, 24)
+                .padding(.top, 16)
+                .padding(.bottom, 8)
+
+            Divider()
+                .padding(.horizontal, 16)
+
+            if panel.editMode {
+                MarkdownEditorView(panel: panel)
+            } else {
+                previewScrollView
+            }
+        }
+        .alert(
+            String(localized: "markdown.editor.saveFailed.title", defaultValue: "Couldn't save markdown file"),
+            isPresented: Binding(
+                get: { panel.saveFailureMessage != nil },
+                set: { if !$0 { panel.saveFailureMessage = nil } }
+            ),
+            presenting: panel.saveFailureMessage
+        ) { _ in
+            Button("OK", role: .cancel) { }
+        } message: { msg in
+            Text(msg)
+        }
+    }
+
+    private var previewScrollView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // File path breadcrumb
-                filePathHeader
-                    .padding(.horizontal, 24)
-                    .padding(.top, 16)
-                    .padding(.bottom, 8)
-
-                Divider()
-                    .padding(.horizontal, 16)
-
-                // Rendered content segments
                 if panel.segments.isEmpty {
                     Markdown(panel.content)
                         .markdownTheme(cmuxMarkdownTheme)
@@ -151,7 +171,35 @@ struct MarkdownPanelView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer()
+            if panel.filePath != nil, !panel.isFileUnavailable {
+                editModeToggleButton
+            }
         }
+    }
+
+    private var editModeToggleButton: some View {
+        Button {
+            // Commit any unsaved buffer before flipping back to preview so
+            // the rendered output reflects what the operator just typed.
+            if panel.editMode {
+                try? panel.flushSave()
+            }
+            panel.editMode.toggle()
+        } label: {
+            Image(systemName: panel.editMode ? "eye" : "pencil")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .frame(width: 14, height: 14)
+        }
+        .buttonStyle(.plain)
+        .help(toggleTooltip)
+    }
+
+    private var toggleTooltip: String {
+        if panel.editMode {
+            return String(localized: "markdown.toggle.previewTooltip", defaultValue: "Preview")
+        }
+        return String(localized: "markdown.toggle.editTooltip", defaultValue: "Edit")
     }
 
     private var fileUnavailableView: some View {
@@ -517,7 +565,24 @@ final class MarkdownPanelPointerObserverView: NSView {
               event.window === window,
               !isHiddenOrHasHiddenAncestor else { return false }
         let point = convert(event.locationInWindow, from: nil)
-        return bounds.contains(point)
+        guard bounds.contains(point) else { return false }
+        // The markdown editor's NSTextView already handles its own click-to-focus
+        // and selection routing. If the click landed inside it, suppress the
+        // panel-level focus callback so empty-selection drags aren't eaten.
+        if let hit = window.contentView?.hitTest(event.locationInWindow),
+           Self.descendantOfMarkdownEditor(hit) {
+            return false
+        }
+        return true
+    }
+
+    private static func descendantOfMarkdownEditor(_ view: NSView) -> Bool {
+        var current: NSView? = view
+        while let candidate = current {
+            if candidate is MarkdownEditorTextView { return true }
+            current = candidate.superview
+        }
+        return false
     }
 
     func handleEventIfNeeded(_ event: NSEvent) -> NSEvent {

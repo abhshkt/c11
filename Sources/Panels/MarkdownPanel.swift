@@ -48,6 +48,54 @@ final class MarkdownPanel: Panel, ObservableObject {
     /// Parsed segments of the content (markdown + mermaid blocks).
     @Published private(set) var segments: [MarkdownSegment] = []
 
+    /// When true, the panel renders an NSTextView editor instead of the
+    /// MarkdownUI preview. Persisted across session restore.
+    @Published var editMode: Bool = false
+
+    /// Unsaved buffer when the operator is editing. nil means the panel is
+    /// in sync with `content` (which mirrors disk).
+    @Published private(set) var dirtyContent: String?
+
+    /// Bumped when `focus()` is called in edit mode — the editor view observes
+    /// this to make its NSTextView first responder. Mirrors `focusFlashToken`.
+    @Published private(set) var focusRequestToken: Int = 0
+
+    /// Bumped when `discardEdits()` is called — the editor view observes this
+    /// to reset its NSTextView's text back to `content`.
+    @Published private(set) var bufferRevertToken: Int = 0
+
+    /// Synchronous handle to the editor's NSTextView while a `MarkdownEditorView`
+    /// is mounted (edit mode). The editor's `makeNSView`/`dismantleNSView` set
+    /// and clear this. `TabManager.startSearch()` reads it to dispatch
+    /// `performTextFinderAction(_:)` directly without first walking through the
+    /// async `focusRequestToken` Combine sink — Cmd-F has to fire on the same
+    /// runloop tick the menu hands the action over, so the responder chain
+    /// can't be relied on for the first-responder transition.
+    /// Not @Published: this is a referencing handle, not observable state.
+    weak var activeTextView: NSTextView?
+
+    /// One-shot flag set by `TabManager.startSearch()` when the markdown panel
+    /// is in preview-only mode (no live text view). The Coordinator's
+    /// `focusRequestToken` sink reads-and-clears it after `makeFirstResponder`
+    /// succeeds and then fires the find action. This covers the case where
+    /// the operator hits Cmd-F before the editor view has mounted.
+    var pendingFindRequest: Bool = false
+
+    /// Set to a localized error message when a save attempt fails (write or
+    /// encoding error). The panel view binds this to a SwiftUI `.alert(...)`
+    /// so the operator sees the failure instead of a silently-swallowed throw.
+    /// Cleared back to nil when the alert is dismissed.
+    @Published var saveFailureMessage: String? = nil
+
+    /// Last bytes successfully written to disk. Compared inside
+    /// `loadFileContent` to suppress the watcher's own self-write reload.
+    /// Byte-equality is correct; `hashValue` would not be process-stable.
+    private var lastWrittenBytes: Data?
+
+    /// Encoding the file was last decoded with. Re-used on save so a
+    /// Latin-1 file round-trips without silent UTF-8 conversion.
+    private var sourceEncoding: String.Encoding = .utf8
+
     /// Tracks the appearance used for the last mermaid render pass.
     private var lastRenderedDark: Bool?
 
@@ -63,10 +111,16 @@ final class MarkdownPanel: Panel, ObservableObject {
     private var isClosed: Bool = false
     private let watchQueue = DispatchQueue(label: "com.stage11.c11.markdown-file-watch", qos: .utility)
 
-    /// Maximum number of reattach attempts after a file delete/rename event.
+    /// Number of fast-phase reattach attempts after a file delete/rename
+    /// event. Covers atomic-replace and short delete-recreate windows.
     private static let maxReattachAttempts = 6
-    /// Delay between reattach attempts (total window: attempts * delay = 3s).
+    /// Delay between fast-phase reattach attempts (fast window: 3s total).
     private static let reattachDelay: TimeInterval = 0.5
+    /// Delay between slow-phase reattach attempts. After the fast window
+    /// expires, retries continue indefinitely at this cadence until the
+    /// panel is closed or unbound, so a delete-then-late-recreate eventually
+    /// reconnects without operator intervention.
+    private static let reattachBackoffDelay: TimeInterval = 5.0
 
     // MARK: - Init
 
@@ -76,11 +130,13 @@ final class MarkdownPanel: Panel, ObservableObject {
     /// - Parameter filePath: Absolute path to a markdown file, or `nil` to
     ///   create an unbound panel (empty state — user binds via drag-drop or
     ///   the in-panel "Open Markdown File" button).
-    init(id: UUID? = nil, workspaceId: UUID, filePath: String? = nil) {
+    /// - Parameter editMode: Restore-time hint to start the panel in edit mode.
+    init(id: UUID? = nil, workspaceId: UUID, filePath: String? = nil, editMode: Bool = false) {
         self.id = id ?? UUID()
         self.workspaceId = workspaceId
         self.filePath = filePath
         self.displayTitle = Self.titleForFilePath(filePath)
+        self.editMode = editMode
 
         if filePath != nil {
             loadFileContent()
@@ -117,15 +173,33 @@ final class MarkdownPanel: Panel, ObservableObject {
 
     // MARK: - Panel protocol
 
+    var isDirty: Bool {
+        guard let dirty = dirtyContent else { return false }
+        return dirty != content
+    }
+
     func focus() {
-        // Markdown panel is read-only; no first responder to manage.
+        guard !isClosed else { return }
+        // Re-arm the watcher if a delete-recreate cycle stranded the panel
+        // (the slow-backoff poll may not have fired yet, or the file was
+        // recreated long after we gave the slow phase up to). Strict gate
+        // keeps the available case a no-op for the ordinary focus path.
+        if isFileUnavailable, fileWatchSource == nil, filePath != nil {
+            loadFileContent()
+            if !isFileUnavailable {
+                startFileWatcher()
+            }
+        }
+        guard editMode else { return }
+        focusRequestToken &+= 1
     }
 
     func unfocus() {
-        // No-op for read-only panel.
+        // No-op; resigning first responder is the editor view's responsibility.
     }
 
     func close() {
+        try? flushSave()
         isClosed = true
         stopFileWatcher()
         stopAppearanceObserver()
@@ -141,26 +215,89 @@ final class MarkdownPanel: Panel, ObservableObject {
     private func loadFileContent() {
         guard let filePath else {
             content = ""
+            sourceEncoding = .utf8
+            lastWrittenBytes = nil
             isFileUnavailable = false
             parseSegments()
             return
         }
-        do {
-            let newContent = try String(contentsOfFile: filePath, encoding: .utf8)
-            content = newContent
+        guard let data = FileManager.default.contents(atPath: filePath) else {
+            isFileUnavailable = true
+            lastWrittenBytes = nil
+            parseSegments()
+            return
+        }
+        // Self-write suppression: the watcher's `.delete|.rename` path always
+        // fires after our atomic write. If the bytes on disk match what we
+        // just wrote, treat the reload as a no-op.
+        if let last = lastWrittenBytes, last == data {
             isFileUnavailable = false
-        } catch {
-            // Fallback: try ISO Latin-1, which accepts all 256 byte values,
-            // covering legacy encodings like Windows-1252.
-            if let data = FileManager.default.contents(atPath: filePath),
-               let decoded = String(data: data, encoding: .isoLatin1) {
-                content = decoded
-                isFileUnavailable = false
-            } else {
-                isFileUnavailable = true
-            }
+            return
+        }
+        // External change — clear suppression and decode.
+        lastWrittenBytes = nil
+        if let utf8 = String(data: data, encoding: .utf8) {
+            content = utf8
+            sourceEncoding = .utf8
+            isFileUnavailable = false
+        } else if let latin1 = String(data: data, encoding: .isoLatin1) {
+            // ISO Latin-1 accepts all 256 byte values, covering legacy
+            // encodings like Windows-1252.
+            content = latin1
+            sourceEncoding = .isoLatin1
+            isFileUnavailable = false
+        } else {
+            isFileUnavailable = true
         }
         parseSegments()
+    }
+
+    // MARK: - Edit-mode buffer
+
+    /// Update the unsaved buffer from the editor coordinator. Pass the
+    /// current text content of the NSTextView; the panel decides whether
+    /// it diverges from `content` (and therefore whether `isDirty` flips).
+    func updateBuffer(_ buffer: String) {
+        guard !isClosed else { return }
+        if buffer == content {
+            if dirtyContent != nil { dirtyContent = nil }
+        } else {
+            dirtyContent = buffer
+        }
+    }
+
+    /// Atomically write the current buffer to disk and reset dirty state.
+    /// No-op when the panel is closed, unbound, or has no pending edits.
+    /// Throws if encoding the buffer or writing to disk fails.
+    func flushSave() throws {
+        guard !isClosed, let filePath else { return }
+        guard let buffer = dirtyContent, buffer != content else { return }
+        guard let data = buffer.data(using: sourceEncoding) else {
+            throw MarkdownPanelError.encodingFailed
+        }
+        // Set the suppression sentinel BEFORE the write so the watcher
+        // event sees it whether dispatched synchronously or asynchronously.
+        lastWrittenBytes = data
+        let url = URL(fileURLWithPath: filePath)
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            // Failed write: clear the sentinel so a future external write
+            // of these exact bytes isn't falsely suppressed as a self-write.
+            lastWrittenBytes = nil
+            throw error
+        }
+        content = buffer
+        dirtyContent = nil
+        parseSegments()
+    }
+
+    /// Discard the unsaved buffer and bump `bufferRevertToken` so the editor
+    /// view re-syncs its NSTextView to `content`.
+    func discardEdits() {
+        guard dirtyContent != nil else { return }
+        dirtyContent = nil
+        bufferRevertToken &+= 1
     }
 
     // MARK: - Fenced code segment parsing
@@ -381,15 +518,25 @@ final class MarkdownPanel: Panel, ObservableObject {
         fileWatchSource = source
     }
 
-    /// Retry reattaching the file watcher up to `maxReattachAttempts` times.
-    /// Each attempt checks if the file has reappeared. Bails out early if
-    /// the panel has been closed.
+    /// Retry reattaching the file watcher after a delete/rename event.
+    /// Phase 1: the first `maxReattachAttempts` attempts poll every
+    /// `reattachDelay` seconds — fast recovery for atomic-replace and short
+    /// delete-recreate windows. Phase 2: subsequent attempts back off to
+    /// `reattachBackoffDelay` and continue indefinitely until the panel is
+    /// closed or the file is unbound, so a late recreate eventually
+    /// reconnects on its own. Each attempt also bails if some other path
+    /// (e.g. `focus()`) has already re-armed the watcher.
     private func scheduleReattach(attempt: Int) {
-        guard attempt <= Self.maxReattachAttempts else { return }
-        watchQueue.asyncAfter(deadline: .now() + Self.reattachDelay) { [weak self] in
+        let delay: TimeInterval = attempt <= Self.maxReattachAttempts
+            ? Self.reattachDelay
+            : Self.reattachBackoffDelay
+        watchQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             DispatchQueue.main.async {
                 guard !self.isClosed, let filePath = self.filePath else { return }
+                // Another path (focus() re-arm, watcher already restarted)
+                // brought the watcher back — stop polling.
+                if self.fileWatchSource != nil { return }
                 if FileManager.default.fileExists(atPath: filePath) {
                     self.isFileUnavailable = false
                     self.loadFileContent()
@@ -418,4 +565,8 @@ final class MarkdownPanel: Panel, ObservableObject {
         }
         DistributedNotificationCenter.default().removeObserver(self)
     }
+}
+
+enum MarkdownPanelError: Error {
+    case encodingFailed
 }

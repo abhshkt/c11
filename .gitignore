@@ -53,3 +53,7 @@ artifacts/openai-cua-runs/
 # Claude Code per-session state and agent scratch worktrees
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+
+# runtime / agent artifacts
+.omc/
+tests_v2/*.html

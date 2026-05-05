@@ -422,10 +422,10 @@ fi
 sleep 0.3
 CMUXD_SRC="$PWD/c11d/zig-out/bin/c11d"
 GHOSTTY_HELPER_SRC="$PWD/ghostty/zig-out/bin/ghostty"
-if [[ -d "$PWD/c11d" ]]; then
+if [[ -d "$PWD/c11d" ]] && [[ "${CMUX_SKIP_ZIG_BUILD:-}" != "1" ]]; then
   (cd "$PWD/c11d" && zig build -Doptimize=ReleaseFast)
 fi
-if [[ -d "$PWD/ghostty" ]]; then
+if [[ -d "$PWD/ghostty" ]] && [[ "${CMUX_SKIP_ZIG_BUILD:-}" != "1" ]]; then
   (cd "$PWD/ghostty" && zig build cli-helper -Dapp-runtime=none -Demit-macos-app=false -Demit-xcframework=false -Doptimize=ReleaseFast)
 fi
 if [[ -x "$CMUXD_SRC" ]]; then

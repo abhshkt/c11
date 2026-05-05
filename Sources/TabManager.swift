@@ -1064,6 +1064,41 @@ class TabManager: ObservableObject {
     }
 
     func startSearch() {
+        // Markdown editor branch: SwiftUI's `.keyboardShortcut("f", modifiers: .command)`
+        // on the Find menu item commandeers Cmd-F before the responder chain
+        // runs, so the NSTextView's built-in find-bar handling (it has
+        // `usesFindBar = true`) is unreachable through normal key dispatch.
+        //
+        // The earlier `NSApp.sendAction(..., to: nil, ...)` path was racy:
+        // `markdownPanel.focus()` only bumps `focusRequestToken`, and the
+        // Combine sink that calls `makeFirstResponder` runs on the next
+        // runloop tick — so the synchronous `sendAction` walked the responder
+        // chain before the text view was first responder and the action was
+        // dropped to nil.
+        //
+        // Two paths now:
+        //   - Editor mounted (`activeTextView != nil`): make first responder
+        //     synchronously and call `performTextFinderAction(_:)` directly
+        //     on the text view, same runloop tick as the menu fired.
+        //   - Editor not yet mounted (preview-only, or mid-mount): set
+        //     `pendingFindRequest` and call `markdownPanel.focus()`. The
+        //     editor's Combine sink performs the find action after
+        //     `makeFirstResponder` on the next runloop iteration.
+        if let markdownPanel = focusedMarkdownPanel, markdownPanel.editMode {
+            let findItem = NSMenuItem()
+            findItem.tag = NSTextFinder.Action.showFindInterface.rawValue
+            if let textView = markdownPanel.activeTextView {
+                if let window = textView.window {
+                    window.makeFirstResponder(textView)
+                }
+                textView.performTextFinderAction(findItem)
+            } else {
+                markdownPanel.pendingFindRequest = true
+                markdownPanel.focus()
+            }
+            return
+        }
+
         if let panel = selectedTerminalPanel {
             if panel.searchState == nil {
                 panel.searchState = TerminalSurface.SearchState()
@@ -2798,6 +2833,17 @@ class TabManager: ObservableObject {
         guard let tab = selectedWorkspace,
               let panelId = tab.focusedPanelId else { return nil }
         return tab.panels[panelId] as? BrowserPanel
+    }
+
+    /// Returns the focused panel if it's a MarkdownPanel, nil otherwise.
+    /// Used to route Cmd-F to the editor's NSTextView find bar; SwiftUI's
+    /// `.keyboardShortcut("f", modifiers: .command)` on the Find menu item
+    /// captures the key before the responder chain runs, so we have to
+    /// dispatch the find action ourselves when an editor is focused.
+    var focusedMarkdownPanel: MarkdownPanel? {
+        guard let tab = selectedWorkspace,
+              let panelId = tab.focusedPanelId else { return nil }
+        return tab.panels[panelId] as? MarkdownPanel
     }
 
     @discardableResult

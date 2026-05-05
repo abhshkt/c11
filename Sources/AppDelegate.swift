@@ -2776,12 +2776,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         isTerminatingApp = true
+        flushDirtyMarkdownBuffersAcrossWindows()
         _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
         return .terminateNow
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         isTerminatingApp = true
+        flushDirtyMarkdownBuffersAcrossWindows()
         _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
         stopSessionAutosaveTimer()
         TerminalController.shared.stop()
@@ -2793,6 +2795,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         notificationStore?.clearAll()
         enableSuddenTerminationIfNeeded()
         LaunchSentinel.clearActive()
+    }
+
+    /// Synchronously commit any unsaved markdown editor buffers to disk so
+    /// quit-during-edit doesn't lose work between debounce ticks. Idempotent
+    /// per panel (flushSave no-ops when not dirty).
+    private func flushDirtyMarkdownBuffersAcrossWindows() {
+        for context in mainWindowContexts.values {
+            for workspace in context.tabManager.tabs {
+                workspace.flushDirtyMarkdownBuffers()
+            }
+        }
+        if let primaryTabManager = tabManager {
+            for workspace in primaryTabManager.tabs {
+                workspace.flushDirtyMarkdownBuffers()
+            }
+        }
     }
 
     func applicationWillResignActive(_ notification: Notification) {
