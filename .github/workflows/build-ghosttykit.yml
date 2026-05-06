@@ -47,7 +47,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="xcframework-${{ steps.ghostty-sha.outputs.sha }}"
-          if gh release view "$TAG" --repo Stage-11-Agentics/c11 >/dev/null 2>&1; then
+          if gh release view "$TAG" --repo ${{ github.repository }} >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Release $TAG already exists, skipping build"
           else
@@ -114,7 +114,7 @@ jobs:
           set -euo pipefail
           TAG="xcframework-${{ steps.ghostty-sha.outputs.sha }}"
           gh release create "$TAG" \
-            --repo Stage-11-Agentics/c11 \
+            --repo ${{ github.repository }} \
             --title "GhosttyKit xcframework (${{ steps.ghostty-sha.outputs.sha }})" \
             --notes "Pre-built GhosttyKit.xcframework for commit ${{ steps.ghostty-sha.outputs.sha }}" \
             GhosttyKit.xcframework.tar.gz
@@ -134,7 +134,7 @@ jobs:
           TAG="xcframework-$SHA"
           ARCHIVE="GhosttyKit.xcframework.tar.gz"
           if [ ! -f "$ARCHIVE" ]; then
-            gh release download "$TAG" --repo Stage-11-Agentics/c11 --pattern "$ARCHIVE"
+            gh release download "$TAG" --repo ${{ github.repository }} --pattern "$ARCHIVE"
           fi
           CHECKSUM="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
           echo "$SHA $CHECKSUM" >> "$CHECKSUMS_FILE"
