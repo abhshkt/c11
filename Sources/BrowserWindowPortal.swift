@@ -75,6 +75,16 @@ private extension WKWebView {
 #endif
     }
 
+    /// Mark the WebKit rendering state as needing a reattach on next reveal,
+    /// without firing `_exitInWindow`/`viewDidHide`. Used for explicit hides
+    /// (e.g. tab/workspace switches) where firing `visibilitychange` would
+    /// trigger page reloads, but the hosted view still drifts out of WebKit's
+    /// "in window" rendering tree and needs `_enterInWindow` on reveal to flush
+    /// stale tiles.
+    func browserPortalMarkRenderingStateNeedsReattach() {
+        browserPortalNeedsRenderingStateReattach = true
+    }
+
     func browserPortalReattachRenderingState(reason: String) {
         guard browserPortalNeedsRenderingStateReattach else { return }
         guard window != nil else { return }
@@ -3174,8 +3184,15 @@ final class WindowBrowserPortal: NSObject {
             // WebKit through `_exitInWindow`/`_enterInWindow`, which fires visibilitychange
             // and can trigger page reloads. Reserve the full lifecycle notify for cases
             // where the visible surface is actually leaving the window/render tree.
-            if entry.visibleInUI, !containerView.isHidden, webView.superview === containerView {
-                webView.browserPortalNotifyHidden(reason: reason)
+            // Either way, mark the WKWebView so the next reveal can run the WebKit
+            // reattach pass and flush its stale rendering tree — `_enterInWindow` is
+            // safe even when we suppress its symmetric `_exitInWindow`.
+            if !containerView.isHidden, webView.superview === containerView {
+                if entry.visibleInUI {
+                    webView.browserPortalNotifyHidden(reason: reason)
+                } else {
+                    webView.browserPortalMarkRenderingStateNeedsReattach()
+                }
             }
             containerView.isHidden = true
         }
@@ -3244,9 +3261,12 @@ final class WindowBrowserPortal: NSObject {
                     return
                 }
             }
-            if preserveVisibleDuringTransientDetach(reason: "anchorWindowMismatch") {
-                return
-            }
+            // When the anchor is disposed (no superview at all) or reparented into
+            // another window, we must hide the slot — preserving it visible would
+            // leave the browser rendering at a stale frame on top of an unrelated
+            // pane. Only the `isOffWindowReparent` case (anchor temporarily without
+            // a window but still mounted in some superview, e.g. a drag transfer
+            // container) gets the deferred-keep treatment above.
             if scheduleTransientDetachRecovery(reason: "anchorWindowMismatch") {
                 hideContainerView(reason: "anchorWindowMismatch")
                 return
