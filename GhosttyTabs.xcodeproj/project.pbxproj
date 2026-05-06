@@ -42,6 +42,8 @@
 		D8007BF0A1B2C3D4E5F60718 /* AgentRestartRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8007BF1A1B2C3D4E5F60718 /* AgentRestartRegistry.swift */; };
 		D8008BF0A1B2C3D4E5F60718 /* WorkspaceSnapshotConverterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8008BF1A1B2C3D4E5F60718 /* WorkspaceSnapshotConverterTests.swift */; };
 		D8009BF0A1B2C3D4E5F60718 /* AgentRestartRegistryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8009BF1A1B2C3D4E5F60718 /* AgentRestartRegistryTests.swift */; };
+		A5FA5710 /* WorkspaceFlashTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5FA5711 /* WorkspaceFlashTests.swift */; };
+		A5FA5712 /* FlashColorParsingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5FA5713 /* FlashColorParsingTests.swift */; };
 		DH010BF0A1B2C3D4E5F60718 /* HealthIPSParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DH010BF1A1B2C3D4E5F60718 /* HealthIPSParserTests.swift */; };
 		DH011BF0A1B2C3D4E5F60718 /* HealthSentryParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DH011BF1A1B2C3D4E5F60718 /* HealthSentryParserTests.swift */; };
 		DH012BF0A1B2C3D4E5F60718 /* HealthMetricKitParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DH012BF1A1B2C3D4E5F60718 /* HealthMetricKitParserTests.swift */; };
@@ -166,6 +168,7 @@
 		A5001240 /* WindowDecorationsController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001241 /* WindowDecorationsController.swift */; };
 		A5001610 /* SessionPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001611 /* SessionPersistence.swift */; };
 		A5005B02 /* BrandColors.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5005B01 /* BrandColors.swift */; };
+		A5FA5702 /* FlashAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5FA5701 /* FlashAppearance.swift */; };
 		A5001100 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A5001101 /* Assets.xcassets */; };
 		A5001230 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A5001231 /* Sparkle */; };
 		B9000002A1B2C3D4E5F60719 /* c11.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9000001A1B2C3D4E5F60719 /* c11.swift */; };
@@ -365,6 +368,8 @@
 		D8007BF1A1B2C3D4E5F60718 /* AgentRestartRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentRestartRegistry.swift; sourceTree = "<group>"; };
 		D8008BF1A1B2C3D4E5F60718 /* WorkspaceSnapshotConverterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSnapshotConverterTests.swift; sourceTree = "<group>"; };
 		D8009BF1A1B2C3D4E5F60718 /* AgentRestartRegistryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentRestartRegistryTests.swift; sourceTree = "<group>"; };
+		A5FA5711 /* WorkspaceFlashTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFlashTests.swift; sourceTree = "<group>"; };
+		A5FA5713 /* FlashColorParsingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlashColorParsingTests.swift; sourceTree = "<group>"; };
 		DH010BF1A1B2C3D4E5F60718 /* HealthIPSParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthIPSParserTests.swift; sourceTree = "<group>"; };
 		DH011BF1A1B2C3D4E5F60718 /* HealthSentryParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthSentryParserTests.swift; sourceTree = "<group>"; };
 		DH012BF1A1B2C3D4E5F60718 /* HealthMetricKitParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthMetricKitParserTests.swift; sourceTree = "<group>"; };
@@ -506,6 +511,7 @@
 		A5001241 /* WindowDecorationsController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowDecorationsController.swift; sourceTree = "<group>"; };
 		A5001611 /* SessionPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionPersistence.swift; sourceTree = "<group>"; };
 		A5005B01 /* BrandColors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandColors.swift; sourceTree = "<group>"; };
+		A5FA5701 /* FlashAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlashAppearance.swift; sourceTree = "<group>"; };
 		818DBCD4AB69EB72573E8138 /* SidebarResizeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarResizeUITests.swift; sourceTree = "<group>"; };
 		B8F266256A1A3D9A45BD840F /* SidebarHelpMenuUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarHelpMenuUITests.swift; sourceTree = "<group>"; };
 		B8F266276A1A3D9A45BD840F /* DisplayResolutionRegressionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayResolutionRegressionUITests.swift; sourceTree = "<group>"; };
@@ -831,6 +837,7 @@
 				A5001222 /* WindowAccessor.swift */,
 				A5001611 /* SessionPersistence.swift */,
 				A5005B01 /* BrandColors.swift */,
+				A5FA5701 /* FlashAppearance.swift */,
 				CC401001A1B2C3D4E5F60719 /* SkillInstaller.swift */,
 				CC401004A1B2C3D4E5F60719 /* AgentSkillsView.swift */,
 				CC401006A1B2C3D4E5F60719 /* TCCPrimerView.swift */,
@@ -968,6 +975,8 @@
 					D8004BF1A1B2C3D4E5F60718 /* WorkspaceLayoutExecutorAcceptanceTests.swift */,
 					D8008BF1A1B2C3D4E5F60718 /* WorkspaceSnapshotConverterTests.swift */,
 					D8009BF1A1B2C3D4E5F60718 /* AgentRestartRegistryTests.swift */,
+					A5FA5711 /* WorkspaceFlashTests.swift */,
+					A5FA5713 /* FlashColorParsingTests.swift */,
 					DH010BF1A1B2C3D4E5F60718 /* HealthIPSParserTests.swift */,
 					DH011BF1A1B2C3D4E5F60718 /* HealthSentryParserTests.swift */,
 					DH012BF1A1B2C3D4E5F60718 /* HealthMetricKitParserTests.swift */,
@@ -1261,6 +1270,7 @@
 				A500120C /* WindowAccessor.swift in Sources */,
 				A5001610 /* SessionPersistence.swift in Sources */,
 				A5005B02 /* BrandColors.swift in Sources */,
+				A5FA5702 /* FlashAppearance.swift in Sources */,
 				CC401002A1B2C3D4E5F60719 /* SkillInstaller.swift in Sources */,
 				CC401005A1B2C3D4E5F60719 /* AgentSkillsView.swift in Sources */,
 				CC401007A1B2C3D4E5F60719 /* TCCPrimerView.swift in Sources */,
@@ -1369,6 +1379,8 @@
 					D8004BF0A1B2C3D4E5F60718 /* WorkspaceLayoutExecutorAcceptanceTests.swift in Sources */,
 					D8008BF0A1B2C3D4E5F60718 /* WorkspaceSnapshotConverterTests.swift in Sources */,
 					D8009BF0A1B2C3D4E5F60718 /* AgentRestartRegistryTests.swift in Sources */,
+				A5FA5710 /* WorkspaceFlashTests.swift in Sources */,
+				A5FA5712 /* FlashColorParsingTests.swift in Sources */,
 					DH010BF0A1B2C3D4E5F60718 /* HealthIPSParserTests.swift in Sources */,
 					DH011BF0A1B2C3D4E5F60718 /* HealthSentryParserTests.swift in Sources */,
 					DH012BF0A1B2C3D4E5F60718 /* HealthMetricKitParserTests.swift in Sources */,
@@ -1501,7 +1513,7 @@
 				CODE_SIGN_ENTITLEMENTS = "";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 98;
+				CURRENT_PROJECT_VERSION = 99;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -1510,7 +1522,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.45.2;
+				MARKETING_VERSION = 0.46.0;
 				OTHER_LDFLAGS = (
 					"-lc++",
 					"-framework",
@@ -1542,7 +1554,7 @@
 				CODE_SIGN_ENTITLEMENTS = "";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 98;
+				CURRENT_PROJECT_VERSION = 99;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -1551,7 +1563,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.45.2;
+				MARKETING_VERSION = 0.46.0;
 				OTHER_LDFLAGS = (
 					"-lc++",
 					"-framework",
@@ -1620,10 +1632,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 98;
+				CURRENT_PROJECT_VERSION = 99;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.45.2;
+				MARKETING_VERSION = 0.46.0;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.stage11.c11.appuitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1637,10 +1649,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 98;
+				CURRENT_PROJECT_VERSION = 99;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.45.2;
+				MARKETING_VERSION = 0.46.0;
 				ONLY_ACTIVE_ARCH = NO;
 				PRODUCT_BUNDLE_IDENTIFIER = com.stage11.c11.appuitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1654,10 +1666,10 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 98;
+				CURRENT_PROJECT_VERSION = 99;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.45.2;
+				MARKETING_VERSION = 0.46.0;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.stage11.c11.apptests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1673,10 +1685,10 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 98;
+				CURRENT_PROJECT_VERSION = 99;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.45.2;
+				MARKETING_VERSION = 0.46.0;
 				ONLY_ACTIVE_ARCH = NO;
 				PRODUCT_BUNDLE_IDENTIFIER = com.stage11.c11.apptests;
 				PRODUCT_NAME = "$(TARGET_NAME)";

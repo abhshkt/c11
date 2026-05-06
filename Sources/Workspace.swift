@@ -5150,6 +5150,27 @@ final class Workspace: Identifiable, ObservableObject {
     /// row pulse together. Visual-only; never affects selection.
     @Published private(set) var sidebarFlashToken: Int = 0
 
+    /// CMUX-10: hex color (sRGB w/ alpha) used by the sidebar workspace row
+    /// pulse. Set in `runFlashPulse` from the per-call `FlashAppearance` so
+    /// `c11 trigger-flash --color "#FF00FF"` tints the sidebar pulse, not
+    /// just the terminal pane ring. Stored as a hex string so it can fold
+    /// cleanly into `TabItemView.==` without touching `NSColor` reference
+    /// equality. nil → fall back to the default sidebar-fill color.
+    @Published private(set) var sidebarFlashColorHex: String?
+
+    /// CMUX-10: state for in-flight persistent flashes (one entry per panel).
+    /// The Timer is process-local; the manifest is not abused for per-frame
+    /// state (per Plan note: write `flash_state=persistent` once on start,
+    /// clear once on cancel). Operator/agent visibility comes from the
+    /// metadata key, not from persistent timers.
+    struct PersistentFlashState {
+        let appearance: FlashAppearance
+        let timer: Timer
+        let startedAt: Date
+    }
+
+    @Published private(set) var persistentFlashPanels: [UUID: PersistentFlashState] = [:]
+
     /// C11-25: workspace-level operator hibernate flag. True when the
     /// operator has explicitly hibernated this workspace via the
     /// "Hibernate Workspace" context menu (or socket equivalent). Survives
@@ -5757,6 +5778,19 @@ final class Workspace: Identifiable, ObservableObject {
         activeRemoteSessionControllerID = nil
         remoteSessionController?.stop()
         mailboxDispatcher?.stop()
+        // CMUX-10: invalidate any in-flight persistent-flash timers so the
+        // run loop drops its retain on them. Direct invalidate here rather
+        // than `cancelAllPersistentFlashes()` — the panel/pane/teardown paths
+        // already remove surface metadata, and routing through the metadata
+        // store during deallocation is unnecessary noise. `Workspace` is
+        // `@MainActor` so the last release must run on main; `assumeIsolated`
+        // lets the iso-checker see that.
+        MainActor.assumeIsolated {
+            for state in persistentFlashPanels.values {
+                state.timer.invalidate()
+            }
+            persistentFlashPanels.removeAll()
+        }
     }
 
     /// Creates a per-workspace mailbox dispatcher bound to this workspace's
@@ -7008,8 +7042,14 @@ final class Workspace: Identifiable, ObservableObject {
             let persistedSources = panelSnapshot.metadataSources ?? [:]
             let newPanelId = oldToNewPanelIds[panelSnapshot.id] ?? panelSnapshot.id
             guard panels[newPanelId] != nil else { continue }
-            let values = PersistedMetadataBridge.decodeValues(persistedValues)
-            let sources = PersistedMetadataBridge.decodeSources(persistedSources)
+            var values = PersistedMetadataBridge.decodeValues(persistedValues)
+            var sources = PersistedMetadataBridge.decodeSources(persistedSources)
+            // CMUX-10: persistent-flash timers are process-local and never
+            // survive a restart. Drop any persisted `flash_state` entry on
+            // restore so external agents reading `surface.get_metadata`
+            // do not see an attention state with no live timer behind it.
+            values.removeValue(forKey: FlashState.metadataKey)
+            sources.removeValue(forKey: FlashState.metadataKey)
             SurfaceMetadataStore.shared.restoreFromSnapshot(
                 workspaceId: id,
                 surfaceId: newPanelId,
@@ -8172,6 +8212,12 @@ final class Workspace: Identifiable, ObservableObject {
         paneCloseInteractionRuntime.clearAll()
         paneCloseOverlayController.cleanup()
 
+        // CMUX-10: cancel every persistent-flash timer + manifest entry so
+        // teardown does not leak repeating timers or stale `flash_state`
+        // metadata. Must precede `panels.removeAll` since the cancel path
+        // is keyed on panel id.
+        cancelAllPersistentFlashes()
+
         let panelEntries = Array(panels)
         for (panelId, panel) in panelEntries {
             panelSubscriptions.removeValue(forKey: panelId)
@@ -9093,6 +9139,20 @@ final class Workspace: Identifiable, ObservableObject {
 
     // MARK: - Flash/Notification Support
 
+    /// CMUX-10: typed values for the `flash_state` surface-manifest key.
+    /// The JSON wire format stays a plain string ("persistent"), so existing
+    /// socket clients (CLI, Python e2e, agent polling) keep working unchanged.
+    /// The enum exists only to narrow the in-process write/read sites so a
+    /// future second state value cannot drift across call sites as a typo.
+    enum FlashState: String {
+        case persistent
+
+        /// Manifest key under which the value is written. Centralized here so
+        /// the start, cancel, and session-restore paths all reference the
+        /// same constant instead of repeating the literal.
+        static let metadataKey = "flash_state"
+    }
+
     /// Single fan-out for a focus flash. Drives, in order:
     ///   (a) the targeted panel's pane-content flash (existing behavior),
     ///   (b) the Bonsplit tab strip — scrolls the matching tab into view and
@@ -9102,12 +9162,127 @@ final class Workspace: Identifiable, ObservableObject {
     /// Gated on `NotificationPaneFlashSettings` so disabling the user-facing
     /// "Pane Flash" toggle silences all three channels consistently.
     func triggerFocusFlash(panelId: UUID) {
+        triggerFocusFlash(panelId: panelId, appearance: FlashAppearance.current(envelope: .paneRing))
+    }
+
+    /// CMUX-10: variant that threads a per-call appearance (color override
+    /// from the CLI / socket) through to the pane and sidebar render paths.
+    /// Bonsplit's `flashTab` does not accept a color callback, so the tab-
+    /// strip pulse stays on the bonsplit-internal accent and is intentionally
+    /// not retinted here.
+    func triggerFocusFlash(panelId: UUID, appearance: FlashAppearance, persistent: Bool = false) {
         guard NotificationPaneFlashSettings.isEnabled() else { return }
-        panels[panelId]?.triggerFlash()
+
+        // CMUX-10: persistent on the focused surface in the focused window
+        // degrades to a one-shot. Persistence is "look at this when you
+        // eventually look back" — meaningless when the operator is already
+        // looking. The color override is still honored.
+        if persistent && isFocusedTargetForPersistentFlash(panelId: panelId) {
+            runFlashPulse(panelId: panelId, appearance: appearance)
+            return
+        }
+
+        runFlashPulse(panelId: panelId, appearance: appearance)
+
+        guard persistent else { return }
+
+        // Replace any existing timer for this panel before installing a new one,
+        // so back-to-back persistent triggers don't leak timers.
+        if let existing = persistentFlashPanels[panelId] {
+            existing.timer.invalidate()
+        }
+
+        let interval = appearance.envelope.duration + 0.6
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard self.persistentFlashPanels[panelId] != nil else { return }
+                self.runFlashPulse(panelId: panelId, appearance: appearance)
+            }
+        }
+        persistentFlashPanels[panelId] = PersistentFlashState(
+            appearance: appearance,
+            timer: timer,
+            startedAt: Date()
+        )
+
+        // Manifest overlay: write once on start so external agents asking
+        // "is this surface still calling for attention?" can find out via
+        // get-metadata without subscribing to per-frame state. Failure is
+        // non-fatal (the timer still drives the visual pulse) but the
+        // manifest contract is briefly out of sync, so log instead of
+        // silently swallowing.
+        do {
+            try SurfaceMetadataStore.shared.setMetadata(
+                workspaceId: id,
+                surfaceId: panelId,
+                partial: [FlashState.metadataKey: FlashState.persistent.rawValue],
+                mode: .merge,
+                source: .declare
+            )
+        } catch {
+#if DEBUG
+            dlog("flash.manifest.set workspace=\(id.uuidString.prefix(8)) panel=\(panelId.uuidString.prefix(8)) error=\(error)")
+#endif
+        }
+    }
+
+    /// CMUX-10: clear a persistent flash on a single panel. Idempotent —
+    /// safe to call from click-to-dismiss handlers without checking state.
+    func cancelPersistentFlash(panelId: UUID) {
+        guard let state = persistentFlashPanels.removeValue(forKey: panelId) else { return }
+        state.timer.invalidate()
+        do {
+            try SurfaceMetadataStore.shared.clearMetadata(
+                workspaceId: id,
+                surfaceId: panelId,
+                keys: [FlashState.metadataKey],
+                source: .declare
+            )
+        } catch {
+#if DEBUG
+            dlog("flash.manifest.clear workspace=\(id.uuidString.prefix(8)) panel=\(panelId.uuidString.prefix(8)) error=\(error)")
+#endif
+        }
+    }
+
+    /// CMUX-10: clear all persistent flashes on this workspace. Used by the
+    /// sidebar-row tap-to-dismiss path so clicking a workspace clears any
+    /// pending persistent flashes inside it.
+    func cancelAllPersistentFlashes() {
+        guard !persistentFlashPanels.isEmpty else { return }
+        let panelIds = Array(persistentFlashPanels.keys)
+        for panelId in panelIds {
+            cancelPersistentFlash(panelId: panelId)
+        }
+    }
+
+    /// CMUX-10: shared fan-out used by both one-shot and persistent flash
+    /// pulses. Stays small to keep pulse-firing predictable; lifecycle and
+    /// timer management live in `triggerFocusFlash` / `cancelPersistentFlash`.
+    private func runFlashPulse(panelId: UUID, appearance: FlashAppearance) {
+        panels[panelId]?.triggerFlash(appearance: appearance)
         if let tabId = surfaceIdFromPanelId(panelId) {
             bonsplitController.flashTab(tabId)
         }
+        // CMUX-10: thread the per-call appearance into the sidebar pulse so
+        // `--color` tints the workspace row, not just the terminal pane ring.
+        // Stored as a hex string so `TabItemView.==` can fold it in without
+        // tripping NSColor reference equality.
+        sidebarFlashColorHex = appearance.color.hexString(includeAlpha: true)
         sidebarFlashToken &+= 1
+    }
+
+    /// CMUX-10: true when a persistent-flash request would target the panel
+    /// the operator is already looking at — i.e. this workspace is selected,
+    /// the panel is the focused panel, and the focused window owns the app.
+    /// Used to degrade `--persistent` to a one-shot pulse in that case.
+    private func isFocusedTargetForPersistentFlash(panelId: UUID) -> Bool {
+        guard let tabManager = AppDelegate.shared?.tabManager else { return false }
+        guard tabManager.selectedTabId == self.id else { return false }
+        guard self.focusedPanelId == panelId else { return false }
+        guard NSApp.isActive else { return false }
+        return true
     }
 
     func triggerNotificationFocusFlash(
@@ -9455,8 +9630,14 @@ final class Workspace: Identifiable, ObservableObject {
         guard layoutFollowUpTimeoutWorkItem != nil, !isAttemptingLayoutFollowUp else { return }
         isAttemptingLayoutFollowUp = true
         defer { isAttemptingLayoutFollowUp = false }
+#if DEBUG
+        let attemptStart = CACurrentMediaTime()
+#endif
 
         flushWorkspaceWindowLayouts()
+#if DEBUG
+        let postFlushMs = (CACurrentMediaTime() - attemptStart) * 1000
+#endif
 
         let geometryPendingBefore = layoutFollowUpNeedsGeometryPass
         let terminalPortalPendingBefore = terminalPortalVisibilityNeedsFollowUp()
@@ -9554,17 +9735,32 @@ final class Workspace: Identifiable, ObservableObject {
         } else {
             layoutFollowUpStalledAttemptCount += 1
         }
+#if DEBUG
+        let totalMs = (CACurrentMediaTime() - attemptStart) * 1000
+        dlog(
+            "ws.layoutFollowUp.attempt workspace=\(id.uuidString.prefix(5)) " +
+            "totalMs=\(String(format: "%.2f", totalMs)) " +
+            "flushMs=\(String(format: "%.2f", postFlushMs)) " +
+            "didMakeProgress=\(didMakeProgress ? 1 : 0) needsMoreWork=\(needsMoreWork ? 1 : 0) " +
+            "stalled=\(layoutFollowUpStalledAttemptCount) reason=\(layoutFollowUpReason ?? "nil")"
+        )
+#endif
     }
 
     /// Reconcile remaining terminal view geometries after split topology changes.
     /// This keeps AppKit bounds and Ghostty surface sizes in sync in the next runloop turn.
     private func reconcileTerminalGeometryPass() -> Bool {
         var needsFollowUpPass = false
+#if DEBUG
+        let passStart = CACurrentMediaTime()
+        var refreshedCount = 0
+        var skippedCount = 0
+#endif
 
-        // Flush pending AppKit layout first so terminal-host bounds reflect latest split topology.
-        for window in NSApp.windows {
-            window.contentView?.layoutSubtreeIfNeeded()
-        }
+        // `attemptEventDrivenLayoutFollowUp` already flushes all window layouts via
+        // `flushWorkspaceWindowLayouts()` before invoking this pass, so we do not re-flush
+        // here. Phase 3 — removing the duplicate `layoutSubtreeIfNeeded` loop saves a
+        // full-window layout pass on every reconcile attempt.
 
         for panel in panels.values {
             guard let terminalPanel = panel as? TerminalPanel else { continue }
@@ -9583,14 +9779,35 @@ final class Workspace: Identifiable, ObservableObject {
             hostedView.reconcileGeometryNow()
             // Re-check surface after reconcileGeometryNow() which can trigger AppKit
             // layout and view lifecycle changes that free surfaces (#432).
-            if terminalPanel.surface.surface != nil {
+            //
+            // Phase 3 — only refresh when the surface is actually attachable. The
+            // `forceRefresh()` body already early-returns on detached / zero-bounds
+            // views, but skipping the call entirely avoids the per-panel dlog
+            // emission and the entry into the Ghostty C bridge during the cascade
+            // of follow-up passes that fire on every workspace switch.
+            if terminalPanel.surface.surface != nil, isAttached, hasUsableBounds {
                 terminalPanel.surface.forceRefresh()
+#if DEBUG
+                refreshedCount += 1
+#endif
+            } else {
+#if DEBUG
+                skippedCount += 1
+#endif
             }
             if terminalPanel.surface.surface == nil, isAttached && hasUsableBounds {
                 terminalPanel.surface.requestBackgroundSurfaceStartIfNeeded()
                 needsFollowUpPass = true
             }
         }
+#if DEBUG
+        let passMs = (CACurrentMediaTime() - passStart) * 1000
+        dlog(
+            "ws.geometryReconcile.pass workspace=\(id.uuidString.prefix(5)) " +
+            "ms=\(String(format: "%.2f", passMs)) refreshed=\(refreshedCount) skipped=\(skippedCount) " +
+            "needsFollowUp=\(needsFollowUpPass ? 1 : 0)"
+        )
+#endif
 
         return needsFollowUpPass
     }
@@ -10705,6 +10922,11 @@ extension Workspace: BonsplitDelegate {
         // still resolves against a consistent view.
         paneInteractionRuntime.clear(panelId: panelId)
 
+        // CMUX-10: clear any persistent-flash timer + manifest entry before
+        // removing the panel. Without this, the repeating timer keeps firing
+        // and increments `sidebarFlashToken` for a panel that no longer exists.
+        cancelPersistentFlash(panelId: panelId)
+
         panels.removeValue(forKey: panelId)
         untrackRemoteTerminalSurface(panelId)
         surfaceIdToPanelId.removeValue(forKey: tabId)
@@ -10869,6 +11091,10 @@ extension Workspace: BonsplitDelegate {
                 // with .dismissed. Matches the cleanup invariant in
                 // teardownAllPanels (synthesis-standard §1.1).
                 paneInteractionRuntime.clear(panelId: panelId)
+                // CMUX-10: drop any persistent-flash timer + manifest entry
+                // before the panel disappears. Same invariant as the
+                // single-panel close path above.
+                cancelPersistentFlash(panelId: panelId)
                 panels[panelId]?.close()
                 panels.removeValue(forKey: panelId)
                 untrackRemoteTerminalSurface(panelId)

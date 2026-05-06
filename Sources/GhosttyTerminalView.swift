@@ -9,6 +9,7 @@ import Sentry
 import Bonsplit
 import IOSurface
 import UniformTypeIdentifiers
+import os
 
 #if os(macOS)
 func cmuxShouldUseTransparentBackgroundWindow() -> Bool {
@@ -5843,6 +5844,12 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         requestPointerFocusRecovery()
         window?.makeFirstResponder(self)
         if let terminalSurface {
+            // CMUX-10: click cancels any persistent flash on this surface. Mouse-only
+            // path; the keyDown / typing hot path is not touched here.
+            if let workspace = AppDelegate.shared?.tabManager?.tabs.first(where: { $0.id == terminalSurface.tabId }),
+               workspace.persistentFlashPanels[terminalSurface.id] != nil {
+                workspace.cancelPersistentFlash(panelId: terminalSurface.id)
+            }
             AppDelegate.shared?.tabManager?.dismissNotificationOnDirectInteraction(
                 tabId: terminalSurface.tabId,
                 surfaceId: terminalSurface.id
@@ -6525,11 +6532,14 @@ final class GhosttySurfaceScrollView: NSView {
         setDropZoneOverlay(zone: nil)
         return (before, after, bounds.size)
     }
+#endif
 
+    /// Reachable from always-on `WorkspaceSwitchSignpost` events that fire
+    /// in both Debug and Release. Body has no DEBUG-only dependencies, so
+    /// keep it outside `#if DEBUG`.
     var debugSurfaceId: UUID? {
         surfaceView.terminalSurface?.id
     }
-#endif
 
     func portalBindingGuardState() -> (surfaceId: UUID?, generation: UInt64?, state: String) {
         guard let terminalSurface = surfaceView.terminalSurface else {
@@ -6636,11 +6646,14 @@ final class GhosttySurfaceScrollView: NSView {
         flashOverlayView.layer?.masksToBounds = false
         flashOverlayView.autoresizingMask = [.width, .height]
         flashLayer.fillColor = NSColor.clear.cgColor
-        flashLayer.strokeColor = cmuxAccentNSColor().cgColor
+        // CMUX-10: color sourced via FlashAppearance seam (still gold here in
+        // commit 1; commit 2 swaps the default and adds per-call overrides).
+        let initialFlashColor = FlashAppearance.current(envelope: .paneRing).color
+        flashLayer.strokeColor = initialFlashColor.cgColor
         flashLayer.lineWidth = 3
         flashLayer.lineJoin = .round
         flashLayer.lineCap = .round
-        flashLayer.shadowColor = cmuxAccentNSColor().cgColor
+        flashLayer.shadowColor = initialFlashColor.cgColor
         flashLayer.shadowOpacity = 0.6
         flashLayer.shadowRadius = 6
         flashLayer.shadowOffset = .zero
@@ -7575,6 +7588,14 @@ final class GhosttySurfaceScrollView: NSView {
 #endif
 
     func triggerFlash(style: FlashStyle = .standardFocus) {
+        triggerFlash(style: style, appearance: FlashAppearance.current(envelope: .paneRing))
+    }
+
+    /// CMUX-10: variant that re-tints the flash layer with a per-call color
+    /// before firing the animation. Color is applied off the layer's
+    /// presentation tree (sublayer property), not via a redraw of the surface,
+    /// so this stays out of the typing hot path.
+    func triggerFlash(style: FlashStyle, appearance: FlashAppearance) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
 #if DEBUG
@@ -7585,6 +7606,8 @@ final class GhosttySurfaceScrollView: NSView {
             self.updateFlashPath(style: style)
             self.flashLayer.removeAllAnimations()
             self.flashLayer.opacity = 0
+            self.flashLayer.strokeColor = appearance.color.cgColor
+            self.flashLayer.shadowColor = appearance.color.cgColor
             let animation = CAKeyframeAnimation(keyPath: "opacity")
             animation.values = FocusFlashPattern.values.map { NSNumber(value: $0) }
             animation.keyTimes = FocusFlashPattern.keyTimes.map { NSNumber(value: $0) }
@@ -9277,6 +9300,16 @@ struct GhosttyTerminalView: NSViewRepresentable {
             }
         }
 #endif
+        if desiredStateChanged,
+           let signpostID = AppDelegate.shared?.tabManager?.currentSwitchSignpostID {
+            WorkspaceSwitchSignpost.event(
+                signpostID,
+                "swiftui.update",
+                "surface=\(terminalSurface.id.uuidString.prefix(5)) " +
+                "visible=\(isVisibleInUI ? 1 : 0) active=\(isActive ? 1 : 0) z=\(portalZPriority) " +
+                "hostWindow=\(nsView.window != nil ? 1 : 0)"
+            )
+        }
 
         let hostContainer = nsView as? HostContainerView
         let hostOwnsPortalNow = hostContainer.map { host in
@@ -9353,6 +9386,28 @@ struct GhosttyTerminalView: NSViewRepresentable {
                 ) else { return }
                 guard host.window != nil else { return }
                 guard portalBindingStillLive() else { return }
+                // Phase 2: skip the bind here when the host's frame hasn't been laid
+                // out yet. AppKit fires `viewDidMoveToWindow` during `addSubview`,
+                // BEFORE SwiftUI's layout pass sizes the host. Binding now would
+                // run with a zero anchor frame, hide the hosted view, and force
+                // a second bind+sync cycle once the frame became real, which is
+                // the source of the post-handoff layout cascade. `onGeometryChanged`
+                // below performs the bind on the first geometry tick — by that
+                // point the host has its real frame and the hosted view appears
+                // in one pass.
+                let hostBounds = host.bounds
+                let geometryReady = hostBounds.width > 1 && hostBounds.height > 1
+                if !geometryReady {
+#if DEBUG
+                    dlog(
+                        "ws.hostState.deferBindOnDidMove surface=\(terminalSurface.id.uuidString.prefix(5)) " +
+                        "reason=hostBoundsNotReady visible=\(coordinator.desiredIsVisibleInUI ? 1 : 0) " +
+                        "active=\(coordinator.desiredIsActive ? 1 : 0) z=\(coordinator.desiredPortalZPriority) " +
+                        "bounds=\(String(format: "%.1fx%.1f", hostBounds.width, hostBounds.height))"
+                    )
+#endif
+                    return
+                }
                 TerminalWindowPortalRegistry.bind(
                     hostedView: hostedView,
                     to: host,
@@ -9535,6 +9590,15 @@ struct GhosttyTerminalView: NSViewRepresentable {
             }
         }
 #endif
+        if let hostedView,
+           let signpostID = AppDelegate.shared?.tabManager?.currentSwitchSignpostID {
+            WorkspaceSwitchSignpost.event(
+                signpostID,
+                "swiftui.dismantle",
+                "surface=\(hostedView.debugSurfaceId?.uuidString.prefix(5) ?? "nil") " +
+                "inWindow=\(hostedView.window != nil ? 1 : 0)"
+            )
+        }
 
         if let host = nsView as? HostContainerView {
             host.onDidMoveToWindow = nil
