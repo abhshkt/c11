@@ -15,6 +15,7 @@ on:
       - 'docs/**'
       - 'notes/**'
       - 'Resources/Localizable.xcstrings'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
