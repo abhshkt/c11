@@ -187,7 +187,11 @@ enum WorkspaceBlueprintMarkdown {
         out += "## Layout\n\n"
         out += "```yaml\n"
         out += "layout:\n"
-        out += emitLayoutNode(file.plan.layout, surfaces: file.plan.surfaces, indent: 2, listItem: true)
+        // The list under `layout:` is indented by 2 (dash) / 4 (content) so
+        // the parser sees `- ...` at indent > 0 and reads it as the value of
+        // `layout`. The recursive calls below add `+4` per nesting level,
+        // which keeps the whole tree consistent with the schema example.
+        out += emitLayoutNode(file.plan.layout, surfaces: file.plan.surfaces, indent: 4, listItem: true)
         out += "```\n"
         return out.data(using: .utf8) ?? Data()
     }

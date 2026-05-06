@@ -159,7 +159,9 @@ enum MarkdownSyntaxTokenizer {
         for entry in inlineRegexes {
             entry.regex.enumerateMatches(in: str, options: [], range: range) { match, _, _ in
                 guard let match else { return }
-                tokens.append(MarkdownToken(range: match.range, kind: entry.kind))
+                for kind in entry.kinds {
+                    tokens.append(MarkdownToken(range: match.range, kind: kind))
+                }
             }
         }
     }
@@ -319,22 +321,30 @@ enum MarkdownSyntaxTokenizer {
 
     private struct InlineRegex {
         let regex: NSRegularExpression
-        let kind: MarkdownTokenKind
+        let kinds: [MarkdownTokenKind]
     }
 
     private static let inlineRegexes: [InlineRegex] = {
-        let entries: [(String, MarkdownTokenKind)] = [
-            (#"\*\*(?=\S)[\s\S]+?(?<=\S)\*\*"#, .bold),
-            (#"__(?=\S)[\s\S]+?(?<=\S)__"#, .bold),
-            (#"~~(?=\S)[\s\S]+?(?<=\S)~~"#, .strikethrough),
-            (#"(?<![\w*])\*(?!\*)[^*\n]+?(?<!\*)\*(?![\w*])"#, .italic),
-            (#"(?<![\w_])_(?!_)[^_\n]+?(?<!_)_(?![\w_])"#, .italic),
-            (#"`+[^`\n]+?`+"#, .inlineCode),
-            (#"\[[^\]\n]*\]\([^)\n]*\)"#, .link),
-            (#"\\[\\`*_{}\[\]()#+\-.!~|<>]"#, .escape),
+        // Triple-emphasis (`***word***` / `___word___`) is the classic markdown
+        // corner case: it carries BOTH bold and italic semantics, so we emit
+        // two tokens for the same range. The styler tolerates overlap, and the
+        // regexes are anchored on three markers so they short-circuit fast on
+        // lines without triple emphasis. These run first so callers don't have
+        // to dedupe against the narrower `**…**` / `__…__` hits below.
+        let entries: [(String, [MarkdownTokenKind])] = [
+            (#"\*\*\*(?=\S)[\s\S]+?(?<=\S)\*\*\*"#, [.bold, .italic]),
+            (#"___(?=\S)[\s\S]+?(?<=\S)___"#, [.bold, .italic]),
+            (#"\*\*(?=\S)[\s\S]+?(?<=\S)\*\*"#, [.bold]),
+            (#"__(?=\S)[\s\S]+?(?<=\S)__"#, [.bold]),
+            (#"~~(?=\S)[\s\S]+?(?<=\S)~~"#, [.strikethrough]),
+            (#"(?<![\w*])\*(?!\*)[^*\n]+?(?<!\*)\*(?![\w*])"#, [.italic]),
+            (#"(?<![\w_])_(?!_)[^_\n]+?(?<!_)_(?![\w_])"#, [.italic]),
+            (#"`+[^`\n]+?`+"#, [.inlineCode]),
+            (#"\[[^\]\n]*\]\([^)\n]*\)"#, [.link]),
+            (#"\\[\\`*_{}\[\]()#+\-.!~|<>]"#, [.escape]),
         ]
-        return entries.map { pattern, kind in
-            InlineRegex(regex: try! NSRegularExpression(pattern: pattern, options: []), kind: kind)
+        return entries.map { pattern, kinds in
+            InlineRegex(regex: try! NSRegularExpression(pattern: pattern, options: []), kinds: kinds)
         }
     }()
 }
