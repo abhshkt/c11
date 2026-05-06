@@ -341,7 +341,19 @@ struct MarkdownPanelView: View {
             : Color(nsColor: NSColor(white: 0.98, alpha: 1.0))
     }
 
+    // The MarkdownUI `Theme` is built from ~25 closure modifiers; allocating a
+    // fresh one per access on every body re-eval (and per segment in
+    // `ForEach(panel.segments)`) was a dominant cost on the editor→preview
+    // toggle. The theme only depends on `colorScheme`, so we precompute one
+    // theme per scheme and hand back the cached value.
+    private static let lightMarkdownTheme: Theme = makeCmuxMarkdownTheme(colorScheme: .light)
+    private static let darkMarkdownTheme: Theme = makeCmuxMarkdownTheme(colorScheme: .dark)
+
     private var cmuxMarkdownTheme: Theme {
+        colorScheme == .dark ? Self.darkMarkdownTheme : Self.lightMarkdownTheme
+    }
+
+    private static func makeCmuxMarkdownTheme(colorScheme: ColorScheme) -> Theme {
         let isDark = colorScheme == .dark
 
         return Theme()

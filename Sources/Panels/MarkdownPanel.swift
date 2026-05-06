@@ -308,16 +308,25 @@ final class MarkdownPanel: Panel, ObservableObject {
         return "\(index):\(prefix.hashValue)"
     }
 
-    /// Build a regex that matches fenced code blocks for all registered renderer tags.
+    /// Cached regex matching fenced code blocks for all registered renderer tags.
     /// Pattern captures: group 1 = language tag, group 2 = code content.
-    private static func buildFencedCodePattern() -> NSRegularExpression? {
+    ///
+    /// Compiling the regex on every `parseSegments()` call (toggle, autosave,
+    /// external reload) was a hot-path allocation. Renderers register exactly
+    /// once at app startup (`AppDelegate.applicationDidFinishLaunching`), so
+    /// `supportedTags` is stable by the time any markdown panel parses
+    /// content; a `static let` evaluated lazily on first access is safe.
+    /// Swift `static let` initialization is itself thread-safe (dispatch_once
+    /// semantics), and `NSRegularExpression` is documented as thread-safe to
+    /// use from multiple threads after construction.
+    private static let fencedCodePattern: NSRegularExpression? = {
         let tags = FencedCodeRendererRegistry.shared.supportedTags
         guard !tags.isEmpty else { return nil }
         let escaped = tags.map { NSRegularExpression.escapedPattern(for: $0) }
         let alternation = escaped.joined(separator: "|")
         let pattern = "```(\(alternation))\\s*\\n([\\s\\S]*?)```"
         return try? NSRegularExpression(pattern: pattern, options: [])
-    }
+    }()
 
     /// Parse content into segments, splitting on fenced code blocks with registered renderers.
     private func parseSegments() {
@@ -327,7 +336,7 @@ final class MarkdownPanel: Panel, ObservableObject {
             return
         }
 
-        guard let pattern = Self.buildFencedCodePattern() else {
+        guard let pattern = Self.fencedCodePattern else {
             // No renderers registered — plain markdown
             segments = [.markdown(id: Self.segmentId(index: 0, content: text), content: text)]
             return
