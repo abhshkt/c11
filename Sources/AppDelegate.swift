@@ -2827,6 +2827,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationWillResignActive(_ notification: Notification) {
         guard !isTerminatingApp else { return }
+        // Flush any dirty markdown buffers BEFORE the snapshot save: if the OS
+        // suspends/kills c11 while backgrounded, up to the autosave debounce
+        // window (~600ms) of edits would otherwise be lost. The flush is
+        // idempotent per panel (no-op when the buffer is clean).
+        flushDirtyMarkdownBuffersAcrossWindows()
         _ = saveSessionSnapshot(includeScrollback: false)
     }
 

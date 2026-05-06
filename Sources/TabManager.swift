@@ -1186,20 +1186,22 @@ class TabManager: ObservableObject {
         // dropped to nil.
         //
         // Two paths now:
-        //   - Editor mounted (`activeTextView != nil`): make first responder
-        //     synchronously and call `performTextFinderAction(_:)` directly
-        //     on the text view, same runloop tick as the menu fired.
-        //   - Editor not yet mounted (preview-only, or mid-mount): set
-        //     `pendingFindRequest` and call `markdownPanel.focus()`. The
-        //     editor's Combine sink performs the find action after
-        //     `makeFirstResponder` on the next runloop iteration.
+        //   - Editor mounted with a live window (`liveActiveTextView != nil`):
+        //     make first responder synchronously and call
+        //     `performTextFinderAction(_:)` directly on the text view, same
+        //     runloop tick as the menu fired.
+        //   - Editor not yet mounted, or mid-dismantle (text view exists but
+        //     its window is gone): set `pendingFindRequest` and call
+        //     `markdownPanel.focus()`. The editor's Combine sink performs the
+        //     find action after `makeFirstResponder` on the next runloop
+        //     iteration. `liveActiveTextView` (vs. raw `activeTextView`)
+        //     gates out the dismantle race where dispatching to a stranded
+        //     text view would silently no-op until the next focus.
         if let markdownPanel = focusedMarkdownPanel, markdownPanel.editMode {
             let findItem = NSMenuItem()
             findItem.tag = NSTextFinder.Action.showFindInterface.rawValue
-            if let textView = markdownPanel.activeTextView {
-                if let window = textView.window {
-                    window.makeFirstResponder(textView)
-                }
+            if let textView = markdownPanel.liveActiveTextView {
+                textView.window?.makeFirstResponder(textView)
                 textView.performTextFinderAction(findItem)
             } else {
                 markdownPanel.pendingFindRequest = true

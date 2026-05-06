@@ -6126,10 +6126,26 @@ final class Workspace: Identifiable, ObservableObject {
 
     /// Force-flush every dirty markdown panel synchronously. Called from
     /// `applicationWillTerminate` so unsaved edits land on disk before quit.
+    /// On failure we NSLog and surface the error via the panel's
+    /// `saveFailureMessage` (the same pipeline used by the editor's
+    /// debounced flush + dismantle-flush) instead of silently swallowing —
+    /// the operator at least sees a record post-relaunch and the alert
+    /// surfaces if the panel survives termination (e.g. resignActive path).
+    /// Errors do not block termination.
     func flushDirtyMarkdownBuffers() {
         for panel in panels.values {
             guard let markdownPanel = panel as? MarkdownPanel else { continue }
-            try? markdownPanel.flushSave()
+            do {
+                try markdownPanel.flushSave()
+            } catch {
+                NSLog("[Workspace] markdown flushSave failed for panel %@: %@", markdownPanel.id.uuidString, "\(error)")
+                let template = String(
+                    localized: "markdown.editor.saveFailed.message",
+                    defaultValue: "%@ could not be written. Your edits remain in the buffer; try saving again."
+                )
+                let message = String(format: template, markdownPanel.filePath ?? "")
+                markdownPanel.saveFailureMessage = message
+            }
         }
     }
 

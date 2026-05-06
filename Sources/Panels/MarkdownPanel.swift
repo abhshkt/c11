@@ -74,6 +74,19 @@ final class MarkdownPanel: Panel, ObservableObject {
     /// Not @Published: this is a referencing handle, not observable state.
     weak var activeTextView: NSTextView?
 
+    /// Returns `activeTextView` only when it's currently attached to a window.
+    /// The text view reference can outlive its window briefly during the
+    /// dismantle cycle (between AppKit's `viewWillMove(toWindow: nil)` and
+    /// the editor's `dismantleNSView` clearing the handle). Dispatching
+    /// `performTextFinderAction(_:)` to a windowless text view is a silent
+    /// no-op until the next focus, so synchronous Cmd-F dispatch should
+    /// consult this getter and fall through to the `pendingFindRequest`
+    /// deferred path when nil.
+    var liveActiveTextView: NSTextView? {
+        guard let tv = activeTextView, tv.window != nil else { return nil }
+        return tv
+    }
+
     /// One-shot flag set by `TabManager.startSearch()` when the markdown panel
     /// is in preview-only mode (no live text view). The Coordinator's
     /// `focusRequestToken` sink reads-and-clears it after `makeFirstResponder`
@@ -199,8 +212,41 @@ final class MarkdownPanel: Panel, ObservableObject {
     }
 
     func close() {
-        try? flushSave()
-        isClosed = true
+        // Try to commit any dirty buffer BEFORE flipping `isClosed`. If we
+        // flipped first, `flushSave()`'s `guard !isClosed` would short-circuit
+        // and the dismantleNSView fallback at MarkdownEditorView.swift would
+        // also no-op — silently dropping the buffer.
+        //
+        // On success: flip `isClosed` so subsequent calls (incl. the editor's
+        // dismantle-flush) are no-ops as before.
+        // On failure: surface the error via the existing `saveFailureMessage`
+        // pipeline (mirroring the dismantle pattern in MarkdownEditorView), and
+        // keep `isClosed` false so the dismantle-flush downstream still gets a
+        // chance against the still-dirty buffer. flushSave is idempotent —
+        // a second call with the same buffer either succeeds or throws again,
+        // it cannot double-write.
+        //
+        // The watcher and appearance observer are external-notification
+        // teardowns, independent of the buffer's persistence; tear them down
+        // unconditionally.
+        do {
+            try flushSave()
+            isClosed = true
+        } catch {
+            NSLog("[MarkdownPanel] save failed during close for panel %@: %@", id.uuidString, "\(error)")
+            let template = String(
+                localized: "markdown.editor.saveFailed.message",
+                defaultValue: "%@ could not be written. Your edits remain in the buffer; try saving again."
+            )
+            let message = String(format: template, filePath ?? "")
+            // Defer the @Published mutation: close() can be invoked while a
+            // SwiftUI body re-render is propagating panel removal, and a
+            // synchronous mutation would trip the cycle warning. Mirrors the
+            // dismantleNSView pattern.
+            DispatchQueue.main.async { [weak self] in
+                self?.saveFailureMessage = message
+            }
+        }
         stopFileWatcher()
         stopAppearanceObserver()
     }

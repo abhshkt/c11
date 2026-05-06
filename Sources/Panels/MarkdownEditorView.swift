@@ -85,6 +85,7 @@ struct MarkdownEditorView: NSViewRepresentable {
         weak var textView: MarkdownEditorTextView?
 
         private var autoSaveTask: Task<Void, Never>?
+        private var asyncHighlightTask: Task<Void, Never>?
         private var generation: Int = 0
         private var isApplyingAttributes = false
         private var isAssigningContent = false
@@ -218,14 +219,35 @@ struct MarkdownEditorView: NSViewRepresentable {
         private func scheduleAsyncHighlight(snapshot: NSString) {
             let myGen = generation
             let snapshotLength = snapshot.length
-            Task { [weak self] in
+            // Cancel the prior in-flight async highlight before queuing a new
+            // one. Previously each typing tick over the 256KB threshold spawned
+            // an unstored Task: only the `generation` check filtered stale
+            // RESULTS, but the tokenization (~130ms at 1MB) ran to completion
+            // and could pile up on the .utility queue when typing crossed the
+            // 250ms debounce window in bursts.
+            //
+            // Cancellation lands in two phases:
+            //   1. The 250ms `Task.sleep` throws on cancel — `try?` swallows
+            //      it and the `if Task.isCancelled` guard returns immediately.
+            //      This is the common case during fast typing.
+            //   2. After the sleep, `Task.detached` doesn't inherit our
+            //      cancellation, and `MarkdownSyntaxTokenizer.tokenize` is a
+            //      tight CPU loop with no cooperative cancellation hooks.
+            //      The pre-/post-`.value` and pre-`applyTokens` `isCancelled`
+            //      checks suppress the apply step; worst case we waste one
+            //      already-running tokenization. The `generation == myGen`
+            //      guard is the backup correctness check.
+            asyncHighlightTask?.cancel()
+            asyncHighlightTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 250_000_000)  // 250ms debounce
                 if Task.isCancelled { return }
                 let tokens = await Task.detached(priority: .utility) {
                     MarkdownSyntaxTokenizer.tokenize(snapshot)
                 }.value
+                if Task.isCancelled { return }
                 await MainActor.run {
                     guard let self else { return }
+                    guard !Task.isCancelled else { return }
                     guard self.generation == myGen else { return }
                     guard let tv = self.textView else { return }
                     self.applyTokens(tokens, in: tv, snapshotLength: snapshotLength)
@@ -297,6 +319,7 @@ struct MarkdownEditorView: NSViewRepresentable {
 
         func cancelTasks() {
             autoSaveTask?.cancel()
+            asyncHighlightTask?.cancel()
             cancellables.removeAll()
         }
     }

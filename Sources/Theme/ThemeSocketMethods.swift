@@ -210,8 +210,19 @@ public enum ThemeSocketMethods {
 
     public static func inherit(params: [String: Any]) -> [String: Any] {
         guard let parent = params["parent"] as? String,
-              let childName = params["as"] as? String else {
+              let rawChildName = params["as"] as? String else {
             return ["ok": false, "error": "missing required parameters: parent, as"]
+        }
+
+        // The child name flows into both a filesystem path component
+        // (`<name>.toml` under userThemesDirectory) and the cloned theme's
+        // identity in the registry. Validate it strictly *before* any work
+        // happens — a malicious `..`-bearing name would otherwise let an
+        // authenticated socket client clobber a same-user file outside the
+        // user themes directory.
+        let childName = rawChildName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let reason = validateChildThemeName(childName) {
+            return ["ok": false, "error": "invalid theme name: \(reason)"]
         }
 
         let parentTheme: C11muxTheme? = Self.mainSync {
@@ -219,6 +230,19 @@ public enum ThemeSocketMethods {
         }
         guard let parentTheme else {
             return ["ok": false, "error": "unknown parent theme: \(parent)"]
+        }
+
+        // Reject names that shadow a bundled theme. User-name collisions are
+        // allowed (forking your own theme is a documented use case); bundled
+        // collisions over the socket are not.
+        let bundledCollision: Bool = Self.mainSync {
+            guard let descriptor = ThemeManager.shared.descriptor(named: childName) else {
+                return false
+            }
+            return descriptor.source == .builtin
+        }
+        if bundledCollision {
+            return ["ok": false, "error": "invalid theme name: collides with bundled theme '\(childName)'"]
         }
 
         let cloned = C11muxTheme(
@@ -239,6 +263,18 @@ public enum ThemeSocketMethods {
         let userDir = ThemeManager.userThemesDirectory()
         let outputURL = userDir.appendingPathComponent("\(childName).toml")
 
+        // Defense-in-depth: even after the validation above, assert the
+        // resolved output path stays under the user themes directory.
+        // `standardizedFileURL` collapses `.`/`..` segments; comparing with
+        // `hasPrefix` on the standardized paths keeps `/private` and similar
+        // platform aliases consistent on both sides.
+        let userDirPath = userDir.standardizedFileURL.path
+        let outputPath = outputURL.standardizedFileURL.path
+        let boundaryPrefix = userDirPath.hasSuffix("/") ? userDirPath : userDirPath + "/"
+        if !outputPath.hasPrefix(boundaryPrefix) {
+            return ["ok": false, "error": "invalid theme name: out of bounds"]
+        }
+
         let fm = FileManager.default
         if !fm.fileExists(atPath: userDir.path) {
             try? fm.createDirectory(at: userDir, withIntermediateDirectories: true)
@@ -256,6 +292,60 @@ public enum ThemeSocketMethods {
             "name": childName,
             "path": outputURL.path
         ]
+    }
+
+    // MARK: - Theme name validation
+
+    /// Allowed characters for a user-supplied theme name destined for the
+    /// user themes directory. ASCII-only on purpose: the name becomes a
+    /// filesystem component on a shared multi-OS authoring path.
+    private static let allowedThemeNameCharacters: CharacterSet = {
+        var set = CharacterSet()
+        set.insert(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+        return set
+    }()
+
+    /// Validate a child theme name supplied via `theme.inherit`.
+    ///
+    /// Returns `nil` when the (already-trimmed) name is acceptable; otherwise
+    /// a short reason for inclusion in the socket error response. Bundled-name
+    /// collisions are checked by the caller so this helper stays free of
+    /// `@MainActor`-isolated `ThemeManager` access.
+    ///
+    /// Checks ordered so the most specific feedback wins:
+    ///   - empty
+    ///   - length cap (64 — generous for human-readable theme names)
+    ///   - control characters (incl. NUL)
+    ///   - path separators (`/`, `\`)
+    ///   - `..` traversal substring
+    ///   - leading `.` (hidden) or `-` (looks like a flag)
+    ///   - allowlist `[A-Za-z0-9._-]`
+    static func validateChildThemeName(_ name: String) -> String? {
+        if name.isEmpty {
+            return "empty"
+        }
+        if name.count > 64 {
+            return "too long (max 64 chars)"
+        }
+        for scalar in name.unicodeScalars where scalar.value < 0x20 {
+            return "contains control character"
+        }
+        if name.contains("/") || name.contains("\\") {
+            return "contains path separator"
+        }
+        if name.contains("..") {
+            return "contains '..'"
+        }
+        if name.hasPrefix(".") {
+            return "must not start with '.'"
+        }
+        if name.hasPrefix("-") {
+            return "must not start with '-'"
+        }
+        if name.rangeOfCharacter(from: allowedThemeNameCharacters.inverted) != nil {
+            return "must match [A-Za-z0-9._-]"
+        }
+        return nil
     }
 
     // MARK: - Helpers
