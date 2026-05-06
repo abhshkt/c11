@@ -350,6 +350,7 @@ final class BrowserProfileStore: ObservableObject {
 
     private let defaults: UserDefaults
     private var dataStores: [UUID: WKWebsiteDataStore] = [:]
+    private var remoteWorkspaceDataStores: [UUID: WKWebsiteDataStore] = [:]
     private var historyStores: [UUID: BrowserHistoryStore] = [:]
 
     init(defaults: UserDefaults = .standard) {
@@ -435,6 +436,29 @@ final class BrowserProfileStore: ObservableObject {
         }
         let store = WKWebsiteDataStore(forIdentifier: profileID)
         dataStores[profileID] = store
+        return store
+    }
+
+    /// Returns the workspace-scoped persistent `WKWebsiteDataStore` used by
+    /// browser panels in a remote workspace. Cached by identifier so every
+    /// panel attached to the same remote workspace shares one store
+    /// (cookies, local storage, IndexedDB), and so a panel moved into the
+    /// workspace via detach/attach gets the SAME instance the existing
+    /// panels are already using. Without this cache, each
+    /// `WKWebsiteDataStore(forIdentifier:)` call returns a brand-new
+    /// instance, which silently breaks cookie sharing across panels in the
+    /// same remote workspace and causes reference-equality assertions in
+    /// `BrowserPanelRemoteStoreTests` to fail.
+    ///
+    /// Kept distinct from `websiteDataStore(for:)` (profile cache) so a
+    /// remote-workspace identifier can never collide with a profile id and
+    /// so the two scopes can have independent invalidation rules.
+    func remoteWorkspaceWebsiteDataStore(for identifier: UUID) -> WKWebsiteDataStore {
+        if let existing = remoteWorkspaceDataStores[identifier] {
+            return existing
+        }
+        let store = WKWebsiteDataStore(forIdentifier: identifier)
+        remoteWorkspaceDataStores[identifier] = store
         return store
     }
 
@@ -2616,7 +2640,9 @@ final class BrowserPanel: Panel, ObservableObject {
         self.usesRemoteWorkspaceProxy = isRemoteWorkspace
         self.browserThemeMode = BrowserThemeSettings.mode()
         self.websiteDataStore = isRemoteWorkspace
-            ? WKWebsiteDataStore(forIdentifier: remoteWebsiteDataStoreIdentifier ?? workspaceId)
+            ? BrowserProfileStore.shared.remoteWorkspaceWebsiteDataStore(
+                for: remoteWebsiteDataStoreIdentifier ?? workspaceId
+            )
             : BrowserProfileStore.shared.websiteDataStore(for: resolvedProfileID)
 
         let webView = Self.makeWebView(
@@ -2992,7 +3018,9 @@ final class BrowserPanel: Panel, ObservableObject {
         lifecycle.updateWorkspaceId(newWorkspaceId)
         usesRemoteWorkspaceProxy = isRemoteWorkspace
         let targetStore = isRemoteWorkspace
-            ? WKWebsiteDataStore(forIdentifier: remoteWebsiteDataStoreIdentifier ?? newWorkspaceId)
+            ? BrowserProfileStore.shared.remoteWorkspaceWebsiteDataStore(
+                for: remoteWebsiteDataStoreIdentifier ?? newWorkspaceId
+            )
             : BrowserProfileStore.shared.websiteDataStore(for: profileID)
         let needsStoreSwap = webView.configuration.websiteDataStore !== targetStore
         websiteDataStore = targetStore
