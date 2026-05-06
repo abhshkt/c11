@@ -4347,6 +4347,16 @@ extension BrowserPanel {
 
         prepareDeveloperToolsForRevealIfNeeded(inspector)
 
+        // `attach` can make the inspector visible on its own (some WebKit
+        // builds, and the unit-test fake, route attach through show). Skip
+        // the explicit `show` call when that's already happened so a single
+        // reveal intent doesn't double-fire `show`.
+        if inspector.cmuxCallBool(selector: isVisibleSelector) ?? false {
+            developerToolsLastKnownVisibleAt = Date()
+            developerToolsDetachedOpenGraceDeadline = nil
+            return true
+        }
+
         let showSelector = NSSelectorFromString("show")
         guard inspector.responds(to: showSelector) else { return false }
         inspector.cmuxCallVoid(selector: showSelector)
@@ -4487,7 +4497,15 @@ extension BrowserPanel {
             forceDeveloperToolsRefreshOnNextAttach = false
         }
 
-        if visible != targetVisible {
+        // The transition settle window exists to coalesce rapid keyboard
+        // toggles (`testRapidToggleCoalescesToFinalVisibleIntentWithoutExtraInspectorCalls`).
+        // Imperative `show`/`hide`/`restore.*` callers expect synchronous
+        // completion — leaving them in the in-flight queue blocks follow-up
+        // work like `restoreDeveloperToolsAfterAttachIfNeeded`,
+        // `syncDeveloperToolsPreferenceFromInspector`, and the next user
+        // toggle from running until the 150ms settle fires.
+        let coalescesRapidToggles = source.hasPrefix("toggle")
+        if coalescesRapidToggles, visible != targetVisible {
             scheduleDeveloperToolsTransitionSettle(source: source)
         } else {
             developerToolsTransitionTargetVisible = nil
