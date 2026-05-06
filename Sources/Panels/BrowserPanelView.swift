@@ -5140,11 +5140,18 @@ struct WebViewRepresentable: NSViewRepresentable {
                Self.sizeApproximatelyEqual(previousSize, bounds.size, epsilon: 0.5) {
                 // Origin-only frame churn is common while the surrounding split layout
                 // settles. Reapplying the side-docked inspector at the same size fights
-                // WebKit's own dock layout and shows up as visible flicker.
+                // WebKit's own dock layout and shows up as visible flicker, so we skip
+                // reapply for the side-dock branch. For the manual (non-side-dock)
+                // resize path we still need to restore the user's stored width: WebKit
+                // can reset the inline inspector frames to its own defaults, and the
+                // user-driven divider drag must survive that reset.
                 if !isHostedInspectorSideDockActive() &&
-                    !isHostedInspectorDividerDragActive &&
-                    !hasStoredHostedInspectorWidthPreference {
-                    captureHostedInspectorPreferredWidthFromCurrentLayout(reason: "host.layout.sameSize")
+                    !isHostedInspectorDividerDragActive {
+                    if hasStoredHostedInspectorWidthPreference {
+                        reapplyHostedInspectorDividerToStoredWidthIfNeeded(reason: "host.layout.sameSize.manualReapply")
+                    } else {
+                        captureHostedInspectorPreferredWidthFromCurrentLayout(reason: "host.layout.sameSize")
+                    }
                 }
                 updateHostedInspectorDockControlAvailabilityIfNeeded(reason: "host.layout.sameSize")
                 notifyGeometryChangedIfNeeded()
@@ -5156,7 +5163,9 @@ struct WebViewRepresentable: NSViewRepresentable {
             lastHostedInspectorLayoutBoundsSize = bounds.size
             if isHostedInspectorSideDockActive() {
                 layoutHostedInspectorSideDockIfNeeded(reason: "host.layout.sideDock")
-            } else if !hasStoredHostedInspectorWidthPreference {
+            } else if hasStoredHostedInspectorWidthPreference {
+                reapplyHostedInspectorDividerToStoredWidthIfNeeded(reason: "host.layout.manualReapply")
+            } else {
                 captureHostedInspectorPreferredWidthFromCurrentLayout(reason: "host.layout")
             }
             updateHostedInspectorDockControlAvailabilityIfNeeded(reason: "host.layout")
@@ -5233,27 +5242,18 @@ struct WebViewRepresentable: NSViewRepresentable {
 #endif
                 return nil
             }
-            if let hostedInspectorHit {
-                let isSideDockHit = isHostedInspectorSideDockHit(hostedInspectorHit)
-                if let nativeHit = nativeHostedInspectorHit(at: point, hostedInspectorHit: hostedInspectorHit) {
+            if hostedInspectorHit != nil {
+                // Always claim the host at the divider edge so the manual resize
+                // path can capture mouseDown/mouseDragged regardless of whether
+                // the managed side-dock container has been promoted yet. The
+                // divider hit detection is intentionally narrow (10pt each side
+                // of the divider edge); interior inspector clicks fall through
+                // to the native WebKit hit path naturally because
+                // `hostedInspectorDividerHit` returns nil for them.
 #if DEBUG
-                    debugLogHitTest(stage: "hitTest.hostedInspectorNative", point: point, passThrough: false, hitView: nativeHit)
+                debugLogHitTest(stage: "hitTest.hostedInspectorManual", point: point, passThrough: false, hitView: self)
 #endif
-                    if !isSideDockHit ||
-                        (nativeHit !== hostedInspectorHit.inspectorView &&
-                            !hostedInspectorHit.inspectorView.isDescendant(of: nativeHit)) {
-                        return nativeHit
-                    }
-                }
-#if DEBUG
-                debugLogHitTest(
-                    stage: isSideDockHit ? "hitTest.hostedInspectorManual" : "hitTest.hostedInspectorFallback",
-                    point: point,
-                    passThrough: false,
-                    hitView: hostedInspectorHit.inspectorView
-                )
-#endif
-                return isSideDockHit ? self : hostedInspectorHit.inspectorView
+                return self
             }
             let hit = super.hitTest(point)
 #if DEBUG
@@ -5264,12 +5264,16 @@ struct WebViewRepresentable: NSViewRepresentable {
 
         override func mouseDown(with event: NSEvent) {
             let point = convert(event.locationInWindow, from: nil)
-            guard let hostedInspectorHit = hostedInspectorDividerHit(at: point),
-                  isHostedInspectorSideDockHit(hostedInspectorHit) else {
+            guard let hostedInspectorHit = hostedInspectorDividerHit(at: point) else {
                 super.mouseDown(with: event)
                 return
             }
 
+            // Initiate the manual divider drag for any divider hit, not just
+            // the managed side-dock case. WebKit's inline inspector layout
+            // doesn't always expose a hittable native divider at the edge
+            // (collapsed-page, transparent-edge, and full-height-overhang
+            // cases all need the host's manual drag to work).
             hostedInspectorReapplyWorkItem?.cancel()
             isHostedInspectorDividerDragActive = true
             hostedInspectorDividerDrag = HostedInspectorDividerDragState(
@@ -5661,8 +5665,8 @@ struct WebViewRepresentable: NSViewRepresentable {
 
         private func reapplyHostedInspectorDividerToStoredWidthIfNeeded(reason: String) {
             guard !isApplyingHostedInspectorLayout else { return }
+            guard !isHostedInspectorDividerDragActive else { return }
             guard let hit = hostedInspectorDividerCandidate() else { return }
-            guard isHostedInspectorSideDockHit(hit) else { return }
             guard let preferredWidth = resolvedPreferredHostedInspectorWidth(in: hit.containerView.bounds) else {
                 return
             }
