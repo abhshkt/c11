@@ -123,6 +123,14 @@ jobs:
         if: steps.cache-ghosttykit.outputs.cache-hit != 'true'
         run: ./scripts/download-prebuilt-ghosttykit.sh
 
+      - name: Cache Zig toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/bin/zig
+            /usr/local/lib/zig
+          key: zig-${{ runner.os }}-${{ runner.arch }}-0.15.2
+
       - name: Install zig
         # Required by the cmux scheme's Run Script build phase
         # (build-ghostty-cli-helper.sh), which compiles a small zig helper at
