@@ -8314,6 +8314,11 @@ private struct SidebarResizerAccessibilityModifier: ViewModifier {
 struct VerticalTabsSidebar: View {
     @ObservedObject var updateViewModel: UpdateViewModel
     @ObservedObject private var themeManager = ThemeManager.shared
+    /// C11-25: subscribe to per-surface CPU/RSS sampler revision bumps so
+    /// the sidebar re-evaluates at the sample cadence (default 2 Hz).
+    /// `TabItemView.==` short-circuits body re-eval when the row's
+    /// metrics value didn't change, so this stays cheap.
+    @ObservedObject private var surfaceMetricsSampler = SurfaceMetricsSampler.shared
     let onSendFeedback: () -> Void
     @EnvironmentObject var tabManager: TabManager
     @EnvironmentObject var notificationStore: TerminalNotificationStore
@@ -8336,6 +8341,8 @@ struct VerticalTabsSidebar: View {
     private var m1bSidebarTabItemMigrated = false
     @AppStorage(WorkspacePresentationModeSettings.modeKey)
     private var workspacePresentationMode = WorkspacePresentationModeSettings.defaultMode.rawValue
+    @AppStorage(ChromeScaleSettings.presetKey)
+    private var chromeScalePresetRaw = ChromeScaleSettings.defaultPreset.rawValue
 
     /// Space at top of sidebar for traffic light buttons
     private let trafficLightPadding: CGFloat = 28
@@ -8412,6 +8419,14 @@ struct VerticalTabsSidebar: View {
     var body: some View {
         let workspaceCount = tabManager.tabs.count
         let canCloseWorkspace = workspaceCount > 1
+        // Compute chrome-scale tokens once per parent eval. Threaded as a
+        // precomputed `let` to TabItemView so its typing-latency hot-path
+        // == comparison stays a single multiplier compare. (C11-6)
+        let chromeTokens = ChromeScaleTokens(
+            multiplier: ChromeScaleSettings.multiplier(
+                for: ChromeScaleSettings.preset(for: chromeScalePresetRaw)
+            )
+        )
 
         VStack(spacing: 0) {
             GeometryReader { proxy in
@@ -8450,6 +8465,15 @@ struct VerticalTabsSidebar: View {
                                         sources: sources
                                     )
                                 }()
+                                // C11-25: read the focused surface's most recent CPU/RSS
+                                // sample as a precomputed `let`. The sampler's revision is
+                                // observed at the struct level so this re-evaluates at the
+                                // sample cadence; equality on the resolved sample (rounded
+                                // for stability) decides whether the row body re-renders.
+                                let surfaceMetricsSample: SurfaceMetricsSampler.Sample? = {
+                                    guard let focusedId = tab.focusedPanelId else { return nil }
+                                    return SurfaceMetricsSampler.shared.sample(forSurfaceId: focusedId)
+                                }()
                                 TabItemView(
                                     tabManager: tabManager,
                                     notificationStore: notificationStore,
@@ -8457,6 +8481,7 @@ struct VerticalTabsSidebar: View {
                                     index: index,
                                     isActive: isActive,
                                     agentChip: agentChip,
+                                    surfaceMetricsSample: surfaceMetricsSample,
                                     workspaceShortcutDigit: WorkspaceShortcutMapper.commandDigitForWorkspace(
                                         at: index,
                                         workspaceCount: workspaceCount
@@ -8486,7 +8511,8 @@ struct VerticalTabsSidebar: View {
                                     remoteContextMenuWorkspaceIds: remoteContextMenuTargets.map(\.id),
                                     allRemoteContextMenuTargetsConnecting: !remoteContextMenuTargets.isEmpty && remoteContextMenuTargets.allSatisfy { $0.remoteConnectionState == .connecting },
                                     allRemoteContextMenuTargetsDisconnected: !remoteContextMenuTargets.isEmpty && remoteContextMenuTargets.allSatisfy { $0.remoteConnectionState == .disconnected },
-                                    sidebarFlashToken: tab.sidebarFlashToken
+                                    sidebarFlashToken: tab.sidebarFlashToken,
+                                    chromeTokens: chromeTokens
                                 )
                                 .equatable()
                             }
@@ -10919,6 +10945,7 @@ private struct TabItemView: View, Equatable {
         lhs.index == rhs.index &&
         lhs.isActive == rhs.isActive &&
         lhs.agentChip == rhs.agentChip &&
+        TabItemView.surfaceMetricsEqual(lhs.surfaceMetricsSample, rhs.surfaceMetricsSample) &&
         lhs.workspaceShortcutDigit == rhs.workspaceShortcutDigit &&
         lhs.canCloseWorkspace == rhs.canCloseWorkspace &&
         lhs.accessibilityWorkspaceCount == rhs.accessibilityWorkspaceCount &&
@@ -10931,7 +10958,41 @@ private struct TabItemView: View, Equatable {
         lhs.remoteContextMenuWorkspaceIds == rhs.remoteContextMenuWorkspaceIds &&
         lhs.allRemoteContextMenuTargetsConnecting == rhs.allRemoteContextMenuTargetsConnecting &&
         lhs.allRemoteContextMenuTargetsDisconnected == rhs.allRemoteContextMenuTargetsDisconnected &&
-        lhs.sidebarFlashToken == rhs.sidebarFlashToken
+        lhs.sidebarFlashToken == rhs.sidebarFlashToken &&
+        lhs.chromeTokens == rhs.chromeTokens
+    }
+
+    /// Equality on metric samples is rounded so sub-percent / sub-MB
+    /// jitter at the 2 Hz sample cadence does not invalidate
+    /// `TabItemView.==` and force body re-eval. We only redraw when the
+    /// rendered text would change.
+    nonisolated static func surfaceMetricsEqual(
+        _ a: SurfaceMetricsSampler.Sample?,
+        _ b: SurfaceMetricsSampler.Sample?
+    ) -> Bool {
+        switch (a, b) {
+        case (nil, nil):
+            return true
+        case let (a?, b?):
+            return Int(a.cpuPct.rounded()) == Int(b.cpuPct.rounded())
+                && Int(a.rssMb.rounded()) == Int(b.rssMb.rounded())
+        default:
+            return false
+        }
+    }
+
+    /// Render a Sample as a compact "<cpu>% <mem>" string.
+    /// CPU is integer percent (0%–800% on multi-core spikes); memory is
+    /// integer MB up to 1024, otherwise 1-decimal GB.
+    nonisolated static func formatSurfaceMetrics(_ sample: SurfaceMetricsSampler.Sample) -> String {
+        let cpu = "\(Int(sample.cpuPct.rounded()))%"
+        let mem: String
+        if sample.rssMb >= 1024 {
+            mem = String(format: "%.1fGB", sample.rssMb / 1024)
+        } else {
+            mem = "\(Int(sample.rssMb.rounded()))MB"
+        }
+        return "\(cpu) \(mem)"
     }
 
     // Use plain references instead of @EnvironmentObject to avoid subscribing
@@ -10944,6 +11005,10 @@ private struct TabItemView: View, Equatable {
     let index: Int
     let isActive: Bool
     let agentChip: AgentChip?
+    /// C11-25: most recent CPU/RSS sample for the workspace's focused
+    /// surface, or nil when no PID is registered (terminals — pending
+    /// the TTY → child PID resolver follow-up).
+    let surfaceMetricsSample: SurfaceMetricsSampler.Sample?
     let workspaceShortcutDigit: Int?
     let canCloseWorkspace: Bool
     let accessibilityWorkspaceCount: Int
@@ -10967,6 +11032,9 @@ private struct TabItemView: View, Equatable {
     /// running a single, gentle pulse in the same accent color used for
     /// other workspace affordances. Visual-only; never selects.
     let sidebarFlashToken: Int
+    /// Chrome scale tokens (sidebar+tab strip font/sizing multipliers). Value-typed
+    /// and Equatable so it folds into `==` as a single multiplier compare. (C11-6)
+    let chromeTokens: ChromeScaleTokens
     @State private var isHovering = false
     @State private var rowHeight: CGFloat = 1
     @State private var sidebarFlashOpacity: Double = 0
@@ -11152,7 +11220,7 @@ private struct TabItemView: View, Equatable {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(remoteWorkspaceSidebarText)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: chromeTokens.sidebarWorkspaceMetadata, design: .monospaced))
                         .foregroundColor(activeSecondaryColor(0.8))
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -11160,7 +11228,7 @@ private struct TabItemView: View, Equatable {
                     Spacer(minLength: 0)
 
                     Text(remoteConnectionStatusText)
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: chromeTokens.sidebarWorkspaceAccessory, weight: .medium))
                         .foregroundColor(activeSecondaryColor(0.58))
                         .lineLimit(1)
                 }
@@ -11237,7 +11305,7 @@ private struct TabItemView: View, Equatable {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .top, spacing: 6) {
                 Text(tab.title)
-                    .font(.system(size: 12.5, weight: titleFontWeight))
+                    .font(.system(size: chromeTokens.sidebarWorkspaceTitle, weight: titleFontWeight))
                     .foregroundColor(activePrimaryTextColor)
                     .lineLimit(2)
                     .truncationMode(.tail)
@@ -11250,7 +11318,7 @@ private struct TabItemView: View, Equatable {
                 HStack(spacing: 5) {
                     if tab.isPinned {
                         Image(systemName: "pin.fill")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: chromeTokens.sidebarWorkspaceAccessory, weight: .semibold))
                             .foregroundColor(activeSecondaryColor(0.8))
                     }
 
@@ -11259,7 +11327,7 @@ private struct TabItemView: View, Equatable {
                             Circle()
                                 .fill(activeUnreadBadgeFillColor)
                             Text("\(unreadCount)")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.system(size: chromeTokens.sidebarWorkspaceAccessory, weight: .semibold))
                                 // Badge fill is always gold (`activeUnreadBadgeFillColor`).
                                 // Use black on the gold circle whenever the tab is the
                                 // active selection in .solidFill — including custom-color
@@ -11280,7 +11348,7 @@ private struct TabItemView: View, Equatable {
                         tabManager.closeWorkspaceWithConfirmation(tab)
                     }) {
                         Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .medium))
+                            .font(.system(size: chromeTokens.sidebarWorkspaceAccessory, weight: .medium))
                             .foregroundColor(activeSecondaryColor(0.7))
                     }
                     .buttonStyle(.plain)
@@ -11293,7 +11361,7 @@ private struct TabItemView: View, Equatable {
                         Text(workspaceShortcutLabel)
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
-                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .font(.system(size: chromeTokens.sidebarWorkspaceDetail, weight: .semibold, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(activePrimaryTextColor)
                             .padding(.horizontal, 6)
@@ -11319,13 +11387,26 @@ private struct TabItemView: View, Equatable {
                         secondary: activeSecondaryColor(0.68)
                     )
                     Spacer(minLength: 0)
+                    // C11-25: per-surface CPU/RSS rendered next to the
+                    // agent chip when a sample is available. Terminal
+                    // PID resolution is a follow-up; terminals show no
+                    // metrics until that lands. Format keeps the row
+                    // narrow: integer percent + integer MB or 1-decimal
+                    // GB. Equality in `==` is rounded for stability.
+                    if let sample = surfaceMetricsSample {
+                        Text(TabItemView.formatSurfaceMetrics(sample))
+                            .font(.system(size: 9, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundColor(activeSecondaryColor(0.55))
+                            .accessibilityIdentifier("SidebarTabSurfaceMetrics")
+                    }
                 }
                 .padding(.top, 1)
             }
 
             if let subtitle = effectiveSubtitle {
                 Text(subtitle)
-                    .font(.system(size: 10))
+                    .font(.system(size: chromeTokens.sidebarWorkspaceDetail))
                     .foregroundColor(activeSecondaryColor(0.8))
                     .lineLimit(2)
                     .truncationMode(.tail)
@@ -11359,10 +11440,10 @@ private struct TabItemView: View, Equatable {
             if detailVisibility.showsLog, let latestLog = tab.logEntries.last {
                 HStack(spacing: 4) {
                     Image(systemName: logLevelIcon(latestLog.level))
-                        .font(.system(size: 8))
+                        .font(.system(size: chromeTokens.sidebarWorkspaceLogIcon))
                         .foregroundColor(logLevelColor(latestLog.level, isActive: usesInvertedActiveForeground))
                     Text(latestLog.message)
-                        .font(.system(size: 10))
+                        .font(.system(size: chromeTokens.sidebarWorkspaceMetadata))
                         .foregroundColor(activeSecondaryColor(0.8))
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -11386,7 +11467,7 @@ private struct TabItemView: View, Equatable {
 
                     if let label = progress.label {
                         Text(label)
-                            .font(.system(size: 9))
+                            .font(.system(size: chromeTokens.sidebarWorkspaceProgressLabel))
                             .foregroundColor(activeSecondaryColor(0.6))
                             .lineLimit(1)
                     }
@@ -11401,7 +11482,7 @@ private struct TabItemView: View, Equatable {
                         HStack(alignment: .top, spacing: 3) {
                             if sidebarShowGitBranchIcon, branchLinesContainBranch {
                                 Image(systemName: "arrow.triangle.branch")
-                                    .font(.system(size: 9))
+                                    .font(.system(size: chromeTokens.sidebarWorkspaceAccessory))
                                     .foregroundColor(activeSecondaryColor(0.6))
                             }
                             VStack(alignment: .leading, spacing: 1) {
@@ -11409,20 +11490,20 @@ private struct TabItemView: View, Equatable {
                                     HStack(spacing: 3) {
                                         if let branch = line.branch {
                                             Text(branch)
-                                                .font(.system(size: 10, design: .monospaced))
+                                                .font(.system(size: chromeTokens.sidebarWorkspaceMetadata, design: .monospaced))
                                                 .foregroundColor(activeSecondaryColor(0.75))
                                                 .lineLimit(1)
                                                 .truncationMode(.tail)
                                         }
                                         if line.branch != nil, line.directory != nil {
                                             Image(systemName: "circle.fill")
-                                                .font(.system(size: 3))
+                                                .font(.system(size: chromeTokens.sidebarWorkspaceBranchDot))
                                                 .foregroundColor(activeSecondaryColor(0.6))
                                                 .padding(.horizontal, 1)
                                         }
                                         if let directory = line.directory {
                                             Text(directory)
-                                                .font(.system(size: 10, design: .monospaced))
+                                                .font(.system(size: chromeTokens.sidebarWorkspaceMetadata, design: .monospaced))
                                                 .foregroundColor(activeSecondaryColor(0.75))
                                                 .lineLimit(1)
                                                 .truncationMode(.tail)
@@ -11436,11 +11517,11 @@ private struct TabItemView: View, Equatable {
                     HStack(spacing: 3) {
                         if sidebarShowGitBranchIcon, compactGitBranchSummaryText != nil {
                             Image(systemName: "arrow.triangle.branch")
-                                .font(.system(size: 9))
+                                .font(.system(size: chromeTokens.sidebarWorkspaceAccessory))
                                 .foregroundColor(activeSecondaryColor(0.6))
                         }
                         Text(dirRow)
-                            .font(.system(size: 10, design: .monospaced))
+                            .font(.system(size: chromeTokens.sidebarWorkspaceMetadata, design: .monospaced))
                             .foregroundColor(activeSecondaryColor(0.75))
                             .lineLimit(1)
                             .truncationMode(.tail)
@@ -11468,7 +11549,7 @@ private struct TabItemView: View, Equatable {
                                     .lineLimit(1)
                                 Spacer(minLength: 0)
                             }
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: chromeTokens.sidebarWorkspaceMetadata, weight: .semibold))
                             .foregroundColor(pullRequestForegroundColor)
                         }
                         .buttonStyle(.plain)
@@ -11480,7 +11561,7 @@ private struct TabItemView: View, Equatable {
             // Ports row
             if detailVisibility.showsPorts, !tab.listeningPorts.isEmpty {
                 Text(tab.listeningPorts.map { ":\($0)" }.joined(separator: ", "))
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: chromeTokens.sidebarWorkspaceMetadata, design: .monospaced))
                     .foregroundColor(activeSecondaryColor(0.75))
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -11823,6 +11904,28 @@ private struct TabItemView: View, Equatable {
             closeTabsAbove(tabId: tab.id)
         }
         .disabled(index == 0)
+
+        Divider()
+
+        // C11-25: hibernate / resume the right-clicked workspace. Mirrors
+        // the App menu bar's Workspace submenu (`c11App.swift:1394`) so
+        // the action is reachable from the sidebar where operators expect
+        // it (DoD #6 placement). Browser surfaces snapshot + terminate
+        // their WebContent processes and render a placeholder until
+        // resume; terminals stay on the auto-throttle path.
+        if tab.isHibernated {
+            Button(String(localized: "contextMenu.resumeWorkspace", defaultValue: "Resume Workspace")) {
+                tab.resume()
+            }
+        } else {
+            Button(String(localized: "contextMenu.hibernateWorkspace", defaultValue: "Hibernate Workspace")) {
+                tab.hibernate()
+            }
+            .help(String(
+                localized: "contextMenu.hibernateWorkspaceTooltip",
+                defaultValue: "Suspends browser surfaces in this workspace. Terminals stay on auto-throttle (already low-CPU when the workspace isn't focused)."
+            ))
+        }
 
         Divider()
 
@@ -12598,6 +12701,7 @@ private struct SidebarMetadataRows: View {
     let isActive: Bool
     let onFocus: () -> Void
 
+    @Environment(\.chromeScaleTokens) private var chromeTokens
     @State private var isExpanded: Bool = false
     private let collapsedEntryLimit = 3
 
@@ -12615,7 +12719,7 @@ private struct SidebarMetadataRows: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: chromeTokens.sidebarWorkspaceMetadata, weight: .semibold))
                 .foregroundColor(isActive ? activeSecondaryTextColor : .secondary.opacity(0.9))
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -12650,6 +12754,8 @@ private struct SidebarMetadataEntryRow: View {
     let isActive: Bool
     let onFocus: () -> Void
 
+    @Environment(\.chromeScaleTokens) private var chromeTokens
+
     var body: some View {
         Group {
             if let url = entry.url {
@@ -12682,8 +12788,8 @@ private struct SidebarMetadataEntryRow: View {
             Spacer(minLength: 0)
         }
         .font(entry.staleFromRestart
-            ? .system(size: 10, weight: .regular).italic()
-            : .system(size: 10, weight: .regular))
+            ? .system(size: chromeTokens.sidebarWorkspaceMetadata, weight: .regular).italic()
+            : .system(size: chromeTokens.sidebarWorkspaceMetadata, weight: .regular))
         .opacity(entry.staleFromRestart ? 0.55 : 1.0)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -12708,12 +12814,12 @@ private struct SidebarMetadataEntryRow: View {
         if iconRaw.hasPrefix("emoji:") {
             let value = String(iconRaw.dropFirst("emoji:".count))
             guard !value.isEmpty else { return nil }
-            return AnyView(Text(value).font(.system(size: 9)))
+            return AnyView(Text(value).font(.system(size: chromeTokens.sidebarWorkspaceAccessory)))
         }
         if iconRaw.hasPrefix("text:") {
             let value = String(iconRaw.dropFirst("text:".count))
             guard !value.isEmpty else { return nil }
-            return AnyView(Text(value).font(.system(size: 8, weight: .semibold)))
+            return AnyView(Text(value).font(.system(size: chromeTokens.sidebarWorkspaceLogIcon, weight: .semibold)))
         }
         let symbolName: String
         if iconRaw.hasPrefix("sf:") {
@@ -12722,7 +12828,7 @@ private struct SidebarMetadataEntryRow: View {
             symbolName = iconRaw
         }
         guard !symbolName.isEmpty else { return nil }
-        return AnyView(Image(systemName: symbolName).font(.system(size: 8, weight: .medium)))
+        return AnyView(Image(systemName: symbolName).font(.system(size: chromeTokens.sidebarWorkspaceLogIcon, weight: .medium)))
     }
 
     @ViewBuilder
@@ -12750,6 +12856,7 @@ private struct SidebarMetadataMarkdownBlocks: View {
     let isActive: Bool
     let onFocus: () -> Void
 
+    @Environment(\.chromeScaleTokens) private var chromeTokens
     @State private var isExpanded: Bool = false
     private let collapsedBlockLimit = 1
 
@@ -12771,7 +12878,7 @@ private struct SidebarMetadataMarkdownBlocks: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: chromeTokens.sidebarWorkspaceMetadata, weight: .semibold))
                 .foregroundColor(isActive ? .white.opacity(0.65) : .secondary.opacity(0.9))
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -12793,6 +12900,7 @@ private struct SidebarMetadataMarkdownBlockRow: View {
     let isActive: Bool
     let onFocus: () -> Void
 
+    @Environment(\.chromeScaleTokens) private var chromeTokens
     @State private var renderedMarkdown: AttributedString?
 
     var body: some View {
@@ -12805,7 +12913,7 @@ private struct SidebarMetadataMarkdownBlockRow: View {
                     .foregroundColor(foregroundColor)
             }
         }
-        .font(.system(size: 10))
+        .font(.system(size: chromeTokens.sidebarWorkspaceMetadata))
         .multilineTextAlignment(.leading)
         .fixedSize(horizontal: false, vertical: true)
         .contentShape(Rectangle())

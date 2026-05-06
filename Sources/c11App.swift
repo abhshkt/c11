@@ -191,6 +191,8 @@ struct cmuxApp: App {
     @AppStorage(KeyboardShortcutSettings.Action.closeWorkspace.defaultsKey) private var closeWorkspaceShortcutData = Data()
     @AppStorage(TabBarChromeSettings.stateKey) private var tabBarChromeStateRaw = TabBarChromeState.full.rawValue
     @AppStorage(KeyboardShortcutSettings.Action.toggleTabBarChrome.defaultsKey) private var toggleTabBarChromeShortcutData = Data()
+    @AppStorage(ChromeScaleSettings.presetKey) private var chromeScalePresetRaw = ChromeScaleSettings.defaultPreset.rawValue
+    @AppStorage(ChromeScaleSettings.customMultiplierKey) private var chromeScaleCustomMultiplier: Double = Double(ChromeScaleSettings.defaultCustomMultiplier)
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     private var browserToolbarAccessorySpacing: Int {
@@ -362,6 +364,12 @@ struct cmuxApp: App {
                 .environmentObject(notificationStore)
                 .environmentObject(sidebarState)
                 .environmentObject(sidebarSelectionState)
+                .environment(\.chromeScaleTokens, ChromeScaleTokens(
+                    multiplier: ChromeScaleSettings.multiplier(
+                        presetRaw: chromeScalePresetRaw,
+                        customMultiplier: chromeScaleCustomMultiplier
+                    )
+                ))
                 .onAppear {
 #if DEBUG
                     if ProcessInfo.processInfo.environment["CMUX_UI_TEST_MODE"] == "1" {
@@ -1388,6 +1396,29 @@ struct cmuxApp: App {
             closeSelectedWorkspacesAbove(in: manager)
         }
         .disabled(workspaceIndex == nil || workspaceIndex == 0)
+
+        Divider()
+
+        // C11-25: hibernate / resume the workspace. Browser surfaces
+        // capture a snapshot, terminate their WebContent processes, and
+        // render a placeholder until resume; terminals stay on the auto
+        // throttle path. The menu flips between Hibernate and Resume
+        // based on `workspace.isHibernated`.
+        if workspace?.isHibernated == true {
+            Button(String(localized: "contextMenu.resumeWorkspace", defaultValue: "Resume Workspace")) {
+                workspace?.resume()
+            }
+            .disabled(workspace == nil)
+        } else {
+            Button(String(localized: "contextMenu.hibernateWorkspace", defaultValue: "Hibernate Workspace")) {
+                workspace?.hibernate()
+            }
+            .disabled(workspace == nil)
+            .help(String(
+                localized: "contextMenu.hibernateWorkspaceTooltip",
+                defaultValue: "Suspends browser surfaces in this workspace. Terminals stay on auto-throttle (already low-CPU when the workspace isn't focused)."
+            ))
+        }
 
         Divider()
 
@@ -4375,6 +4406,10 @@ struct SettingsView: View {
     @AppStorage(SidebarBranchLayoutSettings.key) private var sidebarBranchVerticalLayout = SidebarBranchLayoutSettings.defaultVerticalLayout
     @AppStorage(SidebarActiveTabIndicatorSettings.styleKey)
     private var sidebarActiveTabIndicatorStyle = SidebarActiveTabIndicatorSettings.defaultStyle.rawValue
+    @AppStorage(ChromeScaleSettings.presetKey)
+    private var chromeScalePresetRaw = ChromeScaleSettings.defaultPreset.rawValue
+    @AppStorage(ChromeScaleSettings.customMultiplierKey)
+    private var chromeScaleCustomMultiplier: Double = Double(ChromeScaleSettings.defaultCustomMultiplier)
     @AppStorage("sidebarShowBranchDirectory") private var sidebarShowBranchDirectory = true
     @AppStorage("sidebarShowPullRequest") private var sidebarShowPullRequest = true
     @AppStorage(BrowserLinkOpenSettings.openSidebarPullRequestLinksInCmuxBrowserKey)
@@ -5037,6 +5072,48 @@ struct SettingsView: View {
             SettingsCardDivider()
 
             SettingsCardNote(String(localized: "settings.appearance.c11Theme.note", defaultValue: "c11 theme changes app chrome only; Ghostty terminal themes stay untouched."))
+        }
+
+        SettingsSectionHeader(title: String(localized: "settings.section.chromeScale", defaultValue: "App Chrome UI Scale"))
+        SettingsCard {
+            SettingsPickerRow(
+                String(localized: "settings.chromeScale.title", defaultValue: "App Chrome UI Scale"),
+                subtitle: String(
+                    localized: "settings.chromeScale.subtitle",
+                    defaultValue: "Scale c11 sidebar text and surface tab strip without changing terminal font size."
+                ),
+                controlWidth: pickerColumnWidth,
+                selection: $chromeScalePresetRaw
+            ) {
+                ForEach(ChromeScaleSettings.Preset.allCases) { preset in
+                    Text(preset.displayName).tag(preset.rawValue)
+                }
+            }
+
+            if ChromeScaleSettings.preset(for: chromeScalePresetRaw) == .custom {
+                SettingsCardDivider()
+                SettingsCardRow(
+                    String(localized: "settings.chromeScale.custom.label", defaultValue: "Custom Multiplier"),
+                    subtitle: String(
+                        localized: "settings.chromeScale.custom.subtitle",
+                        defaultValue: "Drag to fine-tune scale. Range 0.50× to 3.00×."
+                    )
+                ) {
+                    HStack(spacing: 8) {
+                        Slider(
+                            value: $chromeScaleCustomMultiplier,
+                            in: Double(ChromeScaleSettings.customMultiplierRange.lowerBound)
+                                ... Double(ChromeScaleSettings.customMultiplierRange.upperBound),
+                            step: 0.05
+                        )
+                        Text(String(format: "%.2f×", chromeScaleCustomMultiplier))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .frame(width: 56, alignment: .trailing)
+                    }
+                    .frame(width: pickerColumnWidth)
+                }
+            }
         }
 
         SettingsSectionHeader(title: String(localized: "settings.section.workspaceColors", defaultValue: "Workspace Colors"))

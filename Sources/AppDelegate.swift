@@ -2358,6 +2358,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // Register fenced code renderers for the markdown panel content pipeline.
         FencedCodeRendererRegistry.shared.register(MermaidRenderer.shared)
 
+        // C11-25: begin per-surface CPU/RSS sampling. Background timer; the
+        // sidebar reads samples via `SurfaceMetricsSampler.shared.sample(...)`
+        // during body eval. Idempotent — safe across UI tests that
+        // re-init the app delegate.
+        SurfaceMetricsSampler.shared.start()
+
         // Start watching the user themes directory for hot-reload.
         ThemeManager.shared.startWatchingUserThemes()
 
@@ -2777,6 +2783,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         isTerminatingApp = true
         flushDirtyMarkdownBuffersAcrossWindows()
+        // Surface to the socket so the `c11 claude-hook session-end` CLI
+        // (fired from claude's SessionEnd hook as terminals get killed)
+        // skips the surface-metadata clear that would race this same
+        // shutdown's snapshot capture. See `SessionEndShutdownPolicy`.
+        TerminalController.shared.setIsTerminatingApp(true)
         _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
         return .terminateNow
     }
@@ -2784,6 +2795,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationWillTerminate(_ notification: Notification) {
         isTerminatingApp = true
         flushDirtyMarkdownBuffersAcrossWindows()
+        TerminalController.shared.setIsTerminatingApp(true)
         _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
         stopSessionAutosaveTimer()
         TerminalController.shared.stop()
@@ -2820,6 +2832,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func persistSessionForUpdateRelaunch() {
         isTerminatingApp = true
+        TerminalController.shared.setIsTerminatingApp(true)
         _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
     }
 
