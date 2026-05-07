@@ -77,6 +77,34 @@ jobs:
               throw error;
             }
 
+      - name: Probe optional release secrets
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+        run: |
+          HAS_APPLE_CERT=false
+          HAS_NOTARY_CREDS=false
+          HAS_SPARKLE_KEY=false
+          HAS_SENTRY_TOKEN=false
+
+          [ -n "${APPLE_CERTIFICATE_BASE64:-}" ] && [ -n "${APPLE_CERTIFICATE_PASSWORD:-}" ] && [ -n "${APPLE_SIGNING_IDENTITY:-}" ] && HAS_APPLE_CERT=true
+          [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && HAS_NOTARY_CREDS=true
+          [ -n "${SPARKLE_PRIVATE_KEY:-}" ] && HAS_SPARKLE_KEY=true
+          [ -n "${SENTRY_AUTH_TOKEN:-}" ] && HAS_SENTRY_TOKEN=true
+
+          echo "HAS_APPLE_CERT=$HAS_APPLE_CERT" >> "$GITHUB_ENV"
+          echo "HAS_NOTARY_CREDS=$HAS_NOTARY_CREDS" >> "$GITHUB_ENV"
+          echo "HAS_SPARKLE_KEY=$HAS_SPARKLE_KEY" >> "$GITHUB_ENV"
+          echo "HAS_SENTRY_TOKEN=$HAS_SENTRY_TOKEN" >> "$GITHUB_ENV"
+
+          echo "Signing capability: cert=$HAS_APPLE_CERT notary=$HAS_NOTARY_CREDS sparkle=$HAS_SPARKLE_KEY sentry=$HAS_SENTRY_TOKEN"
+
       - name: Select Xcode
         if: steps.guard_release_assets.outputs.skip_all != 'true'
         run: |
@@ -145,14 +173,10 @@ jobs:
           go-version-file: daemon/remote/go.mod
 
       - name: Derive Sparkle public key from private key
-        if: steps.guard_release_assets.outputs.skip_all != 'true'
+        if: steps.guard_release_assets.outputs.skip_all != 'true' && env.HAS_SPARKLE_KEY == 'true'
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
-          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
-            echo "Missing SPARKLE_PRIVATE_KEY secret" >&2
-            exit 1
-          fi
           DERIVED_PUBLIC_KEY=$(swift scripts/derive_sparkle_public_key.swift "$SPARKLE_PRIVATE_KEY")
           echo "Derived Sparkle public key: $DERIVED_PUBLIC_KEY"
           echo "SPARKLE_PUBLIC_KEY=$DERIVED_PUBLIC_KEY" >> "$GITHUB_ENV"
@@ -173,7 +197,7 @@ jobs:
           ./scripts/build_remote_daemon_release_assets.sh \
             --version "$APP_VERSION" \
             --release-tag "$GITHUB_REF_NAME" \
-            --repo "Stage-11-Agentics/c11" \
+            --repo "${{ github.repository }}" \
             --output-dir "remote-daemon-assets"
           MANIFEST_JSON="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1], encoding="utf-8")), separators=(",",":")))' remote-daemon-assets/c11d-remote-manifest.json)"
           plutil -remove C11RemoteDaemonManifestJSON "$APP_PLIST" >/dev/null 2>&1 || true
@@ -197,7 +221,7 @@ jobs:
           [ -x "$HELPER_BINARY" ] || { echo "Ghostty theme picker helper not found at $HELPER_BINARY" >&2; exit 1; }
 
       - name: Inject Sparkle keys into Info.plist
-        if: steps.guard_release_assets.outputs.skip_all != 'true'
+        if: steps.guard_release_assets.outputs.skip_all != 'true' && env.HAS_SPARKLE_KEY == 'true'
         run: |
           APP_PLIST="build/Build/Products/Release/c11.app/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Delete :SUPublicEDKey" "$APP_PLIST" >/dev/null 2>&1 || true
@@ -205,25 +229,17 @@ jobs:
           echo "Adding SUPublicEDKey to Info.plist..."
           /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string ${SPARKLE_PUBLIC_KEY}" "$APP_PLIST"
           echo "Adding SUFeedURL to Info.plist..."
-          /usr/libexec/PlistBuddy -c "Add :SUFeedURL string https://github.com/Stage-11-Agentics/c11/releases/latest/download/appcast.xml" "$APP_PLIST"
+          /usr/libexec/PlistBuddy -c "Add :SUFeedURL string https://github.com/${{ github.repository }}/releases/latest/download/appcast.xml" "$APP_PLIST"
           echo "Verifying:"
           /usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$APP_PLIST"
           /usr/libexec/PlistBuddy -c "Print :SUFeedURL" "$APP_PLIST"
 
       - name: Import signing cert
-        if: steps.guard_release_assets.outputs.skip_all != 'true'
+        if: steps.guard_release_assets.outputs.skip_all != 'true' && env.HAS_APPLE_CERT == 'true'
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
-          if [ -z "$APPLE_CERTIFICATE_BASE64" ]; then
-            echo "Missing APPLE_CERTIFICATE_BASE64 secret" >&2
-            exit 1
-          fi
-          if [ -z "$APPLE_CERTIFICATE_PASSWORD" ]; then
-            echo "Missing APPLE_CERTIFICATE_PASSWORD secret" >&2
-            exit 1
-          fi
           KEYCHAIN_PASSWORD="$(uuidgen)"
           echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > /tmp/cert.p12
           security delete-keychain build.keychain >/dev/null 2>&1 || true
@@ -235,14 +251,10 @@ jobs:
           security list-keychains -d user -s build.keychain
 
       - name: Codesign app
-        if: steps.guard_release_assets.outputs.skip_all != 'true'
+        if: steps.guard_release_assets.outputs.skip_all != 'true' && env.HAS_APPLE_CERT == 'true'
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          if [ -z "$APPLE_SIGNING_IDENTITY" ]; then
-            echo "Missing APPLE_SIGNING_IDENTITY secret" >&2
-            exit 1
-          fi
           APP_PATH="build/Build/Products/Release/c11.app"
           ENTITLEMENTS="c11.entitlements"
           CLI_PATH="$APP_PATH/Contents/Resources/bin/c11"
@@ -257,20 +269,14 @@ jobs:
           /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
       - name: Notarize app
-        if: steps.guard_release_assets.outputs.skip_all != 'true'
+        if: steps.guard_release_assets.outputs.skip_all != 'true' && env.HAS_APPLE_CERT == 'true' && env.HAS_NOTARY_CREDS == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_APP_SPECIFIC_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
-            echo "Missing notarization secrets (APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID)" >&2
-            exit 1
-          fi
           APP_PATH="build/Build/Products/Release/c11.app"
           ZIP_SUBMIT="c11-notary.zip"
-          DMG_RELEASE="c11-macos.dmg"
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_SUBMIT"
           APP_SUBMIT_JSON="$(xcrun notarytool submit "$ZIP_SUBMIT" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait --output-format json)"
           APP_SUBMIT_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$APP_SUBMIT_JSON")"
@@ -284,12 +290,40 @@ jobs:
           xcrun stapler validate "$APP_PATH"
           spctl -a -vv --type execute "$APP_PATH"
           rm -f "$ZIP_SUBMIT"
-          # create-dmg generates a styled drag-to-install DMG
-          create-dmg \
-            --identity="$APPLE_SIGNING_IDENTITY" \
-            "$APP_PATH" \
-            ./
+
+      - name: Package DMG
+        if: steps.guard_release_assets.outputs.skip_all != 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          APP_PATH="build/Build/Products/Release/c11.app"
+          DMG_RELEASE="c11-macos.dmg"
+          # create-dmg generates a styled drag-to-install DMG. When no
+          # signing identity is available (forks without Apple secrets),
+          # produce an unsigned DMG; macOS Gatekeeper will warn on first
+          # launch but right-click -> Open clears it.
+          if [ "${HAS_APPLE_CERT:-false}" = "true" ]; then
+            create-dmg \
+              --identity="$APPLE_SIGNING_IDENTITY" \
+              "$APP_PATH" \
+              ./
+          else
+            create-dmg \
+              "$APP_PATH" \
+              ./ || {
+                echo "create-dmg returned non-zero (likely codesign warning on unsigned build); continuing if DMG was produced" >&2
+              }
+          fi
           mv ./c11*.dmg "$DMG_RELEASE"
+
+      - name: Notarize DMG
+        if: steps.guard_release_assets.outputs.skip_all != 'true' && env.HAS_APPLE_CERT == 'true' && env.HAS_NOTARY_CREDS == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG_RELEASE="c11-macos.dmg"
           DMG_SUBMIT_JSON="$(xcrun notarytool submit "$DMG_RELEASE" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait --output-format json)"
           DMG_SUBMIT_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$DMG_SUBMIT_JSON")"
           DMG_STATUS="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$DMG_SUBMIT_JSON")"
@@ -302,31 +336,23 @@ jobs:
           xcrun stapler validate "$DMG_RELEASE"
 
       - name: Upload dSYMs to Sentry
-        if: steps.guard_release_assets.outputs.skip_all != 'true'
+        if: steps.guard_release_assets.outputs.skip_all != 'true' && env.HAS_SENTRY_TOKEN == 'true'
         continue-on-error: true
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: stage-11-kl
           SENTRY_PROJECT: stage11-c11
         run: |
-          if [ -z "$SENTRY_AUTH_TOKEN" ]; then
-            echo "SENTRY_AUTH_TOKEN not set, skipping dSYM upload"
-            exit 0
-          fi
           brew install getsentry/tools/sentry-cli || true
           sentry-cli debug-files upload --include-sources build/Build/Products/Release/
 
       - name: Generate Sparkle appcast
-        if: steps.guard_release_assets.outputs.skip_all != 'true'
+        if: steps.guard_release_assets.outputs.skip_all != 'true' && env.HAS_SPARKLE_KEY == 'true'
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-          DOWNLOAD_URL_PREFIX: https://github.com/Stage-11-Agentics/c11/releases/download/${{ github.ref_name }}/
-          RELEASE_NOTES_URL: https://github.com/Stage-11-Agentics/c11/releases/tag/${{ github.ref_name }}
+          DOWNLOAD_URL_PREFIX: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/
+          RELEASE_NOTES_URL: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
         run: |
-          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
-            echo "Missing SPARKLE_PRIVATE_KEY secret" >&2
-            exit 1
-          fi
           ./scripts/sparkle_generate_appcast.sh c11-macos.dmg "$GITHUB_REF_NAME" appcast.xml
 
       - name: Upload release asset
@@ -346,7 +372,7 @@ jobs:
           overwrite_files: false
 
       - name: Cleanup keychain
-        if: always()
+        if: always() && env.HAS_APPLE_CERT == 'true'
         run: |
           security delete-keychain build.keychain >/dev/null 2>&1 || true
           rm -f /tmp/cert.p12
