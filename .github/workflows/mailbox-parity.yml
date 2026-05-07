@@ -110,6 +110,8 @@ jobs:
         # Required by the cmux scheme's Run Script build phase
         # (build-ghostty-cli-helper.sh), which compiles a small zig
         # helper at build time.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           ZIG_REQUIRED="0.15.2"
@@ -122,7 +124,10 @@ jobs:
             x86_64) ARCH="x86_64" ;;
             *) echo "Unsupported CPU arch: $(uname -m)" >&2; exit 1 ;;
           esac
-          curl -fSL --retry 5 --retry-all-errors --retry-max-time 300 --retry-delay 10 --speed-time 60 --speed-limit 100000 "https://ziglang.org/download/${ZIG_REQUIRED}/zig-${ARCH}-macos-${ZIG_REQUIRED}.tar.xz" -o /tmp/zig.tar.xz
+          gh release download "zig-${ZIG_REQUIRED}" \
+            --repo "${{ github.repository }}" \
+            --pattern "zig-${ARCH}-macos-${ZIG_REQUIRED}.tar.xz" \
+            --output /tmp/zig.tar.xz
           tar xf /tmp/zig.tar.xz -C /tmp
           sudo mkdir -p /usr/local/bin /usr/local/lib
           sudo cp -f /tmp/zig-${ARCH}-macos-${ZIG_REQUIRED}/zig /usr/local/bin/zig
