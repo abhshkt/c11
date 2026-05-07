@@ -88,7 +88,7 @@ jobs:
     # tests as they land. Heavy regression suites (typing-lag, UI resolution)
     # can be reinstated in nightly.yml if needed.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: macos-15-xlarge
+    runs-on: ${{ github.repository == 'Stage-11-Agentics/c11' && 'macos-15-xlarge' || 'macos-15' }}
     timeout-minutes: 15
     steps:
       - name: Checkout

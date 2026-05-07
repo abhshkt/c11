@@ -63,7 +63,7 @@ jobs:
   mailbox-unit:
     # Fork-PR guard: paid runner only for repo-owned refs.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: macos-15-xlarge
+    runs-on: ${{ github.repository == 'Stage-11-Agentics/c11' && 'macos-15-xlarge' || 'macos-15' }}
     timeout-minutes: 25
     steps:
       - name: Checkout

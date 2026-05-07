@@ -14,7 +14,7 @@ env:
 
 jobs:
   build-sign-notarize:
-    runs-on: macos-15-xlarge
+    runs-on: ${{ github.repository == 'Stage-11-Agentics/c11' && 'macos-15-xlarge' || 'macos-15' }}
     timeout-minutes: 60
     steps:
       - name: Checkout
