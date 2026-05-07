@@ -351,7 +351,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Post results to c11mux-dev-artifacts
-        if: always()
+        if: always() && github.repository == 'Stage-11-Agentics/c11'
         env:
           GH_TOKEN: ${{ secrets.DEV_ARTIFACTS_TOKEN }}
           TEST_RESULT: ${{ steps.tests.outputs.test_result || 'failed' }}
