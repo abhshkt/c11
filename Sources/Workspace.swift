@@ -6041,6 +6041,25 @@ final class Workspace: Identifiable, ObservableObject {
         return BrowserProfileStore.shared.effectiveLastUsedProfileID
     }
 
+    /// Returns the title string to push to Bonsplit for a panel, with the
+    /// markdown "unsaved" suffix (` *`) appended when the panel is an
+    /// editing MarkdownPanel that has uncommitted edits. Other panel types
+    /// return the bare sidebar label unchanged.
+    ///
+    /// The asterisk is a presentation-only suffix — `panelTitles[panelId]`
+    /// continues to store the bare title so it round-trips cleanly through
+    /// session snapshots, custom-title overrides, and metadata sync.
+    private func bonsplitTabTitle(forPanelId panelId: UUID) -> String? {
+        guard let panel = panels[panelId] else { return nil }
+        let baseTitle = panelTitles[panelId] ?? panel.displayTitle
+        let resolvedTitle = resolvedPanelTitle(panelId: panelId, fallback: baseTitle)
+        let sidebarLabel = TitleFormatting.sidebarLabel(from: resolvedTitle)
+        if let mp = panel as? MarkdownPanel, mp.isDirty {
+            return "\(sidebarLabel) *"
+        }
+        return sidebarLabel
+    }
+
     private func declareMarkdownTitleFromPanel(_ markdownPanel: MarkdownPanel) {
         guard let path = markdownPanel.filePath, !path.isEmpty else { return }
         let title = markdownPanel.displayTitle
@@ -6092,30 +6111,50 @@ final class Workspace: Identifiable, ObservableObject {
                 if self.panelTitles[markdownPanel.id] != newTitle {
                     self.panelTitles[markdownPanel.id] = newTitle
                 }
-                let resolvedTitle = self.resolvedPanelTitle(panelId: markdownPanel.id, fallback: newTitle)
-                let sidebarLabel = TitleFormatting.sidebarLabel(from: resolvedTitle)
-                guard existing.title != sidebarLabel else { return }
+                guard let displayedTitle = self.bonsplitTabTitle(forPanelId: markdownPanel.id) else { return }
+                guard existing.title != displayedTitle else { return }
                 self.bonsplitController.updateTab(
                     tabId,
-                    title: sidebarLabel,
+                    title: displayedTitle,
                     hasCustomTitle: self.panelCustomTitles[markdownPanel.id] != nil
                 )
             }
             .store(in: &subs)
 
         // Forward dirty-buffer state to the bonsplit tab so the dirty dot
-        // reflects unsaved edits. dirtyContent and content are both
-        // @Published, so observing either covers buffer mutation and save
-        // commits respectively. The .receive(on: main) hop ensures isDirty
-        // is read after the property has been updated.
+        // (rendered on inactive tabs) AND the trailing-asterisk title suffix
+        // (rendered on every tab including the active one, for parity with
+        // common doc-editor conventions) reflect unsaved edits.
+        // dirtyContent and content are both @Published, so observing either
+        // covers buffer mutation and save commits respectively. The
+        // `.receive(on: main)` hop ensures isDirty is read after the property
+        // has been updated.
+        //
+        // dirtyContent fires on every keystroke (the editor sets it to the
+        // current buffer in updateBuffer), so the sink is on the typing hot
+        // path for markdown editors. The change-guard below makes the common
+        // case a cheap read-and-compare — Bonsplit only sees an updateTab
+        // call on the first dirty keystroke (clean→dirty) and on save
+        // (dirty→clean), not per character.
         markdownPanel.$dirtyContent
             .map { _ in () }
             .merge(with: markdownPanel.$content.map { _ in () })
             .receive(on: DispatchQueue.main)
             .sink { [weak self, weak markdownPanel] in
                 guard let self, let markdownPanel,
-                      let tabId = self.surfaceIdFromPanelId(markdownPanel.id) else { return }
-                self.bonsplitController.updateTab(tabId, isDirty: markdownPanel.isDirty)
+                      let tabId = self.surfaceIdFromPanelId(markdownPanel.id),
+                      let existing = self.bonsplitController.tab(tabId) else { return }
+                let isDirty = markdownPanel.isDirty
+                let nextTitle = self.bonsplitTabTitle(forPanelId: markdownPanel.id)
+                let titleChanged = nextTitle != nil && existing.title != nextTitle
+                let dirtyChanged = existing.isDirty != isDirty
+                guard titleChanged || dirtyChanged else { return }
+                self.bonsplitController.updateTab(
+                    tabId,
+                    title: titleChanged ? nextTitle : nil,
+                    hasCustomTitle: titleChanged ? (self.panelCustomTitles[markdownPanel.id] != nil) : nil,
+                    isDirty: dirtyChanged ? isDirty : nil
+                )
             }
             .store(in: &subs)
 
@@ -6954,12 +6993,10 @@ final class Workspace: Identifiable, ObservableObject {
         }
 
         if let tabId = surfaceIdFromPanelId(panelId),
-           let panel = panels[panelId] {
-            let baseTitle = panelTitles[panelId] ?? panel.displayTitle
-            let sidebarLabel = TitleFormatting.sidebarLabel(from: resolvedPanelTitle(panelId: panelId, fallback: baseTitle))
+           let displayedTitle = bonsplitTabTitle(forPanelId: panelId) {
             bonsplitController.updateTab(
                 tabId,
-                title: sidebarLabel,
+                title: displayedTitle,
                 hasCustomTitle: panelCustomTitles[panelId] != nil
             )
         }
