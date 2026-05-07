@@ -91,14 +91,6 @@ jobs:
           rm GhosttyKit.xcframework.tar.gz
           test -d GhosttyKit.xcframework
 
-      - name: Cache Zig toolchain
-        uses: actions/cache@v4
-        with:
-          path: |
-            /usr/local/bin/zig
-            /usr/local/lib/zig
-          key: zig-${{ runner.os }}-${{ runner.arch }}-0.15.2
-
       - name: Install zig
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

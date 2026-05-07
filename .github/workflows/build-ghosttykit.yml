@@ -75,14 +75,6 @@ jobs:
           export DEVELOPER_DIR="$XCODE_DIR"
           xcodebuild -version
 
-      - name: Cache Zig toolchain
-        uses: actions/cache@v4
-        with:
-          path: |
-            /usr/local/bin/zig
-            /usr/local/lib/zig
-          key: zig-${{ runner.os }}-${{ runner.arch }}-0.15.2
-
       - name: Build GhosttyKit.xcframework
         if: steps.check-release.outputs.exists == 'false'
         env:
