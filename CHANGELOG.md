@@ -4,6 +4,36 @@ All notable changes to c11 (and, before the fork, cmux) are documented here.
 
 Note: historical entries below pre-date the `c11mux` → `c11` rename and reference the old binary / cask / artifact / bundle-ID names (`cmux`, `c11mux`, `c11mux-macos.dmg`, `stage-11-agentics/c11mux`, `com.stage11.c11mux`). Those entries are preserved as-is for historical accuracy; see the 0.38.0 section for the rename.
 
+## [0.47.0] - 2026-05-06
+
+### Added
+
+- **Markdown editor: in-place edit mode.** Each markdown panel now toggles between preview and edit via a pencil/eye button in the file-path header. The editor is `NSTextView`-backed with iA-Writer-style syntax-visible highlighting — bold, italic, headings, inline code, and fenced code are colored without hiding their markers. Autosave fires 600 ms after the last keystroke, and writes are atomic with self-write suppression so external editors and your own taps don't fight each other. IME composition is guarded so multi-keystroke input methods (Japanese, Korean, Chinese) keep their marked text under highlight repaints. Files larger than 256 KB hand off to an async tokenizer pass so first paint stays snappy. Encoding is preserved (UTF-8 / Latin-1 round-trip) and fenced-code delimiter character + length is preserved on save. Save failures surface through a `saveFailureMessage` alert. Restored panels focus the text view on mount. Cmd-F inside a markdown panel routes through a synchronous `activeTextView` handle plus a one-shot `pendingFindRequest` for the preview-only case, closing the responder-chain race that left the find action dropping to nil.
+
+- **Trailing `*` on markdown tab title for unsaved edits.** When a markdown panel has uncommitted edits, its Bonsplit tab title gains a presentation-only ` *` suffix. The underlying `panelTitles` store keeps the bare title so session snapshots, custom-title overrides, and metadata sync round-trip cleanly. Only the clean→dirty and dirty→clean transitions touch the tab; per-keystroke dirty-state events collapse to a cheap read-and-compare.
+
+### Changed
+
+- **Snappier preview→edit toggle on markdown panels.** The swift-markdown-ui theme is now two `static let` instances keyed on light/dark, and the fenced-code regex is promoted to a `static let` lazily computed from the registered renderer tags. A 10-segment doc no longer reallocates dozens of themes and recompiles the regex on every SwiftUI body re-eval. Visible output unchanged; eye-click frame is materially snappier.
+
+### Fixed
+
+- **Markdown save safety on app suspension and theme inherit.** `MarkdownPanel.close`, `Workspace.flushDirtyMarkdownBuffers`, and `AppDelegate.applicationWillResignActive` now use `do/catch` (replacing `try?`) and surface failures through `saveFailureMessage`, and dirty buffers flush on `resignActive` so an OS-initiated suspension can no longer drop up to 600 ms of unsaved edits. `theme.inherit` validates `childName` (allowlist + length + control-char + `..` + leading `.`/`-` + bundled-name collision) and asserts the resolved path stays under the user themes directory, closing a same-user file-clobber path via the socket. The async highlight task is stored and cancelled per-schedule and on teardown, so rapid typing in large docs no longer piles up detached tokenizations.
+
+- **Markdown tokenizer: triple-emphasis bold + italic.** `***word***` and `___word___` now emit both `.bold` and `.italic` tokens for the same range. Previously the `**…**` and `*…*` regexes never matched the italic half — every `*` inside `***word***` either had another `*` before it (failing the negative lookbehind) or after it (failing the negative lookahead) — so triple-emphasis spans rendered bold-only.
+
+- **Markdown panel: late delete-recreate watcher recovery.** `MarkdownPanel.focus()` re-arms the watcher when `isFileUnavailable && fileWatchSource == nil`; `scheduleReattach` polls 0.5 s × 6 (fast phase; atomic-replace stays instant) then 5 s indefinitely until `isClosed` or `filePath` becomes nil, closing the 3-second-cap regression where late recreates left the panel stuck on "File unavailable".
+
+- **Workspace blueprint markdown round-trip.** Outermost `emitLayoutNode` was passing `indent: 2`, putting `- ` at column 0 (same column as the `layout:` key) so the parser refused to consume the list as the value of `layout` and stored an empty scalar. Bumped to `indent: 4`; `.md` blueprint round-trip is now stable.
+
+- **Browser: shared cookies / localStorage / IndexedDB across panels in the same remote workspace.** `BrowserPanel`'s init and `reattachToWorkspace` were calling `WKWebsiteDataStore(forIdentifier:)` inline, returning a brand-new instance per call. Two browser panels in the same remote workspace ended up with distinct stores. Stores are now cached by identifier through a new `BrowserProfileStore.remoteWorkspaceWebsiteDataStore(for:)`, so panels in the same remote workspace share scope, including across detach/attach moves.
+
+- **Browser: hosted-inspector divider drag.** `WebViewRepresentable.HostContainerView` now claims any inspector-divider hit so the manual resize path engages even when WebKit's inline-inspector layout doesn't expose a hittable native divider. Stored widths reapply across WebKit's own layout cycles, so a user-set inspector width survives WebKit relayout.
+
+- **Browser: portal reveal / hide lifecycle.** Explicit hides now mark the rendering state as needing reattach so a subsequent reveal flushes WebKit's stale rendering tree and `visibilitychange` fires correctly inside the page. Anchor disposal and cross-window reparent fall through to the schedule-recovery + hide path instead of unconditionally preserving a stale frame on top of an unrelated pane.
+
+- **Browser: devtools reveal no longer double-fires `inspector.show()`.** `BrowserPanel.revealDeveloperTools` re-reads `isVisible` after `prepareDeveloperToolsForRevealIfNeeded` and skips the explicit `show` call if `attach` already made the inspector visible. The 150 ms transition-settle window now only schedules for `toggle`-prefixed sources, so imperative `show` / `hide` callers don't block follow-up work like `restoreDeveloperToolsAfterAttachIfNeeded`.
+
 ## [0.46.0] - 2026-05-06
 
 ### Added
