@@ -2116,6 +2116,27 @@ struct ContentView: View {
         .frame(maxHeight: .infinity, alignment: .topLeading)
     }
 
+    @ViewBuilder
+    private func sidebarBackdropLayer(width: CGFloat) -> some View {
+        SidebarBackdrop()
+            .frame(width: width, maxHeight: .infinity, alignment: .topLeading)
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+    }
+
+    private var sidebarPanelContainer: some View {
+        sidebarView
+            .frame(width: sidebarWidth, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var sidebarPanelWithBackdrop: some View {
+        ZStack(alignment: .leading) {
+            sidebarBackdropLayer(width: sidebarWidth)
+            sidebarPanelContainer
+        }
+        .frame(width: sidebarWidth, maxHeight: .infinity, alignment: .topLeading)
+    }
+
     /// Space at top of content area for the titlebar. This must be at least the actual titlebar
     /// height; otherwise controls like Bonsplit tab dragging can be interpreted as window drags.
     @State private var titlebarPadding: CGFloat = 32
@@ -2421,23 +2442,23 @@ struct ContentView: View {
     private var contentAndSidebarLayout: AnyView {
         let layout: AnyView
         if sidebarBlendMode == SidebarBlendModeOption.withinWindow.rawValue {
-            // Overlay mode: workspace content extends full width under the sidebar,
-            // allowing withinWindow blur/material to sample real content instead of
-            // the window background strip. behindWindow uses the non-overlapped HStack below.
+            // Overlay only the sidebar panel/backdrop. Keep portal-backed workspace
+            // content inset so terminals and browsers do not run under the sidebar.
             layout = AnyView(
                 ZStack(alignment: .leading) {
                     terminalContentWithSidebarDropOverlay
+                        .padding(.leading, sidebarState.isVisible ? sidebarWidth : 0)
                     if sidebarState.isVisible {
-                        sidebarView
+                        sidebarPanelWithBackdrop
                     }
                 }
             )
         } else {
-            // Standard HStack mode for behindWindow blur
+            // Standard HStack mode for behindWindow blur.
             layout = AnyView(
                 HStack(spacing: 0) {
                     if sidebarState.isVisible {
-                        sidebarView
+                        sidebarPanelWithBackdrop
                     }
                     terminalContentWithSidebarDropOverlay
                 }
@@ -8645,7 +8666,6 @@ struct VerticalTabsSidebar: View {
         }
         .accessibilityIdentifier("Sidebar")
         .ignoresSafeArea()
-        .background(SidebarBackdrop().ignoresSafeArea())
         .background(
             WindowAccessor { window in
                 modifierKeyMonitor.setHostWindow(window)

@@ -2001,6 +2001,16 @@ enum StartupLayoutGate {
         let terminalFrameInWindow: CGRect?
     }
 
+    enum GeometryRunReason: Equatable {
+        case settled
+        case timedOut
+    }
+
+    enum GeometryProbeDecision: Equatable {
+        case keepWaiting(nextPreviousSample: GeometrySample?)
+        case run(reason: GeometryRunReason)
+    }
+
     private static let geometryProbeInterval: TimeInterval = 1.0 / 60.0
     private nonisolated static let minimumUsableDimension: CGFloat = 1.0
 
@@ -2040,6 +2050,27 @@ enum StartupLayoutGate {
             && rectsApproximatelyEqual(previousTerminalFrame, currentTerminalFrame, epsilon: epsilon)
     }
 
+    nonisolated static func geometryProbeDecision(
+        previous: GeometrySample?,
+        current: GeometrySample?,
+        now: TimeInterval,
+        deadline: TimeInterval
+    ) -> GeometryProbeDecision {
+        if let current, isSettledGeometry(previous: previous, current: current) {
+            return .run(reason: .settled)
+        }
+        if now >= deadline {
+            return .run(reason: .timedOut)
+        }
+        guard let current else {
+            return .keepWaiting(nextPreviousSample: previous)
+        }
+        guard isUsableGeometrySample(current) else {
+            return .keepWaiting(nextPreviousSample: nil)
+        }
+        return .keepWaiting(nextPreviousSample: current)
+    }
+
     static func runWhenInitialTerminalAndGeometryReady(
         in workspace: Workspace,
         terminalTimeoutSeconds: TimeInterval = 3.0,
@@ -2073,7 +2104,12 @@ enum StartupLayoutGate {
             guard !resolved else { return }
             resolved = true
             cleanupTerminalObservers()
-            NSLog("Startup layout gate: initial terminal not ready after %.1fs", terminalTimeoutSeconds)
+#if DEBUG
+            dlog(
+                "startup.layoutGate.terminalTimeout workspace=\(workspace.id.uuidString.prefix(8)) " +
+                "timeoutSeconds=\(String(format: "%.1f", terminalTimeoutSeconds))"
+            )
+#endif
         }
 
         @MainActor
@@ -2179,20 +2215,36 @@ enum StartupLayoutGate {
                 return
             }
 
+            let sample: GeometrySample?
             if let window = terminalPanel.hostedView.window {
                 forceWindowLayout(window)
-                let sample = makeGeometrySample(window: window, terminalPanel: terminalPanel)
-                if isSettledGeometry(previous: previousSample, current: sample) {
-                    runAction()
-                    return
-                }
-                previousSample = isUsableGeometrySample(sample) ? sample : nil
+                sample = makeGeometrySample(window: window, terminalPanel: terminalPanel)
+            } else {
+                sample = nil
             }
 
-            if ProcessInfo.processInfo.systemUptime >= geometryDeadline {
-                NSLog("Startup layout gate: geometry did not settle after %.2fs; running startup layout anyway", geometryTimeoutSeconds)
+            let decision = geometryProbeDecision(
+                previous: previousSample,
+                current: sample,
+                now: ProcessInfo.processInfo.systemUptime,
+                deadline: geometryDeadline
+            )
+            switch decision {
+            case .run(reason: .settled):
                 runAction()
                 return
+            case .run(reason: .timedOut):
+#if DEBUG
+                dlog(
+                    "startup.layoutGate.geometryTimeout workspace=\(workspace.id.uuidString.prefix(8)) " +
+                    "panel=\(terminalPanel.id.uuidString.prefix(8)) " +
+                    "timeoutSeconds=\(String(format: "%.2f", geometryTimeoutSeconds)) running=1"
+                )
+#endif
+                runAction()
+                return
+            case .keepWaiting(let nextPreviousSample):
+                previousSample = nextPreviousSample
             }
 
             DispatchQueue.main.asyncAfter(deadline: .now() + geometryProbeInterval) {

@@ -1375,6 +1375,9 @@ class TabManager: ObservableObject {
 
     @MainActor
     private func sendWelcomeWhenReady(to workspace: Workspace) {
+        // The old no-AppDelegate welcome path used a fixed post-ready sleep.
+        // StartupLayoutGate now waits for hosted terminal geometry to settle, keeping
+        // this fallback coherent with AppDelegate without restoring a blind delay.
         StartupLayoutGate.runWhenInitialTerminalAndGeometryReady(in: workspace) { terminalPanel in
             UserDefaults.standard.set(true, forKey: WelcomeSettings.shownKey)
             WelcomeSettings.performQuadLayout(on: workspace, initialPanel: terminalPanel)

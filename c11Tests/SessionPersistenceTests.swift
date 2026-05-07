@@ -751,6 +751,70 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertFalse(StartupLayoutGate.isSettledGeometry(previous: previous, current: current))
     }
 
+    func testStartupLayoutGeometryProbeWaitsAndCarriesUsableSample() {
+        let sample = startupLayoutGeometrySample()
+
+        let decision = StartupLayoutGate.geometryProbeDecision(
+            previous: nil,
+            current: sample,
+            now: 10,
+            deadline: 11
+        )
+
+        XCTAssertEqual(decision, .keepWaiting(nextPreviousSample: sample))
+    }
+
+    func testStartupLayoutGeometryProbeDropsUnusableSampleWhileWaiting() {
+        let previous = startupLayoutGeometrySample()
+        let unusable = startupLayoutGeometrySample(contentBounds: .zero)
+
+        let decision = StartupLayoutGate.geometryProbeDecision(
+            previous: previous,
+            current: unusable,
+            now: 10,
+            deadline: 11
+        )
+
+        XCTAssertEqual(decision, .keepWaiting(nextPreviousSample: nil))
+    }
+
+    func testStartupLayoutGeometryProbePreservesPreviousWhenSampleIsMissing() {
+        let previous = startupLayoutGeometrySample()
+
+        let decision = StartupLayoutGate.geometryProbeDecision(
+            previous: previous,
+            current: nil,
+            now: 10,
+            deadline: 11
+        )
+
+        XCTAssertEqual(decision, .keepWaiting(nextPreviousSample: previous))
+    }
+
+    func testStartupLayoutGeometryProbeRunsOnTimeoutWithoutUsableSample() {
+        let decision = StartupLayoutGate.geometryProbeDecision(
+            previous: nil,
+            current: nil,
+            now: 11,
+            deadline: 11
+        )
+
+        XCTAssertEqual(decision, .run(reason: .timedOut))
+    }
+
+    func testStartupLayoutGeometryProbePrefersSettledOverTimeout() {
+        let sample = startupLayoutGeometrySample()
+
+        let decision = StartupLayoutGate.geometryProbeDecision(
+            previous: sample,
+            current: sample,
+            now: 11,
+            deadline: 11
+        )
+
+        XCTAssertEqual(decision, .run(reason: .settled))
+    }
+
     private func startupLayoutGeometrySample(
         windowFrame: CGRect = CGRect(x: 100, y: 100, width: 1_200, height: 800),
         contentLayoutRect: CGRect = CGRect(x: 100, y: 100, width: 1_200, height: 772),
