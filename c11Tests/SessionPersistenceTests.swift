@@ -703,6 +703,68 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(frame.midY, display.visibleFrame.midY, accuracy: 0.001)
     }
 
+    func testStartupLayoutGeometrySampleRejectsZeroContentBounds() {
+        let sample = startupLayoutGeometrySample(contentBounds: CGRect(x: 0, y: 0, width: 0, height: 720))
+
+        XCTAssertFalse(StartupLayoutGate.isUsableGeometrySample(sample))
+    }
+
+    func testStartupLayoutGeometrySampleRejectsMissingTerminalFrame() {
+        let sample = startupLayoutGeometrySample(terminalFrameInWindow: nil)
+
+        XCTAssertFalse(StartupLayoutGate.isUsableGeometrySample(sample))
+    }
+
+    func testStartupLayoutGeometrySettledForMatchingConsecutiveSamples() {
+        let sample = startupLayoutGeometrySample()
+
+        XCTAssertTrue(StartupLayoutGate.isSettledGeometry(previous: sample, current: sample))
+    }
+
+    func testStartupLayoutGeometrySettledAllowsSubPointJitter() {
+        let previous = startupLayoutGeometrySample()
+        let current = startupLayoutGeometrySample(
+            windowFrame: CGRect(x: 100.25, y: 100.25, width: 1199.75, height: 799.75),
+            contentLayoutRect: CGRect(x: 100.2, y: 100.2, width: 1199.8, height: 771.8),
+            contentBounds: CGRect(x: 0, y: 0, width: 1199.7, height: 771.7),
+            terminalFrameInWindow: CGRect(x: 0.3, y: 0.2, width: 1199.7, height: 771.7)
+        )
+
+        XCTAssertTrue(StartupLayoutGate.isSettledGeometry(previous: previous, current: current))
+    }
+
+    func testStartupLayoutGeometryDetectsContentLayoutChange() {
+        let previous = startupLayoutGeometrySample()
+        let current = startupLayoutGeometrySample(
+            contentLayoutRect: CGRect(x: 100, y: 100, width: 1_170, height: 772)
+        )
+
+        XCTAssertFalse(StartupLayoutGate.isSettledGeometry(previous: previous, current: current))
+    }
+
+    func testStartupLayoutGeometryDetectsInitialTerminalFrameChange() {
+        let previous = startupLayoutGeometrySample()
+        let current = startupLayoutGeometrySample(
+            terminalFrameInWindow: CGRect(x: 0, y: 0, width: 1_180, height: 772)
+        )
+
+        XCTAssertFalse(StartupLayoutGate.isSettledGeometry(previous: previous, current: current))
+    }
+
+    private func startupLayoutGeometrySample(
+        windowFrame: CGRect = CGRect(x: 100, y: 100, width: 1_200, height: 800),
+        contentLayoutRect: CGRect = CGRect(x: 100, y: 100, width: 1_200, height: 772),
+        contentBounds: CGRect = CGRect(x: 0, y: 0, width: 1_200, height: 772),
+        terminalFrameInWindow: CGRect? = CGRect(x: 0, y: 0, width: 1_200, height: 772)
+    ) -> StartupLayoutGate.GeometrySample {
+        StartupLayoutGate.GeometrySample(
+            windowFrame: windowFrame,
+            contentLayoutRect: contentLayoutRect,
+            contentBounds: contentBounds,
+            terminalFrameInWindow: terminalFrameInWindow
+        )
+    }
+
     func testResolvedStartupPrimaryWindowFrameFallsBackToPersistedGeometryWhenPrimaryMissing() {
         let fallbackFrame = SessionRectSnapshot(x: 180, y: 140, width: 900, height: 640)
         let fallbackDisplay = SessionDisplaySnapshot(

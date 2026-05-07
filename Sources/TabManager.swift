@@ -1375,122 +1375,19 @@ class TabManager: ObservableObject {
 
     @MainActor
     private func sendWelcomeWhenReady(to workspace: Workspace) {
-        if let terminalPanel = workspace.focusedTerminalPanel,
-           terminalPanel.surface.surface != nil {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                UserDefaults.standard.set(true, forKey: WelcomeSettings.shownKey)
-                WelcomeSettings.performQuadLayout(on: workspace, initialPanel: terminalPanel)
-            }
-            return
-        }
-
-        var resolved = false
-        var readyObserver: NSObjectProtocol?
-        var panelsCancellable: AnyCancellable?
-
-        func finishIfReady() {
-            guard !resolved,
-                  let terminalPanel = workspace.focusedTerminalPanel,
-                  terminalPanel.surface.surface != nil else { return }
-            resolved = true
-            if let readyObserver {
-                NotificationCenter.default.removeObserver(readyObserver)
-            }
-            panelsCancellable?.cancel()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                UserDefaults.standard.set(true, forKey: WelcomeSettings.shownKey)
-                WelcomeSettings.performQuadLayout(on: workspace, initialPanel: terminalPanel)
-            }
-        }
-
-        panelsCancellable = workspace.$panels
-            .map { _ in () }
-            .sink { _ in
-                Task { @MainActor in
-                    finishIfReady()
-                }
-            }
-        readyObserver = NotificationCenter.default.addObserver(
-            forName: .terminalSurfaceDidBecomeReady,
-            object: nil,
-            queue: .main
-        ) { note in
-            guard let workspaceId = note.userInfo?["workspaceId"] as? UUID,
-                  workspaceId == workspace.id else { return }
-            Task { @MainActor in
-                finishIfReady()
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-            Task { @MainActor in
-                if let readyObserver, !resolved {
-                    NotificationCenter.default.removeObserver(readyObserver)
-                }
-                if !resolved {
-                    panelsCancellable?.cancel()
-                }
-            }
+        StartupLayoutGate.runWhenInitialTerminalAndGeometryReady(in: workspace) { terminalPanel in
+            UserDefaults.standard.set(true, forKey: WelcomeSettings.shownKey)
+            WelcomeSettings.performQuadLayout(on: workspace, initialPanel: terminalPanel)
         }
     }
 
     @MainActor
     private func spawnDefaultGridWhenReady(to workspace: Workspace) {
-        func performGrid(_ initialPanel: TerminalPanel) {
+        StartupLayoutGate.runWhenInitialTerminalAndGeometryReady(in: workspace) { terminalPanel in
             DefaultGridSettings.performDefaultGrid(
                 on: workspace,
-                initialPanel: initialPanel
+                initialPanel: terminalPanel
             )
-        }
-
-        if let terminalPanel = workspace.focusedTerminalPanel,
-           terminalPanel.surface.surface != nil {
-            performGrid(terminalPanel)
-            return
-        }
-
-        var resolved = false
-        var readyObserver: NSObjectProtocol?
-        var panelsCancellable: AnyCancellable?
-
-        func finishIfReady() {
-            guard !resolved,
-                  let terminalPanel = workspace.focusedTerminalPanel,
-                  terminalPanel.surface.surface != nil else { return }
-            resolved = true
-            if let readyObserver {
-                NotificationCenter.default.removeObserver(readyObserver)
-            }
-            panelsCancellable?.cancel()
-            performGrid(terminalPanel)
-        }
-
-        panelsCancellable = workspace.$panels
-            .map { _ in () }
-            .sink { _ in
-                Task { @MainActor in
-                    finishIfReady()
-                }
-            }
-        readyObserver = NotificationCenter.default.addObserver(
-            forName: .terminalSurfaceDidBecomeReady,
-            object: nil,
-            queue: .main
-        ) { note in
-            guard let workspaceId = note.userInfo?["workspaceId"] as? UUID,
-                  workspaceId == workspace.id else { return }
-            Task { @MainActor in
-                finishIfReady()
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-            Task { @MainActor in
-                if let readyObserver, !resolved {
-                    NotificationCenter.default.removeObserver(readyObserver)
-                }
-                if !resolved {
-                    panelsCancellable?.cancel()
-                }
-            }
         }
     }
 

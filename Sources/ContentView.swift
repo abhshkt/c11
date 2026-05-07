@@ -2421,12 +2421,12 @@ struct ContentView: View {
     private var contentAndSidebarLayout: AnyView {
         let layout: AnyView
         if sidebarBlendMode == SidebarBlendModeOption.withinWindow.rawValue {
-            // Overlay mode: terminal extends full width, sidebar on top
-            // This allows withinWindow blur to see the terminal content
+            // Overlay mode: workspace content extends full width under the sidebar,
+            // allowing withinWindow blur/material to sample real content instead of
+            // the window background strip. behindWindow uses the non-overlapped HStack below.
             layout = AnyView(
                 ZStack(alignment: .leading) {
                     terminalContentWithSidebarDropOverlay
-                        .padding(.leading, sidebarState.isVisible ? sidebarWidth : 0)
                     if sidebarState.isVisible {
                         sidebarView
                     }
