@@ -2119,14 +2119,16 @@ struct ContentView: View {
     @ViewBuilder
     private func sidebarBackdropLayer(width: CGFloat) -> some View {
         SidebarBackdrop()
-            .frame(width: width, maxHeight: .infinity, alignment: .topLeading)
+            .frame(width: width)
+            .frame(maxHeight: .infinity, alignment: .topLeading)
             .ignoresSafeArea()
             .allowsHitTesting(false)
     }
 
     private var sidebarPanelContainer: some View {
         sidebarView
-            .frame(width: sidebarWidth, maxHeight: .infinity, alignment: .topLeading)
+            .frame(width: sidebarWidth)
+            .frame(maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var sidebarPanelWithBackdrop: some View {
@@ -2134,7 +2136,8 @@ struct ContentView: View {
             sidebarBackdropLayer(width: sidebarWidth)
             sidebarPanelContainer
         }
-        .frame(width: sidebarWidth, maxHeight: .infinity, alignment: .topLeading)
+        .frame(width: sidebarWidth)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
     }
 
     /// Space at top of content area for the titlebar. This must be at least the actual titlebar
