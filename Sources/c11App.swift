@@ -376,20 +376,6 @@ struct cmuxApp: App {
                         UpdateLogStore.shared.append("ui test: cmuxApp onAppear")
                     }
 #endif
-                    // Hide the first SwiftUI-created main window until ContentView's
-                    // WindowAccessor fades it back in. SwiftUI shows the window before
-                    // WindowAccessor runs the chrome handoff (identifier + .fullSizeContentView
-                    // + titlebar accessory), and that handoff produces a visible relayout
-                    // flicker. Watchdog covers the case where WindowAccessor never fires.
-                    if let window = NSApp.windows.first(where: {
-                        $0.identifier == nil && $0.styleMask.contains(.titled)
-                    }) {
-                        window.alphaValue = 0
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak window] in
-                            guard let window, window.alphaValue < 1.0 else { return }
-                            window.alphaValue = 1
-                        }
-                    }
                     // Start the Unix socket controller for programmatic access
                     updateSocketController()
                     appDelegate.configure(tabManager: tabManager, notificationStore: notificationStore, sidebarState: sidebarState)

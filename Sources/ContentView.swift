@@ -10,6 +10,12 @@ import os
 
 private var initialMainWindowGeometryReconcileKey: UInt8 = 0
 
+private enum MainWindowChromeHandoffAssociatedObjectKeys {
+    private static let hiddenToken = NSObject()
+
+    static let hidden = UnsafeRawPointer(Unmanaged.passUnretained(hiddenToken).toOpaque())
+}
+
 enum TopChromeMetrics {
     static let customTitlebarContentHeight: CGFloat = 28
     static let customTitlebarTopPadding: CGFloat = 2
@@ -3088,6 +3094,8 @@ struct ContentView: View {
         })
 
         view = AnyView(view.background(WindowAccessor { [sidebarBlendMode, bgGlassEnabled, bgGlassTintHex, bgGlassTintOpacity] window in
+            beginMainWindowChromeHandoffIfNeeded(for: window)
+
             let didChangeChrome = applyMainWindowChrome(to: window)
             if didChangeChrome {
                 performMainWindowLayoutPass(for: window)
@@ -3146,14 +3154,7 @@ struct ContentView: View {
             }
             AppDelegate.shared?.applyMainWindowSizeConstraints(to: window)
             AppDelegate.shared?.attachUpdateAccessory(to: window)
-            // Reveal the window now that the chrome handoff is done. c11App's
-            // .onAppear hid it so the relayout flicker isn't visible.
-            if window.alphaValue < 1.0 {
-                NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = 0.12
-                    window.animator().alphaValue = 1
-                }
-            }
+            revealMainWindowAfterChromeHandoffIfNeeded(window)
             AppDelegate.shared?.applyWindowDecorations(to: window)
             AppDelegate.shared?.registerMainWindow(
                 window,
@@ -3410,6 +3411,67 @@ struct ContentView: View {
         guard let window = NSApp.windows.first(where: { $0.identifier?.rawValue == windowIdentifier }) else { return }
         let tintColor = (NSColor(hex: bgGlassTintHex) ?? .black).withAlphaComponent(bgGlassTintOpacity)
         WindowGlassEffect.updateTint(to: window, color: tintColor)
+    }
+
+    private func needsMainWindowChromeHandoff(_ window: NSWindow) -> Bool {
+        let identifier = NSUserInterfaceItemIdentifier(windowIdentifier)
+        return window.identifier != identifier
+            || window.title != ""
+            || window.titleVisibility != .hidden
+            || !window.titlebarAppearsTransparent
+            || window.isMovableByWindowBackground
+            || window.isMovable
+            || !window.styleMask.contains(.fullSizeContentView)
+    }
+
+    private func isMainWindowHiddenForChromeHandoff(_ window: NSWindow) -> Bool {
+        objc_getAssociatedObject(window, MainWindowChromeHandoffAssociatedObjectKeys.hidden) != nil
+    }
+
+    private func beginMainWindowChromeHandoffIfNeeded(for window: NSWindow) {
+        guard needsMainWindowChromeHandoff(window),
+              !isMainWindowHiddenForChromeHandoff(window),
+              window.alphaValue >= 0.999 else {
+            return
+        }
+
+        objc_setAssociatedObject(
+            window,
+            MainWindowChromeHandoffAssociatedObjectKeys.hidden,
+            NSNumber(value: true),
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+        window.alphaValue = 0
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak window] in
+            guard let window,
+                  objc_getAssociatedObject(window, MainWindowChromeHandoffAssociatedObjectKeys.hidden) != nil else {
+                return
+            }
+            objc_setAssociatedObject(
+                window,
+                MainWindowChromeHandoffAssociatedObjectKeys.hidden,
+                nil,
+                .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+            )
+            window.alphaValue = 1
+        }
+    }
+
+    private func revealMainWindowAfterChromeHandoffIfNeeded(_ window: NSWindow) {
+        guard isMainWindowHiddenForChromeHandoff(window) else { return }
+        objc_setAssociatedObject(
+            window,
+            MainWindowChromeHandoffAssociatedObjectKeys.hidden,
+            nil,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+
+        guard window.alphaValue < 1.0 else { return }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.12
+            window.animator().alphaValue = 1
+        }
     }
 
     @discardableResult
