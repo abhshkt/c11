@@ -3041,11 +3041,8 @@ struct ContentView: View {
             }
             AppDelegate.shared?.applyMainWindowSizeConstraints(to: window)
             AppDelegate.shared?.attachUpdateAccessory(to: window)
-            // Option P: c11App's .onAppear sets alphaValue = 0 on the SwiftUI-created
-            // main window so the chrome handoff is invisible. Now that
-            // applyMainWindowChrome + attachUpdateAccessory have completed, fade the
-            // window in. The 1 s watchdog in c11App.swift is a no-op once alpha == 1.
-            // See /tmp/c11-chrome-bug/diagnosis-v2.md.
+            // Reveal the window now that the chrome handoff is done. c11App's
+            // .onAppear hid it so the relayout flicker isn't visible.
             if window.alphaValue < 1.0 {
                 NSAnimationContext.runAnimationGroup { ctx in
                     ctx.duration = 0.12

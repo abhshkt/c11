@@ -376,12 +376,11 @@ struct cmuxApp: App {
                         UpdateLogStore.shared.append("ui test: cmuxApp onAppear")
                     }
 #endif
-                    // Option P: hide the SwiftUI-created main window until WindowAccessor in
-                    // ContentView fades it back in after applyMainWindowChrome +
-                    // attachUpdateAccessory have run. Avoids the chrome relayout glitch
-                    // documented in /tmp/c11-chrome-bug/diagnosis-v2.md (icons flicker on/off
-                    // during ~280-360 ms `.fullSizeContentView` insertion). Watchdog at 1 s
-                    // forces visibility back if WindowAccessor never fires.
+                    // Hide the first SwiftUI-created main window until ContentView's
+                    // WindowAccessor fades it back in. SwiftUI shows the window before
+                    // WindowAccessor runs the chrome handoff (identifier + .fullSizeContentView
+                    // + titlebar accessory), and that handoff produces a visible relayout
+                    // flicker. Watchdog covers the case where WindowAccessor never fires.
                     if let window = NSApp.windows.first(where: {
                         $0.identifier == nil && $0.styleMask.contains(.titled)
                     }) {
