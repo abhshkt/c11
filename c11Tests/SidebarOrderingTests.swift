@@ -49,36 +49,36 @@ final class SidebarActiveForegroundColorTests: XCTestCase {
 
 
 final class SidebarTopChromeInsetTests: XCTestCase {
-    func testStandardModeUsesMeasuredChromeWhenLargerThanTrafficLightPadding() {
+    func testReservesTitlebarControlsWhenMeasuredChromeIsSmaller() {
         XCTAssertEqual(
             VerticalTabsSidebar.topChromeInset(
-                trafficLightPadding: 28,
-                topChromePadding: 42,
-                isMinimalMode: false
+                trafficLightPadding: TopChromeMetrics.sidebarTrafficLightClearance,
+                topChromePadding: 32,
+                hiddenTitlebarControlClearance: TopChromeMetrics.hiddenSidebarControlsClearance
             ),
-            42
+            TopChromeMetrics.hiddenSidebarControlsClearance
         )
     }
 
-    func testStandardModeKeepsTrafficLightPaddingWhenMeasuredChromeIsSmaller() {
+    func testHonorsLargerMeasuredChrome() {
         XCTAssertEqual(
             VerticalTabsSidebar.topChromeInset(
-                trafficLightPadding: 28,
-                topChromePadding: 20,
-                isMinimalMode: false
+                trafficLightPadding: TopChromeMetrics.sidebarTrafficLightClearance,
+                topChromePadding: 56,
+                hiddenTitlebarControlClearance: TopChromeMetrics.hiddenSidebarControlsClearance
             ),
-            28
+            56
         )
     }
 
-    func testMinimalModeKeepsFixedTrafficLightStrip() {
+    func testHonorsLargerTrafficLightPadding() {
         XCTAssertEqual(
             VerticalTabsSidebar.topChromeInset(
-                trafficLightPadding: 28,
-                topChromePadding: 42,
-                isMinimalMode: true
+                trafficLightPadding: 60,
+                topChromePadding: 32,
+                hiddenTitlebarControlClearance: TopChromeMetrics.hiddenSidebarControlsClearance
             ),
-            28
+            60
         )
     }
 }

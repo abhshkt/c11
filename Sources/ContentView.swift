@@ -10,6 +10,90 @@ import os
 
 private var initialMainWindowGeometryReconcileKey: UInt8 = 0
 
+enum TopChromeMetrics {
+    static let customTitlebarContentHeight: CGFloat = 28
+    static let customTitlebarTopPadding: CGFloat = 2
+    static let measuredTitlebarMinHeight = customTitlebarContentHeight
+    static let measuredTitlebarMaxHeight: CGFloat = 72
+    static let titlebarControlBottomClearance: CGFloat = 6
+    static let initialTitlebarPadding: CGFloat = 32
+    static let measuredControlFallbackClearance: CGFloat = 36
+    static let sidebarTrafficLightClearance = customTitlebarContentHeight
+    static let sidebarHiddenControlsLeadingInset: CGFloat = 72
+
+    static var hiddenSidebarControlsClearance: CGFloat {
+        clampedTopChromePadding(
+            HiddenTitlebarSidebarControlsView.hostHeight +
+                HiddenTitlebarSidebarControlsView.topPadding +
+                titlebarControlBottomClearance
+        )
+    }
+
+    static var fallbackControlClearance: CGFloat {
+        max(measuredControlFallbackClearance, hiddenSidebarControlsClearance)
+    }
+
+    static func clampedTopChromePadding(_ value: CGFloat) -> CGFloat {
+        max(measuredTitlebarMinHeight, min(measuredTitlebarMaxHeight, value))
+    }
+
+    static func measuredTitlebarPadding(for window: NSWindow) -> CGFloat {
+        clampedTopChromePadding(window.frame.height - window.contentLayoutRect.height)
+    }
+
+    static func measuredTitlebarControlClearance(in window: NSWindow) -> CGFloat? {
+        guard let contentView = window.contentView else { return nil }
+
+        let contentFrameInWindow = contentView.convert(contentView.bounds, to: nil)
+        let contentTopY = max(contentFrameInWindow.maxY, window.contentLayoutRect.maxY)
+        var deepestControlPoint: CGFloat = 0
+
+        func include(_ view: NSView?) {
+            guard let view,
+                  let hostWindow = view.window,
+                  hostWindow === window,
+                  !view.isHidden,
+                  view.alphaValue > 0.01
+            else {
+                return
+            }
+
+            let rect = view.convert(view.bounds, to: nil)
+            guard rect.width > 0, rect.height > 0 else { return }
+
+            let controlDepth = contentTopY - rect.minY + titlebarControlBottomClearance
+            guard controlDepth.isFinite, controlDepth > 0 else { return }
+
+            deepestControlPoint = max(deepestControlPoint, controlDepth)
+        }
+
+        include(window.standardWindowButton(.closeButton))
+        include(window.standardWindowButton(.miniaturizeButton))
+        include(window.standardWindowButton(.zoomButton))
+
+        for accessory in window.titlebarAccessoryViewControllers where !accessory.isHidden {
+            include(accessory.view)
+        }
+
+        guard deepestControlPoint > 0 else { return nil }
+        return clampedTopChromePadding(deepestControlPoint)
+    }
+
+    static func reservedTopChromePadding(
+        titlebarPadding: CGFloat,
+        controlClearance: CGFloat
+    ) -> CGFloat {
+        max(titlebarPadding, controlClearance)
+    }
+
+    static func reservedTopChromePadding(for window: NSWindow) -> CGFloat {
+        reservedTopChromePadding(
+            titlebarPadding: measuredTitlebarPadding(for: window),
+            controlClearance: measuredTitlebarControlClearance(in: window) ?? fallbackControlClearance
+        )
+    }
+}
+
 /// `NSViewControllerRepresentable` that hosts SwiftUI content and toggles
 /// `isHidden` on the hosting view based on a Bool. When `isHidden = true`,
 /// AppKit's `_layoutSubtreeWithOldSize:` walk short-circuits the entire
@@ -2108,7 +2192,7 @@ struct ContentView: View {
         VerticalTabsSidebar(
             updateViewModel: updateViewModel,
             onSendFeedback: presentFeedbackComposer,
-            topChromePadding: titlebarPadding,
+            topChromePadding: reservedTopChromePadding,
             selection: $sidebarSelectionState.selection,
             selectedTabIds: $selectedTabIds,
             lastSidebarSelectionIndex: $lastSidebarSelectionIndex
@@ -2143,7 +2227,8 @@ struct ContentView: View {
 
     /// Space at top of content area for the titlebar. This must be at least the actual titlebar
     /// height; otherwise controls like Bonsplit tab dragging can be interpreted as window drags.
-    @State private var titlebarPadding: CGFloat = 32
+    @State private var titlebarPadding = TopChromeMetrics.initialTitlebarPadding
+    @State private var titlebarControlPadding = TopChromeMetrics.fallbackControlClearance
     @AppStorage(WorkspacePresentationModeSettings.modeKey)
     private var workspacePresentationMode = WorkspacePresentationModeSettings.defaultMode.rawValue
     @AppStorage(TabBarChromeSettings.stateKey)
@@ -2157,8 +2242,15 @@ struct ContentView: View {
         TabBarChromeSettings.state(for: tabBarChromeStateRaw)
     }
 
+    private var reservedTopChromePadding: CGFloat {
+        TopChromeMetrics.reservedTopChromePadding(
+            titlebarPadding: titlebarPadding,
+            controlClearance: titlebarControlPadding
+        )
+    }
+
     private var effectiveTitlebarPadding: CGFloat {
-        isMinimalMode ? 0 : titlebarPadding
+        isMinimalMode ? 0 : reservedTopChromePadding
     }
 
     private var terminalContent: some View {
@@ -2344,12 +2436,12 @@ struct ContentView: View {
                 Spacer()
 
             }
-            .frame(height: 28)
-            .padding(.top, 2)
+            .frame(height: TopChromeMetrics.customTitlebarContentHeight)
+            .padding(.top, TopChromeMetrics.customTitlebarTopPadding)
             .padding(.leading, (isFullScreen && !sidebarState.isVisible) ? 8 : (sidebarState.isVisible ? 12 : titlebarLeadingInset + CGFloat(debugTitlebarLeadingExtra)))
             .padding(.trailing, 8)
         }
-        .frame(height: titlebarPadding)
+        .frame(height: reservedTopChromePadding)
         .frame(maxWidth: .infinity)
         .contentShape(Rectangle())
         .background({
@@ -2496,7 +2588,7 @@ struct ContentView: View {
                         TabBarChromeHandle(onExpand: {
                             tabBarChromeStateRaw = TabBarChromeState.full.rawValue
                         })
-                        .padding(.top, isMinimalMode ? 4 : titlebarPadding + 4)
+                        .padding(.top, isMinimalMode ? 4 : reservedTopChromePadding + 4)
                         .padding(.trailing, 8)
                     }
                 }
@@ -2918,6 +3010,18 @@ struct ContentView: View {
                   window === observedWindow else { return }
             clampSidebarWidthIfNeeded(availableWidth: window.contentView?.bounds.width ?? window.contentLayoutRect.width)
             updateSidebarResizerBandState()
+            updateTitlebarPadding(from: window)
+        })
+
+        view = AnyView(view.onReceive(NotificationCenter.default.publisher(for: NSWindow.didMoveNotification)) { notification in
+            guard let window = notification.object as? NSWindow,
+                  window === observedWindow else { return }
+            updateTitlebarPadding(from: window)
+        })
+
+        view = AnyView(view.onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeScreenNotification)) { notification in
+            guard let window = notification.object as? NSWindow,
+                  window === observedWindow else { return }
             updateTitlebarPadding(from: window)
         })
 
@@ -3400,11 +3504,18 @@ struct ContentView: View {
     private func updateTitlebarPadding(from window: NSWindow) {
         // Keep content below the titlebar so drags on Bonsplit's tab bar don't
         // get interpreted as window drags.
-        let computedTitlebarHeight = window.frame.height - window.contentLayoutRect.height
-        let nextPadding = max(28, min(72, computedTitlebarHeight))
-        guard abs(titlebarPadding - nextPadding) > 0.5 else { return }
+        let nextPadding = TopChromeMetrics.measuredTitlebarPadding(for: window)
+        let nextControlPadding = TopChromeMetrics.measuredTitlebarControlClearance(in: window)
+            ?? TopChromeMetrics.fallbackControlClearance
+        guard abs(titlebarPadding - nextPadding) > 0.5 ||
+            abs(titlebarControlPadding - nextControlPadding) > 0.5
+        else {
+            return
+        }
+
         DispatchQueue.main.async {
             titlebarPadding = nextPadding
+            titlebarControlPadding = nextControlPadding
         }
     }
 
@@ -8460,16 +8571,17 @@ struct VerticalTabsSidebar: View {
     private var chromeScalePresetRaw = ChromeScaleSettings.defaultPreset.rawValue
 
     /// Space at top of sidebar for traffic light buttons
-    private let trafficLightPadding: CGFloat = 28
+    private let trafficLightPadding = TopChromeMetrics.sidebarTrafficLightClearance
+    private let hiddenTitlebarControlClearance = TopChromeMetrics.hiddenSidebarControlsClearance
     private let tabRowSpacing: CGFloat = 2
-    private let hiddenTitlebarControlsLeadingInset: CGFloat = 72
+    private let hiddenTitlebarControlsLeadingInset = TopChromeMetrics.sidebarHiddenControlsLeadingInset
 
     static func topChromeInset(
         trafficLightPadding: CGFloat,
         topChromePadding: CGFloat,
-        isMinimalMode: Bool
+        hiddenTitlebarControlClearance: CGFloat
     ) -> CGFloat {
-        isMinimalMode ? trafficLightPadding : max(trafficLightPadding, topChromePadding)
+        max(trafficLightPadding, topChromePadding, hiddenTitlebarControlClearance)
     }
 
     private var isMinimalMode: Bool {
@@ -8553,7 +8665,7 @@ struct VerticalTabsSidebar: View {
         let sidebarTopChromeInset = Self.topChromeInset(
             trafficLightPadding: trafficLightPadding,
             topChromePadding: topChromePadding,
-            isMinimalMode: isMinimalMode
+            hiddenTitlebarControlClearance: hiddenTitlebarControlClearance
         )
 
         VStack(spacing: 0) {
@@ -8681,7 +8793,7 @@ struct VerticalTabsSidebar: View {
                     if isMinimalMode {
                         HiddenTitlebarSidebarControlsView(notificationStore: notificationStore)
                             .padding(.leading, hiddenTitlebarControlsLeadingInset)
-                            .padding(.top, 2)
+                            .padding(.top, HiddenTitlebarSidebarControlsView.topPadding)
                     }
                 }
                 .background(Color.clear)
