@@ -2108,6 +2108,7 @@ struct ContentView: View {
         VerticalTabsSidebar(
             updateViewModel: updateViewModel,
             onSendFeedback: presentFeedbackComposer,
+            topChromePadding: titlebarPadding,
             selection: $sidebarSelectionState.selection,
             selectedTabIds: $selectedTabIds,
             lastSidebarSelectionIndex: $lastSidebarSelectionIndex
@@ -8433,6 +8434,7 @@ struct VerticalTabsSidebar: View {
     /// metrics value didn't change, so this stays cheap.
     @ObservedObject private var surfaceMetricsSampler = SurfaceMetricsSampler.shared
     let onSendFeedback: () -> Void
+    let topChromePadding: CGFloat
     @EnvironmentObject var tabManager: TabManager
     @EnvironmentObject var notificationStore: TerminalNotificationStore
     @Environment(\.colorScheme) private var colorScheme
@@ -8461,6 +8463,14 @@ struct VerticalTabsSidebar: View {
     private let trafficLightPadding: CGFloat = 28
     private let tabRowSpacing: CGFloat = 2
     private let hiddenTitlebarControlsLeadingInset: CGFloat = 72
+
+    static func topChromeInset(
+        trafficLightPadding: CGFloat,
+        topChromePadding: CGFloat,
+        isMinimalMode: Bool
+    ) -> CGFloat {
+        isMinimalMode ? trafficLightPadding : max(trafficLightPadding, topChromePadding)
+    }
 
     private var isMinimalMode: Bool {
         WorkspacePresentationModeSettings.mode(for: workspacePresentationMode) == .minimal
@@ -8540,6 +8550,11 @@ struct VerticalTabsSidebar: View {
                 for: ChromeScaleSettings.preset(for: chromeScalePresetRaw)
             )
         )
+        let sidebarTopChromeInset = Self.topChromeInset(
+            trafficLightPadding: trafficLightPadding,
+            topChromePadding: topChromePadding,
+            isMinimalMode: isMinimalMode
+        )
 
         VStack(spacing: 0) {
             GeometryReader { proxy in
@@ -8547,7 +8562,7 @@ struct VerticalTabsSidebar: View {
                     VStack(spacing: 0) {
                         // Space for traffic lights / fullscreen controls
                         Spacer()
-                            .frame(height: trafficLightPadding)
+                            .frame(height: sidebarTopChromeInset)
 
                         LazyVStack(spacing: tabRowSpacing) {
                             ForEach(Array(tabManager.tabs.enumerated()), id: \.element.id) { index, tab in
@@ -8653,14 +8668,14 @@ struct VerticalTabsSidebar: View {
                     .frame(width: 0, height: 0)
                 )
                 .overlay(alignment: .top) {
-                    SidebarTopScrim(height: trafficLightPadding + 20)
+                    SidebarTopScrim(height: sidebarTopChromeInset + 20)
                         .allowsHitTesting(false)
                 }
                 .overlay(alignment: .top) {
                     // Match native titlebar behavior in the sidebar top strip:
                     // drag-to-move and double-click action (zoom/minimize).
                     WindowDragHandleView()
-                        .frame(height: trafficLightPadding)
+                        .frame(height: sidebarTopChromeInset)
                 }
                 .overlay(alignment: .topLeading) {
                     if isMinimalMode {

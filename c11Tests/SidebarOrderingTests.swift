@@ -48,6 +48,42 @@ final class SidebarActiveForegroundColorTests: XCTestCase {
 }
 
 
+final class SidebarTopChromeInsetTests: XCTestCase {
+    func testStandardModeUsesMeasuredChromeWhenLargerThanTrafficLightPadding() {
+        XCTAssertEqual(
+            VerticalTabsSidebar.topChromeInset(
+                trafficLightPadding: 28,
+                topChromePadding: 42,
+                isMinimalMode: false
+            ),
+            42
+        )
+    }
+
+    func testStandardModeKeepsTrafficLightPaddingWhenMeasuredChromeIsSmaller() {
+        XCTAssertEqual(
+            VerticalTabsSidebar.topChromeInset(
+                trafficLightPadding: 28,
+                topChromePadding: 20,
+                isMinimalMode: false
+            ),
+            28
+        )
+    }
+
+    func testMinimalModeKeepsFixedTrafficLightStrip() {
+        XCTAssertEqual(
+            VerticalTabsSidebar.topChromeInset(
+                trafficLightPadding: 28,
+                topChromePadding: 42,
+                isMinimalMode: true
+            ),
+            28
+        )
+    }
+}
+
+
 final class SidebarBranchLayoutSettingsTests: XCTestCase {
     func testDefaultUsesVerticalLayout() {
         let suiteName = "SidebarBranchLayoutSettingsTests.Default.\(UUID().uuidString)"
