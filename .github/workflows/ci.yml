@@ -89,7 +89,10 @@ jobs:
     # can be reinstated in nightly.yml if needed.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ github.repository == 'Stage-11-Agentics/c11' && 'macos-15-xlarge' || 'macos-15' }}
-    timeout-minutes: 15
+    # Stage-11 runs this job on macos-15-xlarge, but forks fall back to the
+    # standard macos-15 runner where the app build plus c11-unit test pass can
+    # exceed 15 minutes before producing a real failure.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
