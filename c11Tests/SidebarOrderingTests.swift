@@ -48,6 +48,42 @@ final class SidebarActiveForegroundColorTests: XCTestCase {
 }
 
 
+final class SidebarTopChromeInsetTests: XCTestCase {
+    func testReservesTitlebarControlsWhenMeasuredChromeIsSmaller() {
+        XCTAssertEqual(
+            VerticalTabsSidebar.topChromeInset(
+                trafficLightPadding: TopChromeMetrics.sidebarTrafficLightClearance,
+                topChromePadding: 32,
+                hiddenTitlebarControlClearance: TopChromeMetrics.hiddenSidebarControlsClearance
+            ),
+            TopChromeMetrics.hiddenSidebarControlsClearance
+        )
+    }
+
+    func testHonorsLargerMeasuredChrome() {
+        XCTAssertEqual(
+            VerticalTabsSidebar.topChromeInset(
+                trafficLightPadding: TopChromeMetrics.sidebarTrafficLightClearance,
+                topChromePadding: 56,
+                hiddenTitlebarControlClearance: TopChromeMetrics.hiddenSidebarControlsClearance
+            ),
+            56
+        )
+    }
+
+    func testHonorsLargerTrafficLightPadding() {
+        XCTAssertEqual(
+            VerticalTabsSidebar.topChromeInset(
+                trafficLightPadding: 60,
+                topChromePadding: 32,
+                hiddenTitlebarControlClearance: TopChromeMetrics.hiddenSidebarControlsClearance
+            ),
+            60
+        )
+    }
+}
+
+
 final class SidebarBranchLayoutSettingsTests: XCTestCase {
     func testDefaultUsesVerticalLayout() {
         let suiteName = "SidebarBranchLayoutSettingsTests.Default.\(UUID().uuidString)"

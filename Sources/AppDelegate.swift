@@ -1993,6 +1993,309 @@ func shouldSuppressWindowMoveForFolderDrag(window: NSWindow, event: NSEvent) -> 
 }
 
 @MainActor
+enum StartupLayoutGate {
+    struct GeometrySample: Equatable {
+        let windowFrame: CGRect
+        let contentLayoutRect: CGRect
+        let contentBounds: CGRect
+        let terminalFrameInWindow: CGRect?
+    }
+
+    enum GeometryRunReason: Equatable {
+        case settled
+        case timedOut
+    }
+
+    enum GeometryProbeDecision: Equatable {
+        case keepWaiting(nextPreviousSample: GeometrySample?)
+        case run(reason: GeometryRunReason)
+    }
+
+    private static let geometryProbeInterval: TimeInterval = 1.0 / 60.0
+    private nonisolated static let minimumUsableDimension: CGFloat = 1.0
+
+    nonisolated static func isUsableGeometrySample(_ sample: GeometrySample) -> Bool {
+        guard let terminalFrame = sample.terminalFrameInWindow else { return false }
+
+        return rectIsFinite(sample.windowFrame)
+            && rectIsFinite(sample.contentLayoutRect)
+            && rectIsFinite(sample.contentBounds)
+            && rectIsFinite(terminalFrame)
+            && sample.windowFrame.width > minimumUsableDimension
+            && sample.windowFrame.height > minimumUsableDimension
+            && sample.contentLayoutRect.width > minimumUsableDimension
+            && sample.contentLayoutRect.height > minimumUsableDimension
+            && sample.contentBounds.width > minimumUsableDimension
+            && sample.contentBounds.height > minimumUsableDimension
+            && terminalFrame.width > minimumUsableDimension
+            && terminalFrame.height > minimumUsableDimension
+    }
+
+    nonisolated static func isSettledGeometry(
+        previous: GeometrySample?,
+        current: GeometrySample,
+        epsilon: CGFloat = 0.5
+    ) -> Bool {
+        guard let previous,
+              isUsableGeometrySample(previous),
+              isUsableGeometrySample(current),
+              let previousTerminalFrame = previous.terminalFrameInWindow,
+              let currentTerminalFrame = current.terminalFrameInWindow else {
+            return false
+        }
+
+        return rectsApproximatelyEqual(previous.windowFrame, current.windowFrame, epsilon: epsilon)
+            && rectsApproximatelyEqual(previous.contentLayoutRect, current.contentLayoutRect, epsilon: epsilon)
+            && rectsApproximatelyEqual(previous.contentBounds, current.contentBounds, epsilon: epsilon)
+            && rectsApproximatelyEqual(previousTerminalFrame, currentTerminalFrame, epsilon: epsilon)
+    }
+
+    nonisolated static func geometryProbeDecision(
+        previous: GeometrySample?,
+        current: GeometrySample?,
+        now: TimeInterval,
+        deadline: TimeInterval
+    ) -> GeometryProbeDecision {
+        if let current, isSettledGeometry(previous: previous, current: current) {
+            return .run(reason: .settled)
+        }
+        if now >= deadline {
+            return .run(reason: .timedOut)
+        }
+        guard let current else {
+            return .keepWaiting(nextPreviousSample: previous)
+        }
+        guard isUsableGeometrySample(current) else {
+            return .keepWaiting(nextPreviousSample: nil)
+        }
+        return .keepWaiting(nextPreviousSample: current)
+    }
+
+    static func runWhenInitialTerminalAndGeometryReady(
+        in workspace: Workspace,
+        terminalTimeoutSeconds: TimeInterval = 3.0,
+        geometryTimeoutSeconds: TimeInterval = 0.75,
+        action: @escaping @MainActor (TerminalPanel) -> Void
+    ) {
+        var resolved = false
+        var readyObserver: NSObjectProtocol?
+        var hostedViewObserver: NSObjectProtocol?
+        var panelsCancellable: AnyCancellable?
+        var terminalTimeoutWorkItem: DispatchWorkItem?
+
+        @MainActor
+        func cleanupTerminalObservers() {
+            if let readyObserver {
+                NotificationCenter.default.removeObserver(readyObserver)
+            }
+            if let hostedViewObserver {
+                NotificationCenter.default.removeObserver(hostedViewObserver)
+            }
+            readyObserver = nil
+            hostedViewObserver = nil
+            panelsCancellable?.cancel()
+            panelsCancellable = nil
+            terminalTimeoutWorkItem?.cancel()
+            terminalTimeoutWorkItem = nil
+        }
+
+        @MainActor
+        func finishTerminalWaitWithoutAction() {
+            guard !resolved else { return }
+            resolved = true
+            cleanupTerminalObservers()
+#if DEBUG
+            dlog(
+                "startup.layoutGate.terminalTimeout workspace=\(workspace.id.uuidString.prefix(8)) " +
+                "timeoutSeconds=\(String(format: "%.1f", terminalTimeoutSeconds))"
+            )
+#endif
+        }
+
+        @MainActor
+        func evaluateTerminalReadiness() {
+            guard !resolved,
+                  let terminalPanel = workspace.focusedTerminalPanel,
+                  terminalPanel.surface.surface != nil else { return }
+            resolved = true
+            cleanupTerminalObservers()
+            settleGeometry(
+                in: workspace,
+                terminalPanel: terminalPanel,
+                timeoutSeconds: geometryTimeoutSeconds,
+                action: action
+            )
+        }
+
+        panelsCancellable = workspace.$panels
+            .map { _ in () }
+            .sink { _ in
+                Task { @MainActor in
+                    evaluateTerminalReadiness()
+                }
+            }
+        readyObserver = NotificationCenter.default.addObserver(
+            forName: .terminalSurfaceDidBecomeReady,
+            object: nil,
+            queue: .main
+        ) { note in
+            guard let workspaceId = note.userInfo?["workspaceId"] as? UUID,
+                  workspaceId == workspace.id else { return }
+            Task { @MainActor in
+                evaluateTerminalReadiness()
+            }
+        }
+        hostedViewObserver = NotificationCenter.default.addObserver(
+            forName: .terminalSurfaceHostedViewDidMoveToWindow,
+            object: nil,
+            queue: .main
+        ) { note in
+            guard let workspaceId = note.userInfo?["workspaceId"] as? UUID,
+                  workspaceId == workspace.id else { return }
+            Task { @MainActor in
+                evaluateTerminalReadiness()
+            }
+        }
+
+        let timeoutWorkItem = DispatchWorkItem {
+            Task { @MainActor in
+                finishTerminalWaitWithoutAction()
+            }
+        }
+        terminalTimeoutWorkItem = timeoutWorkItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + max(0, terminalTimeoutSeconds),
+            execute: timeoutWorkItem
+        )
+
+        evaluateTerminalReadiness()
+    }
+
+    private static func settleGeometry(
+        in workspace: Workspace,
+        terminalPanel: TerminalPanel,
+        timeoutSeconds: TimeInterval,
+        action: @escaping @MainActor (TerminalPanel) -> Void
+    ) {
+        let geometryTimeoutSeconds = max(0, timeoutSeconds)
+        let geometryDeadline = ProcessInfo.processInfo.systemUptime + geometryTimeoutSeconds
+        var previousSample: GeometrySample?
+        var resolved = false
+
+        @MainActor
+        func terminalPanelStillBelongsToWorkspace() -> Bool {
+            guard let currentPanel = workspace.panels[terminalPanel.id] as? TerminalPanel else {
+                return false
+            }
+            return currentPanel === terminalPanel
+        }
+
+        @MainActor
+        func runAction() {
+            guard !resolved else { return }
+            resolved = true
+            guard terminalPanelStillBelongsToWorkspace() else { return }
+            let window = terminalPanel.hostedView.window
+            if let window {
+                forceWindowLayout(window)
+            }
+            action(terminalPanel)
+            if let window {
+                DispatchQueue.main.async {
+                    TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: window)
+                }
+            }
+        }
+
+        @MainActor
+        func probe() {
+            guard !resolved else { return }
+            guard terminalPanelStillBelongsToWorkspace() else {
+                resolved = true
+                return
+            }
+
+            let sample: GeometrySample?
+            if let window = terminalPanel.hostedView.window {
+                forceWindowLayout(window)
+                sample = makeGeometrySample(window: window, terminalPanel: terminalPanel)
+            } else {
+                sample = nil
+            }
+
+            let decision = geometryProbeDecision(
+                previous: previousSample,
+                current: sample,
+                now: ProcessInfo.processInfo.systemUptime,
+                deadline: geometryDeadline
+            )
+            switch decision {
+            case .run(reason: .settled):
+                runAction()
+                return
+            case .run(reason: .timedOut):
+#if DEBUG
+                dlog(
+                    "startup.layoutGate.geometryTimeout workspace=\(workspace.id.uuidString.prefix(8)) " +
+                    "panel=\(terminalPanel.id.uuidString.prefix(8)) " +
+                    "timeoutSeconds=\(String(format: "%.2f", geometryTimeoutSeconds)) running=1"
+                )
+#endif
+                runAction()
+                return
+            case .keepWaiting(let nextPreviousSample):
+                previousSample = nextPreviousSample
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + geometryProbeInterval) {
+                Task { @MainActor in
+                    probe()
+                }
+            }
+        }
+
+        probe()
+    }
+
+    private static func makeGeometrySample(window: NSWindow, terminalPanel: TerminalPanel) -> GeometrySample {
+        let hostedView = terminalPanel.hostedView
+        let terminalFrame = hostedView.window === window
+            ? hostedView.convert(hostedView.bounds, to: nil)
+            : nil
+        return GeometrySample(
+            windowFrame: window.frame,
+            contentLayoutRect: window.contentLayoutRect,
+            contentBounds: window.contentView?.bounds ?? .zero,
+            terminalFrameInWindow: terminalFrame
+        )
+    }
+
+    private static func forceWindowLayout(_ window: NSWindow) {
+        window.contentView?.superview?.layoutSubtreeIfNeeded()
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+    }
+
+    private nonisolated static func rectIsFinite(_ rect: CGRect) -> Bool {
+        rect.origin.x.isFinite
+            && rect.origin.y.isFinite
+            && rect.width.isFinite
+            && rect.height.isFinite
+    }
+
+    private nonisolated static func rectsApproximatelyEqual(
+        _ lhs: CGRect,
+        _ rhs: CGRect,
+        epsilon: CGFloat
+    ) -> Bool {
+        abs(lhs.origin.x - rhs.origin.x) <= epsilon
+            && abs(lhs.origin.y - rhs.origin.y) <= epsilon
+            && abs(lhs.width - rhs.width) <= epsilon
+            && abs(lhs.height - rhs.height) <= epsilon
+    }
+}
+
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate, NSMenuItemValidation {
     static var shared: AppDelegate?
 
@@ -6284,7 +6587,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func sendWelcomeCommandWhenReady(to workspace: Workspace, markShownOnSend: Bool = false) {
-        runWhenInitialTerminalReady(in: workspace) { initialPanel in
+        StartupLayoutGate.runWhenInitialTerminalAndGeometryReady(in: workspace) { initialPanel in
             if markShownOnSend {
                 UserDefaults.standard.set(true, forKey: WelcomeSettings.shownKey)
             }
@@ -6419,60 +6722,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func spawnDefaultGridWhenReady(to workspace: Workspace) {
-        runWhenInitialTerminalReady(in: workspace) { initialPanel in
+        StartupLayoutGate.runWhenInitialTerminalAndGeometryReady(in: workspace) { initialPanel in
             DefaultGridSettings.performDefaultGrid(
                 on: workspace,
                 initialPanel: initialPanel
             )
-        }
-    }
-
-    private func runWhenInitialTerminalReady(
-        in workspace: Workspace,
-        _ action: @escaping (TerminalPanel) -> Void
-    ) {
-        if let terminalPanel = workspace.focusedTerminalPanel,
-           terminalPanel.surface.surface != nil {
-            action(terminalPanel)
-            return
-        }
-
-        var resolved = false
-        var readyObserver: NSObjectProtocol?
-        var panelsCancellable: AnyCancellable?
-
-        func finishIfReady() {
-            guard !resolved,
-                  let terminalPanel = workspace.focusedTerminalPanel,
-                  terminalPanel.surface.surface != nil else { return }
-            resolved = true
-            if let readyObserver {
-                NotificationCenter.default.removeObserver(readyObserver)
-            }
-            panelsCancellable?.cancel()
-            action(terminalPanel)
-        }
-
-        panelsCancellable = workspace.$panels
-            .map { _ in () }
-            .sink { _ in finishIfReady() }
-        readyObserver = NotificationCenter.default.addObserver(
-            forName: .terminalSurfaceDidBecomeReady,
-            object: nil,
-            queue: .main
-        ) { note in
-            guard let workspaceId = note.userInfo?["workspaceId"] as? UUID,
-                  workspaceId == workspace.id else { return }
-            finishIfReady()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-            if !resolved {
-                if let readyObserver {
-                    NotificationCenter.default.removeObserver(readyObserver)
-                }
-                panelsCancellable?.cancel()
-                NSLog("Welcome quad: initial terminal not ready after 3.0s")
-            }
         }
     }
 

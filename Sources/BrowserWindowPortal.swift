@@ -665,8 +665,7 @@ final class WindowBrowserHostView: NSView {
         // hits that land in native titlebar space or the custom titlebar strip
         // we reserve directly under it for window drag/double-click behaviors.
         let windowPoint = convert(point, to: nil)
-        let nativeTitlebarHeight = window.frame.height - window.contentLayoutRect.height
-        let customTitlebarBandHeight = max(28, min(72, nativeTitlebarHeight))
+        let customTitlebarBandHeight = TopChromeMetrics.reservedTopChromePadding(for: window)
         let interactionBandMinY = window.contentLayoutRect.maxY - customTitlebarBandHeight - 0.5
         return windowPoint.y >= interactionBandMinY
     }
