@@ -2237,15 +2237,9 @@ struct ContentView: View {
     @State private var titlebarControlPadding = TopChromeMetrics.fallbackControlClearance
     @AppStorage(WorkspacePresentationModeSettings.modeKey)
     private var workspacePresentationMode = WorkspacePresentationModeSettings.defaultMode.rawValue
-    @AppStorage(TabBarChromeSettings.stateKey)
-    private var tabBarChromeStateRaw = TabBarChromeState.full.rawValue
 
     private var isMinimalMode: Bool {
         WorkspacePresentationModeSettings.mode(for: workspacePresentationMode) == .minimal
-    }
-
-    private var tabBarChromeState: TabBarChromeState {
-        TabBarChromeSettings.state(for: tabBarChromeStateRaw)
     }
 
     private var reservedTopChromePadding: CGFloat {
@@ -2409,7 +2403,13 @@ struct ContentView: View {
                     anchorView: fullscreenControlsViewModel.notificationsAnchorView
                 )
             },
-            onNewTab: { tabManager.addTab() },
+            onNewTab: {
+                if let appDelegate = AppDelegate.shared {
+                    appDelegate.presentCreateWorkspaceSheet()
+                } else {
+                    tabManager.addTab()
+                }
+            },
             visibilityMode: .alwaysVisible
         )
     }
@@ -2587,15 +2587,6 @@ struct ContentView: View {
                         fullscreenControls
                             .padding(.leading, 10)
                             .padding(.top, 4)
-                    }
-                }
-                .overlay(alignment: .topTrailing) {
-                    if tabBarChromeState == .shrunk {
-                        TabBarChromeHandle(onExpand: {
-                            tabBarChromeStateRaw = TabBarChromeState.full.rawValue
-                        })
-                        .padding(.top, isMinimalMode ? 4 : reservedTopChromePadding + 4)
-                        .padding(.trailing, 8)
                     }
                 }
                 .frame(minWidth: CGFloat(SessionPersistencePolicy.minimumWindowWidth), minHeight: CGFloat(SessionPersistencePolicy.minimumWindowHeight))
@@ -3085,14 +3076,6 @@ struct ContentView: View {
             removeSidebarResizerPointerMonitor()
         })
 
-        view = AnyView(view.onChange(of: tabBarChromeStateRaw) { _, newRaw in
-            let state = TabBarChromeSettings.state(for: newRaw)
-            let visible = state == .full
-            for tab in tabManager.tabs {
-                tab.setTabBarVisible(visible)
-            }
-        })
-
         view = AnyView(view.background(WindowAccessor { [sidebarBlendMode, bgGlassEnabled, bgGlassTintHex, bgGlassTintOpacity] window in
             beginMainWindowChromeHandoffIfNeeded(for: window)
 
@@ -3392,7 +3375,11 @@ struct ContentView: View {
     }
 
     private func addTab() {
-        tabManager.addTab()
+        if let appDelegate = AppDelegate.shared {
+            appDelegate.presentCreateWorkspaceSheet()
+        } else {
+            tabManager.addTab()
+        }
         sidebarSelectionState.selection = .tabs
     }
 
@@ -14601,23 +14588,5 @@ extension NSColor {
             return String(format: "#%02X%02X%02X%02X", redByte, greenByte, blueByte, alphaByte)
         }
         return String(format: "#%02X%02X%02X", redByte, greenByte, blueByte)
-    }
-}
-
-private struct TabBarChromeHandle: View {
-    let onExpand: () -> Void
-
-    var body: some View {
-        Button(action: onExpand) {
-            Image(systemName: "sidebar.left")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 32, height: 32)
-        }
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .shadow(color: .black.opacity(0.12), radius: 4, x: 0, y: 2)
-        .buttonStyle(.plain)
-        .accessibilityLabel(String(localized: "accessibility.tab_bar.expand_handle",
-                                  defaultValue: "Expand tab bar"))
     }
 }

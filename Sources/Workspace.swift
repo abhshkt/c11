@@ -4037,6 +4037,7 @@ final class WorkspaceRemoteSessionController {
     }
 
     private static func remoteDaemonCacheRoot(fileManager: FileManager = .default) throws -> URL {
+        StateDirectoryMigration.ensureMigrated(fileManager: fileManager)
         let appSupportRoot = try fileManager.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
@@ -4044,7 +4045,7 @@ final class WorkspaceRemoteSessionController {
             create: true
         )
         let cacheRoot = appSupportRoot
-            .appendingPathComponent("c11mux", isDirectory: true)
+            .appendingPathComponent("c11", isDirectory: true)
             .appendingPathComponent("remote-daemons", isDirectory: true)
         try fileManager.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
         return cacheRoot
@@ -5167,6 +5168,7 @@ final class Workspace: Identifiable, ObservableObject {
         let appearance: FlashAppearance
         let timer: Timer
         let startedAt: Date
+        var lastBreadcrumbAt: Date?
     }
 
     @Published private(set) var persistentFlashPanels: [UUID: PersistentFlashState] = [:]
@@ -5223,6 +5225,22 @@ final class Workspace: Identifiable, ObservableObject {
     /// pushed in from `PaneInteractionOverlayHostView` per pane.
     lazy var paneCloseOverlayController = PaneCloseOverlayController(
         runtime: paneCloseInteractionRuntime
+    )
+
+    /// Workspace-scoped close-confirmation runtime. Distinct keyspace from
+    /// `paneInteractionRuntime` (panel-keyed) and `paneCloseInteractionRuntime`
+    /// (pane-keyed) so the workspace overlay's lifecycle never collides with
+    /// pane-scoped interactions. Only `.confirm` is supported here.
+    let workspaceCloseInteractionRuntime = WorkspaceCloseInteractionRuntime()
+
+    /// Mounts the workspace-scoped close-confirmation overlay (a near-black
+    /// scrim covering the workspace content area only) as an AppKit subview
+    /// of the window's themeFrame, above all portal-hosted content. Anchor
+    /// frame pushed in from `WorkspaceCloseOverlayHostView` rendered inside
+    /// `WorkspaceContentView` so the cover excludes the sidebar by
+    /// construction.
+    lazy var workspaceCloseOverlayController = WorkspaceCloseOverlayController(
+        runtime: workspaceCloseInteractionRuntime
     )
 
 
@@ -5486,7 +5504,14 @@ final class Workspace: Identifiable, ObservableObject {
     /// `NotificationCenter` — just in/out value-type mutation. Both the static
     /// factory and the live-update path call this so behavior is identical and
     /// testable in isolation. (C11-6)
-    static func applyChromeScale(
+    ///
+    /// `nonisolated` because the function touches no main-actor state — pure
+    /// value-type mutation — so the actor inheritance from `Workspace` is
+    /// incidental, not load-bearing. Without this, `WorkspaceApplyChromeScaleTests`
+    /// fails to compile under Swift 6 strict concurrency: XCTestCase methods
+    /// are non-main-actor by default, and calling a `@MainActor`-isolated
+    /// static method from a synchronous context is a compile error.
+    nonisolated static func applyChromeScale(
         _ tokens: ChromeScaleTokens,
         to appearance: inout BonsplitConfiguration.Appearance
     ) {
@@ -5505,13 +5530,6 @@ final class Workspace: Identifiable, ObservableObject {
         appearance.splitToolbarButtonIconSize  = tokens.splitToolbarButtonIcon
         appearance.splitToolbarButtonFrameSize = tokens.splitToolbarButtonFrame
         appearance.splitToolbarSeparatorHeight = tokens.splitToolbarSeparatorHeight
-    }
-
-    func setTabBarVisible(_ visible: Bool) {
-        guard bonsplitController.configuration.appearance.showsTabBar != visible else { return }
-        var next = bonsplitController.configuration
-        next.appearance.showsTabBar = visible
-        bonsplitController.configuration = next
     }
 
     /// Live-update path for chrome-scale changes. Mirrors `applyGhosttyChrome`'s
@@ -5676,10 +5694,8 @@ final class Workspace: Identifiable, ObservableObject {
             context: nil,
             tokens: ChromeScaleTokens.resolved(from: .standard)
         )
-        let initialChromeState = TabBarChromeSettings.state(
-            for: UserDefaults.standard.string(forKey: TabBarChromeSettings.stateKey)
-        )
-        appearance.showsTabBar = initialChromeState == .full
+        // C11-41: tab bar chrome state was removed; always show the full tab bar.
+        appearance.showsTabBar = true
         let config = BonsplitConfiguration(
             allowSplits: true,
             allowCloseTabs: true,
@@ -5694,6 +5710,11 @@ final class Workspace: Identifiable, ObservableObject {
             autoCloseEmptyPanes: true,
             contentViewLifecycle: .keepAllAlive,
             newTabPosition: .current,
+            // C11-26: left-anchored always-visible close X + two-item
+            // right-click menu (Close Tab, Close Pane). Sidesteps the
+            // right-edge hit-collision bug and matches native macOS
+            // Cocoa tab convention (Finder, Terminal.app, Notes).
+            simplifiedTabContextMenu: true,
             appearance: appearance
         )
         self.bonsplitController = BonsplitController(configuration: config)
@@ -5797,6 +5818,21 @@ final class Workspace: Identifiable, ObservableObject {
     /// UUID and starts watching `$C11_STATE/workspaces/<id>/mailboxes/_outbox/`.
     /// Idempotent. A no-op `silent` handler is registered so topic-silent
     /// flows work before Step 10 lands the real stdin handler.
+    ///
+    /// The `stdin` handler writes via `TextBoxSubmit.send(_:via:)` rather
+    /// than raw `sendText`. Ghostty wraps `sendText` bytes in bracketed-paste
+    /// markers (`ESC[200~…ESC[201~`), and bracketed paste is specifically
+    /// designed so embedded `\n`/`\r` do NOT auto-execute — line discipline
+    /// (zsh ZLE, bash readline) and TUI raw-mode input handlers only submit
+    /// when a real Return arrives outside the paste. So `sendText` alone
+    /// leaves the framed `<c11-msg>` block sitting in the recipient's
+    /// input buffer without ever reaching the agent. `TextBoxSubmit.send`
+    /// bracketed-pastes the content and then dispatches a synthetic Return
+    /// key (with the 200 ms gap Claude CLI's paste-processing requires),
+    /// which submits the multi-line block as one user turn for TUI
+    /// recipients (Claude Code, codex) and as a (failing) command for
+    /// cooked-mode shells — the latter being undefined behavior anyway,
+    /// since `mailbox.delivery=stdin` only makes sense on agent surfaces.
     func startMailboxDispatcher() {
         guard mailboxDispatcher == nil else { return }
         let stateURL: URL
@@ -5833,7 +5869,7 @@ final class Workspace: Identifiable, ObservableObject {
             guard let terminalPanel = panel as? TerminalPanel else {
                 return .surfaceNotTerminal
             }
-            terminalPanel.sendText(text)
+            TextBoxSubmit.send(text, via: terminalPanel.surface)
             return .ok(bytes: text.utf8.count)
         }
         dispatcher.registerHandler(
@@ -8264,6 +8300,8 @@ final class Workspace: Identifiable, ObservableObject {
         paneInteractionRuntime.clearAll()
         paneCloseInteractionRuntime.clearAll()
         paneCloseOverlayController.cleanup()
+        workspaceCloseInteractionRuntime.clear()
+        workspaceCloseOverlayController.cleanup()
 
         // CMUX-10: cancel every persistent-flash timer + manifest entry so
         // teardown does not leak repeating timers or stale `flash_state`
@@ -9172,6 +9210,11 @@ final class Workspace: Identifiable, ObservableObject {
                 shortcuts[contextAction] = KeyboardShortcut(key, modifiers: stored.eventModifiers)
             }
         }
+        // C11-26: ⌘W routes through AppDelegate's keyDown handler, not a
+        // SwiftUI .keyboardShortcut on a Button. Surface the hint in the
+        // context menu anyway so the gesture is discoverable. Hardcoded
+        // because there's no KeyboardShortcutSettings.Action for it.
+        shortcuts[.closeTab] = KeyboardShortcut("w", modifiers: .command)
         return shortcuts
     }
 
@@ -9249,14 +9292,27 @@ final class Workspace: Identifiable, ObservableObject {
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self else { return }
-                guard self.persistentFlashPanels[panelId] != nil else { return }
+                guard var state = self.persistentFlashPanels[panelId] else { return }
+                let now = Date()
+                let lastEmittedAt = state.lastBreadcrumbAt ?? state.startedAt
+                if state.lastBreadcrumbAt == nil || now.timeIntervalSince(lastEmittedAt) >= 60 {
+                    sentryBreadcrumb("flash.persistent.tick", category: "flash", data: [
+                        "panelId": panelId.uuidString,
+                        "seconds_active": Int(now.timeIntervalSince(state.startedAt)),
+                        "seconds_since_last_tick_breadcrumb": Int(now.timeIntervalSince(lastEmittedAt)),
+                        "app_active": NSApp?.isActive ?? false
+                    ])
+                    state.lastBreadcrumbAt = now
+                    self.persistentFlashPanels[panelId] = state
+                }
                 self.runFlashPulse(panelId: panelId, appearance: appearance)
             }
         }
         persistentFlashPanels[panelId] = PersistentFlashState(
             appearance: appearance,
             timer: timer,
-            startedAt: Date()
+            startedAt: Date(),
+            lastBreadcrumbAt: nil
         )
 
         // Manifest overlay: write once on start so external agents asking
@@ -10422,6 +10478,48 @@ extension Workspace: BonsplitDelegate {
         }
     }
 
+    /// Present the workspace-scoped close confirmation overlay and await the
+    /// user's decision. Returns `true` only on explicit accept — `.cancelled`
+    /// and `.dismissed` both map to `false` so callers don't fire teardown on
+    /// a workspace whose state may have drifted (e.g. closed mid-prompt).
+    ///
+    /// The overlay is anchored on this workspace's content area (sidebar
+    /// stays visible). At most one workspace-close interaction can be active
+    /// per workspace; re-presenting while one is live dismisses the existing
+    /// one with `.dismissed`.
+    @MainActor
+    func presentConfirmCloseWorkspace(
+        title: String,
+        message: String,
+        source: InteractionSource,
+        dedupeToken: String? = nil
+    ) async -> Bool {
+        await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            let content = ConfirmContent(
+                title: title,
+                message: message.isEmpty ? nil : message,
+                confirmLabel: String(
+                    localized: "dialog.closeWorkspace.confirmButton",
+                    defaultValue: "Close Workspace"
+                ),
+                cancelLabel: String(
+                    localized: "dialog.pane.confirm.cancel",
+                    defaultValue: "Cancel"
+                ),
+                role: .destructive,
+                style: .standard,
+                source: source,
+                completion: { result in
+                    cont.resume(returning: result == .confirmed)
+                }
+            )
+            workspaceCloseInteractionRuntime.present(
+                content: content,
+                dedupeToken: dedupeToken
+            )
+        }
+    }
+
     /// Present a `.textInput` pane interaction on the given panel and await the
     /// user's submitted value. Returns `nil` if the user cancelled or the
     /// interaction was dismissed (panel torn down, workspace closed, etc.) so
@@ -11133,6 +11231,20 @@ extension Workspace: BonsplitDelegate {
         // pane-close confirmation that survived the close path) so its
         // continuation resolves with .dismissed instead of leaking.
         paneCloseInteractionRuntime.clear(panelId: paneId.id)
+        // Authoritative anchor cleanup for the close-pane overlay. AnchorView
+        // dismantleNSView deliberately does NOT remove the anchor (SwiftUI
+        // dismantles transient AnchorViews during sibling re-layout, and
+        // removing on every dismantle orphans surviving panes). This is the
+        // one place where we know the pane is actually gone.
+        paneCloseOverlayController.removeAnchor(paneIdentity: paneId.id)
+        // After Bonsplit removes a pane, surviving siblings get reflowed into
+        // their new positions but the existing reportFrame paths (SwiftUI
+        // updateNSView, AppKit viewDidMoveToWindow) all fire DURING the
+        // reflow and capture transient/half-applied coordinates. Without
+        // this nudge the controller's anchors map stays stale and the
+        // confirmation overlay mounts at the wrong pane position. Triggers
+        // twice (next tick + ~60ms) to cover multi-pass layouts.
+        paneCloseOverlayController.refreshAllAnchorsAfterReflow()
 
         let closedPanelIds = pendingPaneClosePanelIds.removeValue(forKey: paneId.id) ?? []
         let shouldScheduleFocusReconcile = !isDetachingCloseTransaction
@@ -11501,6 +11613,14 @@ extension Workspace: BonsplitDelegate {
                 _ = self.newTerminalSurface(inPane: pane)
             } else {
                 guard self.bonsplitController.allPaneIds.contains(pane) else { return }
+                // Pre-load forceCloseTabIds so Bonsplit's shouldClosePane veto
+                // (which fires when any terminal in the pane is busy / not at
+                // an idle prompt) doesn't silently swallow the close after the
+                // user already confirmed the pane-level action. Mirrors the
+                // isOnlyPane branch above.
+                for tab in self.bonsplitController.tabs(inPane: pane) {
+                    self.forceCloseTabIds.insert(tab.id)
+                }
                 _ = self.bonsplitController.closePane(pane)
             }
         }
@@ -11608,6 +11728,18 @@ extension Workspace: BonsplitDelegate {
         case .clearName:
             guard let panelId = panelIdFromSurfaceId(tab.id) else { return }
             setPanelCustomTitle(panelId: panelId, title: nil)
+        case .closeTab:
+            // Route through the same path as clicking the close X so the
+            // shouldCloseTab gate (pin protection, dirty-confirm dialog,
+            // workspace-on-last-surface routing) runs identically.
+            markExplicitClose(surfaceId: tab.id)
+            _ = controller.closeTab(tab.id, inPane: pane)
+        case .closePane:
+            // Reuse the existing pane-close confirmation flow (same as
+            // clicking the trailing-toolbar X on the tab bar). Handles the
+            // only-pane-in-workspace degenerate case via "Reset entire pane?"
+            // — the pane is reset with a fresh terminal rather than torn down.
+            splitTabBar(controller, didRequestClosePane: pane)
         case .closeToLeft:
             closeTabs(tabIdsToLeft(of: tab.id, inPane: pane))
         case .closeToRight:

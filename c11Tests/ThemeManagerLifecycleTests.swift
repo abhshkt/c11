@@ -111,7 +111,7 @@ final class ThemeManagerLifecycleTests: XCTestCase {
         let manager = ThemeManager(notificationCenter: center)
 
         let context = manager.makeContext(colorScheme: ThemeContext.ColorScheme.light)
-        let thickness: CGFloat? = manager.resolve(.dividers_thicknessPt, context: context)
-        XCTAssertEqual(try XCTUnwrap(thickness), 1.0, accuracy: 0.0001)
+        let thickness = try XCTUnwrap(manager.resolve(.dividers_thicknessPt, context: context) as CGFloat?)
+        XCTAssertEqual(Double(thickness), 1.0, accuracy: 0.0001)
     }
 }
