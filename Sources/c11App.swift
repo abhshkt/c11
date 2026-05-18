@@ -453,43 +453,19 @@ struct cmuxApp: App {
             debugMenus
 #endif
 
-            // C11-41 File menu: window + close. New Window, Open Folder…,
-            // Close Other Tabs in Pane. Close Tab / Close Workspace / Close
-            // Window are intentionally menu-less — ⌘W / ⌘⇧W / ⌃⌘W still work
-            // through the AppDelegate keyDown handler.
+            // File menu: New Workspace is the entry point for new work.
+            // New Window lives in View; Close Other Tabs in Pane lives in Pane.
+            // Close Tab / Close Workspace / Close Window are intentionally
+            // menu-less — ⌘W / ⌘⇧W / ⌃⌘W still work through the AppDelegate
+            // keyDown handler.
             CommandGroup(replacing: .newItem) {
-                splitCommandButton(title: String(localized: "menu.file.newWindow", defaultValue: "New Window"), shortcut: newWindowMenuShortcut) {
-                    appDelegate.openNewMainWindow(nil)
-                }
-
-                splitCommandButton(title: String(localized: "menu.file.openFolder", defaultValue: "Open Folder…"), shortcut: openFolderMenuShortcut) {
-                    let panel = NSOpenPanel()
-                    panel.canChooseFiles = false
-                    panel.canChooseDirectories = true
-                    panel.allowsMultipleSelection = false
-                    panel.title = String(localized: "menu.file.openFolder.panelTitle", defaultValue: "Open Folder")
-                    panel.prompt = String(localized: "menu.file.openFolder.panelPrompt", defaultValue: "Open")
-                    if panel.runModal() == .OK, let url = panel.url {
-                        if let appDelegate = AppDelegate.shared {
-                            if appDelegate.addWorkspaceInPreferredMainWindow(
-                                workingDirectory: url.path,
-                                debugSource: "menu.openFolder"
-                            ) == nil {
-                                appDelegate.openNewMainWindow(nil)
-                            }
-                        } else {
-                            activeTabManager.addWorkspace(workingDirectory: url.path)
-                        }
+                splitCommandButton(title: String(localized: "menu.workspace.new", defaultValue: "New Workspace"), shortcut: newWorkspaceMenuShortcut) {
+                    if let appDelegate = AppDelegate.shared {
+                        appDelegate.presentCreateWorkspaceSheet()
+                    } else {
+                        activeTabManager.addTab()
                     }
                 }
-
-                Divider()
-
-                Button(String(localized: "menu.file.closeOtherTabs", defaultValue: "Close Other Tabs in Pane")) {
-                    closeOtherTabsInFocusedPane()
-                }
-                .keyboardShortcut("t", modifiers: [.command, .option])
-                .disabled(!activeTabManager.canCloseOtherTabsInFocusedPane())
             }
 
             // C11-41: Command palettes live in the c11 menu — keeping them out
@@ -510,8 +486,16 @@ struct cmuxApp: App {
                 .keyboardShortcut("p", modifiers: [.command, .shift])
             }
 
-            // C11-41: Remove the (dead) Help menu macOS draws by default.
-            CommandGroup(replacing: .help) { }
+            // AppKit auto-injects a Help menu (with its search field) whenever
+            // there isn't one — and reliably suppressing it from a SwiftUI app
+            // is an open battle. Embrace the slot instead: put a real action
+            // here so the menu earns its space. About c11 doubles as the app's
+            // identity card and a useful answer to "what is this thing?"
+            CommandGroup(replacing: .help) {
+                Button(String(localized: "menu.help.about", defaultValue: "About c11")) {
+                    showAboutPanel()
+                }
+            }
 
             // C11-41 Edit menu: Find items go flat (match Safari/Mail/Notes).
             CommandGroup(after: .textEditing) {
@@ -546,10 +530,16 @@ struct cmuxApp: App {
                 .disabled(!(activeTabManager.isFindVisible))
             }
 
-            // C11-41 View menu: chrome + Appearance. Everything else (browser
-            // verbs, workspace switching, splits, surface focus, notifications)
-            // moved to its own intent-named menu.
+            // View menu: chrome + Appearance + window-level toggles.
+            // Browser verbs, workspace switching, splits, surface focus, and
+            // notifications live in their own intent-named menus.
             CommandGroup(replacing: .toolbar) {
+                splitCommandButton(title: String(localized: "menu.view.newWindow", defaultValue: "New Window"), shortcut: newWindowMenuShortcut) {
+                    appDelegate.openNewMainWindow(nil)
+                }
+
+                Divider()
+
                 splitCommandButton(title: String(localized: "menu.view.toggleSidebar", defaultValue: "Toggle Sidebar"), shortcut: toggleSidebarMenuShortcut) {
                     if AppDelegate.shared?.toggleSidebarInActiveMainWindow() != true {
                         sidebarState.toggle()
@@ -991,6 +981,14 @@ struct cmuxApp: App {
                     let targetWindow = NSApp.keyWindow ?? NSApp.mainWindow
                     _ = AppDelegate.shared?.requestCommandPaletteRenameTab(preferredWindow: targetWindow, source: "menu.renameTab")
                 }
+
+                Divider()
+
+                Button(String(localized: "menu.pane.closeOtherTabs", defaultValue: "Close Other Tabs in Pane")) {
+                    closeOtherTabsInFocusedPane()
+                }
+                .keyboardShortcut("t", modifiers: [.command, .option])
+                .disabled(!activeTabManager.canCloseOtherTabsInFocusedPane())
             }
 
             // C11-41 Browser menu: every browser-surface verb in one home.
@@ -4079,67 +4077,6 @@ enum ClaudeCodeIntegrationSettings {
     }
 }
 
-/// Controls which terminal agent the "A" tab-bar button spawns.
-/// The button creates a new terminal surface and sends `shellCommand` as if
-/// the operator typed it — the agent runs inside the user's login shell, so
-/// quitting the agent leaves the shell running.
-enum AgentLauncherSettings {
-    static let kindKey = "agentLauncherKind"
-
-    enum Kind: String, CaseIterable, Identifiable {
-        case claudeCode
-        case codex
-        case opencode
-        case kimi
-
-        var id: String { rawValue }
-
-        var displayName: String {
-            switch self {
-            case .claudeCode:
-                return String(localized: "agentLauncher.kind.claudeCode", defaultValue: "Claude Code")
-            case .codex:
-                return String(localized: "agentLauncher.kind.codex", defaultValue: "Codex")
-            case .opencode:
-                return String(localized: "agentLauncher.kind.opencode", defaultValue: "OpenCode")
-            case .kimi:
-                return String(localized: "agentLauncher.kind.kimi", defaultValue: "Kimi")
-            }
-        }
-
-        /// Shell command each agent is launched with — hardcoded to the
-        /// launcher form that runs the agent as an interactive TUI inside the
-        /// operator's login shell.
-        fileprivate var builtInCommand: String {
-            switch self {
-            case .claudeCode:
-                return "claude --dangerously-skip-permissions"
-            case .codex:
-                return "codex --yolo"
-            case .opencode:
-                return "opencode"
-            case .kimi:
-                return "kimi"
-            }
-        }
-    }
-
-    static let defaultKind: Kind = .claudeCode
-
-    struct Resolved {
-        let kind: Kind
-        let shellCommand: String
-
-        var displayName: String { kind.displayName }
-    }
-
-    static func current(defaults: UserDefaults = .standard) -> Resolved {
-        let kindRaw = defaults.string(forKey: kindKey) ?? defaultKind.rawValue
-        let kind = Kind(rawValue: kindRaw) ?? defaultKind
-        return Resolved(kind: kind, shellCommand: kind.builtInCommand)
-    }
-}
-
 enum WelcomeSettings {
     static let shownKey = "cmuxWelcomeShown"
     static let spikeURL = "https://stage11.ai"
@@ -4330,13 +4267,17 @@ enum TelemetrySettings {
 
 private enum SettingsPage: String, CaseIterable, Identifiable {
     case general
+    // C11-14: Agents gets its own nav entry, high in the sidebar. The icon
+    // mirrors the per-pane "A" button so operators learn the correlation at
+    // a glance.
+    case agents
     case appearance
     case workspaceSidebar
     case browser
     case notifications
     case input
     case keyboardShortcuts
-    case agentsAutomation
+    case automation
     case dataPrivacy
     case advanced
 
@@ -4346,6 +4287,8 @@ private enum SettingsPage: String, CaseIterable, Identifiable {
         switch self {
         case .general:
             return String(localized: "settings.page.general", defaultValue: "General")
+        case .agents:
+            return String(localized: "settings.page.agents", defaultValue: "Agents")
         case .appearance:
             return String(localized: "settings.page.appearance", defaultValue: "Appearance")
         case .workspaceSidebar:
@@ -4358,8 +4301,8 @@ private enum SettingsPage: String, CaseIterable, Identifiable {
             return String(localized: "settings.page.input", defaultValue: "Input")
         case .keyboardShortcuts:
             return String(localized: "settings.page.keyboardShortcuts", defaultValue: "Keyboard Shortcuts")
-        case .agentsAutomation:
-            return String(localized: "settings.page.agentsAutomation", defaultValue: "Agents & Automation")
+        case .automation:
+            return String(localized: "settings.page.automation", defaultValue: "Automation")
         case .dataPrivacy:
             return String(localized: "settings.page.dataPrivacy", defaultValue: "Data & Privacy")
         case .advanced:
@@ -4371,6 +4314,8 @@ private enum SettingsPage: String, CaseIterable, Identifiable {
         switch self {
         case .general:
             return String(localized: "settings.page.general.helper", defaultValue: "choose the app-level defaults that travel with the room.")
+        case .agents:
+            return String(localized: "settings.page.agents.helper", defaultValue: "the A button on every pane launches an agent. shape what runs and what it knows about c11.")
         case .appearance:
             return String(localized: "settings.page.appearance.helper", defaultValue: "tune the room without touching terminal themes.")
         case .workspaceSidebar:
@@ -4383,8 +4328,8 @@ private enum SettingsPage: String, CaseIterable, Identifiable {
             return String(localized: "settings.page.input.helper", defaultValue: "shape command input before it reaches a surface.")
         case .keyboardShortcuts:
             return String(localized: "settings.page.keyboardShortcuts.helper", defaultValue: "shape the keys that move through the room.")
-        case .agentsAutomation:
-            return String(localized: "settings.page.agentsAutomation.helper", defaultValue: "agents can drive c11 once they know the room.")
+        case .automation:
+            return String(localized: "settings.page.automation.helper", defaultValue: "let external tools drive c11 through its local socket.")
         case .dataPrivacy:
             return String(localized: "settings.page.dataPrivacy.helper", defaultValue: "clear local traces and choose what leaves the machine.")
         case .advanced:
@@ -4395,13 +4340,17 @@ private enum SettingsPage: String, CaseIterable, Identifiable {
     var iconName: String {
         switch self {
         case .general: return "gearshape"
+        // C11-14: matches the per-pane "A" button — "A in a circle" SF Symbol.
+        // The visual rhyme between the sidebar nav and the in-pane button
+        // teaches the operator what the A button is for.
+        case .agents: return "a.circle"
         case .appearance: return "paintpalette"
         case .workspaceSidebar: return "sidebar.left"
         case .browser: return "globe"
         case .notifications: return "bell"
         case .input: return "text.cursor"
         case .keyboardShortcuts: return "keyboard"
-        case .agentsAutomation: return "point.3.connected.trianglepath.dotted"
+        case .automation: return "point.3.connected.trianglepath.dotted"
         case .dataPrivacy: return "lock.shield"
         case .advanced: return "slider.horizontal.3"
         }
@@ -4435,8 +4384,6 @@ struct SettingsView: View {
     @AppStorage(SocketControlSettings.appStorageKey) private var socketControlMode = SocketControlSettings.defaultMode.rawValue
     @AppStorage(ClaudeCodeIntegrationSettings.hooksEnabledKey)
     private var claudeCodeHooksEnabled = ClaudeCodeIntegrationSettings.defaultHooksEnabled
-    @AppStorage(AgentLauncherSettings.kindKey)
-    private var agentLauncherKindRaw = AgentLauncherSettings.defaultKind.rawValue
     @AppStorage(TelemetrySettings.sendAnonymousTelemetryKey)
     private var sendAnonymousTelemetry = TelemetrySettings.defaultSendAnonymousTelemetry
     @AppStorage("cmuxPortBase") private var cmuxPortBase = 9100
@@ -5069,6 +5016,8 @@ struct SettingsView: View {
         switch selectedPage {
         case .general:
             generalSettingsPage
+        case .agents:
+            agentsSettingsPage
         case .appearance:
             appearanceSettingsPage
         case .workspaceSidebar:
@@ -5081,8 +5030,8 @@ struct SettingsView: View {
             inputSettingsPage
         case .keyboardShortcuts:
             keyboardShortcutSettingsPage
-        case .agentsAutomation:
-            agentsAutomationSettingsPage
+        case .automation:
+            automationSettingsPage
         case .dataPrivacy:
             dataPrivacySettingsPage
         case .advanced:
@@ -6138,36 +6087,37 @@ struct SettingsView: View {
             .accessibilityIdentifier("ShortcutRecordingHint")
     }
 
+    // C11-14: Agents gets its own Settings page. c11 skills install first
+    // (they're what makes the agents actually understand c11); default agent
+    // controls what the per-pane A button launches.
     @ViewBuilder
-    private var agentsAutomationSettingsPage: some View {
-        SettingsSectionHeader(title: String(localized: "settings.section.agentSkills", defaultValue: "Agent Skills"))
+    private var agentsSettingsPage: some View {
+        SettingsSectionHeader(title: String(localized: "settings.section.c11Skills", defaultValue: "c11 skills"))
+        SettingsCardNote(String(
+            localized: "settings.c11Skills.note",
+            defaultValue: "c11's skill files install into each agent's skill folder (Claude Code, Codex, …) with your approval. linked folders are shown as shared so removing once cannot silently affect another agent."
+        ))
         SettingsCard {
             AgentSkillsSettingsSection()
         }
-        SettingsCardNote(String(
-            localized: "settings.agentSkills.note",
-            defaultValue: "c11 installs its skill files into detected agent skill folders only with your approval. Linked skill folders are shown as shared so one remove action cannot silently affect another agent."
+
+        SettingsSectionHeader(title: String(
+            localized: "settings.section.defaultAgent",
+            defaultValue: "default agent"
         ))
-
-        SettingsSectionHeader(title: String(localized: "settings.section.agentLauncher", defaultValue: "Agent Launcher Button"))
+        SettingsCardNote(String(
+            localized: "settings.defaultAgent.note",
+            defaultValue: "the A button on every pane launches this. new terminal still opens bash. drop a `.c11/agents.json` in any repo to override these settings for terminals opened there."
+        ))
         SettingsCard {
-            SettingsPickerRow(
-                String(localized: "settings.agentLauncher.kind", defaultValue: "Launch Agent"),
-                subtitle: String(localized: "settings.agentLauncher.kind.subtitle", defaultValue: "The \"A\" button in each pane's tab bar spawns a new terminal and runs this agent."),
-                controlWidth: pickerColumnWidth,
-                selection: $agentLauncherKindRaw,
-                accessibilityId: "SettingsAgentLauncherKindPicker"
-            ) {
-                ForEach(AgentLauncherSettings.Kind.allCases) { kind in
-                    Text(kind.displayName).tag(kind.rawValue)
-                }
-            }
-
-            SettingsCardDivider()
-
-            SettingsCardNote(String(localized: "settings.agentLauncher.note", defaultValue: "The agent runs as a child of the new terminal's login shell, so quitting the agent leaves the shell available."))
+            DefaultAgentSettingsSection()
         }
+    }
 
+    // C11-14: Automation page now hosts the permissions + socket-access +
+    // integrations sections that used to share a page with Agents.
+    @ViewBuilder
+    private var automationSettingsPage: some View {
         SettingsSectionHeader(title: String(
             localized: "settings.section.permissions",
             defaultValue: "Permissions"

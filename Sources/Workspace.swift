@@ -5398,7 +5398,7 @@ final class Workspace: Identifiable, ObservableObject {
                     localized: "workspace.tooltip.newAgent",
                     defaultValue: "Launch Agent (%@)"
                 )
-                return String(format: template, locale: Locale.current, AgentLauncherSettings.current().displayName)
+                return String(format: template, locale: Locale.current, DefaultAgentConfigStore.shared.current.defaultAgent.displayName)
             }(),
             newTerminal: KeyboardShortcutSettings.Action.newSurface.tooltip(
                 String(localized: "workspace.tooltip.newTerminal", defaultValue: "New Terminal")
@@ -8023,6 +8023,18 @@ final class Workspace: Identifiable, ObservableObject {
             return nil
         }
         return command
+    }
+
+    /// C11-14: cwd to feed the agent resolver for project `.c11/agents.json`
+    /// discovery. Falls back through focused panel → workspace currentDirectory
+    /// → process cwd so something is always available to walk upward from.
+    func resolverCwdForAgentLaunch() -> String {
+        if let panel = focusedTerminalPanel, !panel.directory.isEmpty {
+            return panel.directory
+        }
+        let dir = currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !dir.isEmpty { return dir }
+        return FileManager.default.currentDirectoryPath
     }
 
     /// Create a new browser panel split
@@ -11526,35 +11538,53 @@ extension Workspace: BonsplitDelegate {
         }
     }
 
-    /// Create a new terminal and immediately send the configured agent launcher
+    /// Create a new terminal and immediately send the configured agent launch
     /// command. Uses the same "queue sendText before ready, flush on ready"
     /// pattern as the welcome workspace.
-    private func launchAgentSurface(inPane pane: PaneID) {
-        guard let panel = newTerminalSurface(inPane: pane) else { return }
-        let command = AgentLauncherSettings.current().shellCommand
-        guard !command.isEmpty else { return }
-        panel.sendText(command + "\n")
+    ///
+    /// `explicitAgent` lets the caller override the configured default —
+    /// used by the right-click menu's "launch this one now" affordance and
+    /// the `c11 default-agent launch --agent <type>` socket command.
+    func launchAgentSurface(inPane pane: PaneID, explicitAgent: AgentType? = nil) {
+        let userDefault = DefaultAgentConfigStore.shared.current
+        let projectConfig = DefaultAgentProjectConfig.find(from: resolverCwdForAgentLaunch())
+        let resolved = DefaultAgentResolver.resolve(
+            explicitAgent: explicitAgent,
+            userDefault: userDefault,
+            projectConfig: projectConfig
+        )
+        guard !resolved.launch.command.isEmpty else { return }
+        guard let panel = newTerminalSurface(
+            inPane: pane,
+            startupEnvironment: resolved.launch.envOverrides
+        ) else { return }
+        // The launch command goes to bash; for claude-code the initial prompt
+        // is already baked in as a positional arg by the resolver. Other
+        // agents preserve the prompt in their config but don't auto-deliver
+        // (different TUI input contracts; per-agent post-ready delivery is
+        // a follow-up).
+        panel.sendText(resolved.launch.command + "\n")
     }
 
     func splitTabBar(_ controller: BonsplitController, menuItemsForNewTabKind kind: String, inPane pane: PaneID) -> [BonsplitNewTabMenuItem] {
         guard kind == "agent" else { return [] }
-        let current = AgentLauncherSettings.current().kind
-        return AgentLauncherSettings.Kind.allCases.map { k in
+        let current = DefaultAgentConfigStore.shared.current.defaultAgent
+        return AgentType.allCases.map { type in
             BonsplitNewTabMenuItem(
-                id: k.rawValue,
-                label: k.displayName,
-                isCurrent: k == current
+                id: type.rawValue,
+                label: type.displayName,
+                isCurrent: type == current
             )
         }
     }
 
     func splitTabBar(_ controller: BonsplitController, didSelectNewTabMenuItem itemId: String, forKind kind: String, inPane pane: PaneID) {
         guard kind == "agent",
-              let chosen = AgentLauncherSettings.Kind(rawValue: itemId) else { return }
+              let chosen = AgentType(rawValue: itemId) else { return }
         // Update the default only; the next left-click on A spawns the chosen
         // agent. Launching here would contradict right-click semantics (a
         // preference gesture, not an action gesture).
-        UserDefaults.standard.set(chosen.rawValue, forKey: AgentLauncherSettings.kindKey)
+        DefaultAgentConfigStore.shared.setDefaultAgent(chosen)
         refreshSplitButtonTooltips()
     }
 
