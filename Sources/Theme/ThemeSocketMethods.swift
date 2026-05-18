@@ -123,7 +123,7 @@ public enum ThemeSocketMethods {
 
         do {
             let table = try TomlSubsetParser.parse(file: url.path, source: source)
-            let theme = try C11muxTheme.fromToml(table)
+            let theme = try C11Theme.fromToml(table)
             return [
                 "ok": true,
                 "name": theme.identity.name,
@@ -225,7 +225,7 @@ public enum ThemeSocketMethods {
             return ["ok": false, "error": "invalid theme name: \(reason)"]
         }
 
-        let parentTheme: C11muxTheme? = Self.mainSync {
+        let parentTheme: C11Theme? = Self.mainSync {
             ThemeManager.shared.theme(named: parent)
         }
         guard let parentTheme else {
@@ -245,7 +245,7 @@ public enum ThemeSocketMethods {
             return ["ok": false, "error": "invalid theme name: collides with bundled theme '\(childName)'"]
         }
 
-        let cloned = C11muxTheme(
+        let cloned = C11Theme(
             identity: .init(
                 name: childName,
                 displayName: childName,
@@ -368,12 +368,12 @@ public enum ThemeSocketMethods {
         }
     }
 
-    private static func resolveThemeForDiff(nameOrPath: String) -> C11muxTheme? {
+    private static func resolveThemeForDiff(nameOrPath: String) -> C11Theme? {
         if nameOrPath.contains("/") || nameOrPath.hasSuffix(".toml") {
             let url = URL(fileURLWithPath: nameOrPath)
             guard let source = try? String(contentsOf: url, encoding: .utf8),
                   let table = try? TomlSubsetParser.parse(file: url.path, source: source),
-                  let theme = try? C11muxTheme.fromToml(table) else {
+                  let theme = try? C11Theme.fromToml(table) else {
                 return nil
             }
             return theme

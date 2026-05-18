@@ -242,22 +242,17 @@ c11 trigger-flash [--surface <id|ref>]     # Visual flash on a surface
 
 Also responds to standard terminal escape sequences: OSC 9, OSC 99, OSC 777.
 
-## Installation (`c11 install`)
+## Skill Management (`c11 skill`)
 
-`c11 install <tui>` wires c11's notification shims and agent-declaration calls into a TUI's configuration. Human-run, consent-gated, reversible.
+`c11 skill` helps an operator inspect, install, update, or remove the bundled c11 skill files for supported agent tools. It does not install lifecycle shims into tenant configuration; agents should still self-report with `c11 set-agent` / metadata commands from inside their own session.
 
 ```bash
-c11 install claude-code              # Writes hooks into ~/.claude/settings.json
-c11 install codex                    # Installs a PATH shim at ~/.local/bin/cmux-shims/codex
-c11 install opencode
-c11 install kimi
-c11 install --list                   # State of all four TUIs
-c11 install --status claude-code     # Detailed status for one TUI
-c11 install claude-code --dry-run    # Show diff without writing
-c11 uninstall claude-code            # Reverses install byte-for-byte
+c11 skill path                       # Print the bundled skill source directory
+c11 skill status                     # Show supported targets and install state
+c11 skill install --tool claude-code # Install/update the c11 skill for one tool
+c11 skill install --tool codex --dry-run
+c11 skill remove --tool claude-code  # Remove a c11-installed skill
 ```
-
-Consent is always requested before any write. The installer also installs the c11 skill bundle into `~/.claude/skills/` so agents using that TUI learn the c11 vocabulary.
 
 ## Troubleshooting
 

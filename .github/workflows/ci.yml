@@ -89,7 +89,10 @@ jobs:
     # can be reinstated in nightly.yml if needed.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ github.repository == 'Stage-11-Agentics/c11' && 'macos-15-xlarge' || 'macos-15' }}
-    timeout-minutes: 15
+    # Stage-11 runs this job on macos-15-xlarge, but forks fall back to the
+    # standard macos-15 runner where cold app/test-bundle builds can exceed
+    # the default timeout before producing a real failure.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -187,3 +190,64 @@ jobs:
             -destination "platform=macOS" \
             COMPILER_INDEX_STORE_ENABLE=NO \
             build
+
+      - name: Build c11-unit test bundles
+        # Compile-rot guard for both c11Tests and c11LogicTests. The c11-unit
+        # TestAction launches c11 DEV.app and is pinned to known C11-27 baseline
+        # host failures; build-for-testing keeps the compile signal without
+        # requiring the host runtime suite to finish on fork macos-15 runners.
+        run: |
+          set -euo pipefail
+          SOURCE_PACKAGES_DIR="$PWD/.ci-source-packages"
+          xcodebuild -project GhosttyTabs.xcodeproj -scheme c11-unit -configuration Debug \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
+            -disableAutomaticPackageResolution \
+            -destination "platform=macOS" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build-for-testing
+
+      - name: Test c11-logic scheme
+        # Runtime regression signal for hostless tests. Host-required c11Tests
+        # remain compile-checked above; C11-27 records pre-existing failures
+        # under the old c11Tests prefix, so normalize c11LogicTests back before
+        # diffing the failure set.
+        run: |
+          set -euo pipefail
+          SOURCE_PACKAGES_DIR="$PWD/.ci-source-packages"
+          LOG="$RUNNER_TEMP/c11-logic-test.log"
+          PR_FAILURES="$RUNNER_TEMP/c11-logic-failures.txt"
+          BASELINE="$RUNNER_TEMP/c11-27-baseline-failures.txt"
+          NEW_FAILURES="$RUNNER_TEMP/c11-logic-new-failures.txt"
+
+          set +e
+          xcodebuild -project GhosttyTabs.xcodeproj -scheme c11-logic -configuration Debug \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
+            -disableAutomaticPackageResolution \
+            -destination "platform=macOS" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            test 2>&1 | tee "$LOG"
+          xcode_status=${PIPESTATUS[0]}
+          set -e
+
+          grep -E "^Test Case .* failed" "$LOG" \
+            | sed -E "s/^Test Case '-\\[([^]]+)\\]' failed.*$/\\1/" \
+            | sed -E "s/^c11LogicTests\\./c11Tests./" \
+            | sort -u > "$PR_FAILURES" || true
+
+          sort -u .lattice/plans/c11-27-baseline-failures.txt > "$BASELINE"
+          comm -23 "$PR_FAILURES" "$BASELINE" > "$NEW_FAILURES"
+
+          if [ -s "$NEW_FAILURES" ]; then
+            echo "New c11-logic test failures not present in C11-27 baseline:" >&2
+            cat "$NEW_FAILURES" >&2
+            exit 1
+          fi
+
+          if [ "$xcode_status" -ne 0 ] && [ ! -s "$PR_FAILURES" ]; then
+            echo "xcodebuild failed without parseable XCTest failures; treating as infrastructure/build failure." >&2
+            exit "$xcode_status"
+          fi
+
+          if [ "$xcode_status" -ne 0 ]; then
+            echo "Only C11-27 baseline-known c11-logic failures were observed; allowing this CI gate."
+          fi

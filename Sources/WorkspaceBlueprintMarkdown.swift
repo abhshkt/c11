@@ -187,10 +187,12 @@ enum WorkspaceBlueprintMarkdown {
         out += "## Layout\n\n"
         out += "```yaml\n"
         out += "layout:\n"
-        // The list under `layout:` is indented by 2 (dash) / 4 (content) so
-        // the parser sees `- ...` at indent > 0 and reads it as the value of
-        // `layout`. The recursive calls below add `+4` per nesting level,
-        // which keeps the whole tree consistent with the schema example.
+        // C11-35: emit list items at indent 4 so the leading dash sits at
+        // column 2 (under `layout:` at column 0). Previously emitted at
+        // indent 2, putting the dash at column 0 — valid compact YAML, but
+        // the in-tree `YAML` subset parser only accepts list items strictly
+        // deeper than their parent key, which collapsed `layout:` to an
+        // empty scalar and failed every `.md` round-trip.
         out += emitLayoutNode(file.plan.layout, surfaces: file.plan.surfaces, indent: 4, listItem: true)
         out += "```\n"
         return out.data(using: .utf8) ?? Data()

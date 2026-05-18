@@ -444,7 +444,7 @@ struct MarkdownEditorColors {
     @MainActor
     static func resolve(colorScheme: ColorScheme, themeManager _: ThemeManager) -> MarkdownEditorColors {
         // Theme-driven editor colors are deferred to a follow-up that wires
-        // the role schema through C11muxTheme.MarkdownChrome. v1 uses fallbacks.
+        // the role schema through C11Theme.MarkdownChrome. v1 uses fallbacks.
         return MarkdownEditorColors.fallback(isDark: colorScheme == .dark)
     }
 }

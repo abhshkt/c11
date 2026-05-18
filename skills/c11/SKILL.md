@@ -81,7 +81,7 @@ c11 set-agent --type codex --task lat-412
 
 Supported `--type` values include `claude-code`, `codex`, `kimi`, `opencode`. Any kebab-case string is accepted for unrecognized agents — the sidebar will render a generic chip.
 
-If c11's integration was installed for your TUI via `c11 install <tui>`, the declaration fires automatically at every session start. Call it anyway — `set-agent` is idempotent and guards against the integration not being installed.
+Some bundled wrappers or hooks may populate lifecycle metadata before your process starts. Call `set-agent` anyway: it is idempotent, cheap, and keeps skill-driven self-reporting as the standard path.
 
 You can also declare via env vars set in the spawning shell: `CMUX_AGENT_TYPE`, `CMUX_AGENT_MODEL`, `CMUX_AGENT_TASK`. Read once at surface start.
 
@@ -484,6 +484,16 @@ c11 mailbox recv --drain    # list + print + unlink (default)
 c11 mailbox recv --peek     # list + print only
 ```
 
+**Opting in to stdin delivery.** Stdin delivery is per-recipient and off by default. Set `mailbox.delivery` on the surface that should auto-receive — it is a **comma-separated string** (not a JSON array), and the only handlers registered today are `stdin` and `silent`:
+
+```bash
+c11 set-metadata --surface "$CMUX_SURFACE_ID" --key mailbox.delivery --value stdin --type string
+# multiple handlers run in order on the same envelope:
+c11 set-metadata --surface "$CMUX_SURFACE_ID" --key mailbox.delivery --value stdin,silent --type string
+```
+
+Writing the value as JSON (e.g. `--type json --value '["stdin"]'`) is the canonical footgun: the dispatcher splits the stringified blob on commas, doesn't match the literal token `["stdin"]` against `{stdin, silent}`, and silently registers zero handlers — the envelope still lands in the inbox, but the framed block never reaches the PTY. Use `--type string` with the bare token(s) above.
+
 ### Debugging
 
 ```bash
@@ -524,6 +534,10 @@ C11_SESSION_RESUME=1 c11 restore 01KQ0XYZ…
 ```
 
 The snapshot wraps a `WorkspaceApplyPlan`; the same shape Blueprints and the debug `c11 workspace apply` use. Explicit `SurfaceSpec.command` always wins over any registry synthesis — the registry only fires when a terminal surface has no command and its metadata declares a known `terminal_type`. See [`references/claude-resume.md`](references/claude-resume.md) for the full wire-up (the SessionStart hook operators paste into `~/.claude/settings.json`, the `C11_SESSION_RESUME` gate, troubleshooting).
+
+## Troubleshooting
+
+If `c11` on your PATH does not resolve to the active bundle's CLI (or you're unsure which `c11`/`cmux` your shell will invoke), run `c11 doctor` (`--json` for machine-readable output). It reports the bundled CLI path, what `c11`/`cmux` resolve to on PATH, whether `_cmux_fix_path` has run, and a `status` of `ok | mismatch | missing | no_bundle`.
 
 ## References
 
