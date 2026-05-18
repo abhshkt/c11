@@ -6307,7 +6307,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             injected.workspace.title = trimmed
         }
         if launchAgent {
-            let command = AgentLauncherSettings.current().shellCommand
+            let userDefault = DefaultAgentConfigStore.shared.current
+            let projectConfig = DefaultAgentProjectConfig.find(from: workingDirectory)
+            let resolved = DefaultAgentResolver.resolve(
+                explicitAgent: nil,
+                userDefault: userDefault,
+                projectConfig: projectConfig
+            )
+            let command = resolved.launch.command
             if let idx = injected.surfaces.firstIndex(where: { surface in
                 surface.kind == .terminal && (surface.command?.isEmpty ?? true)
             }) {
