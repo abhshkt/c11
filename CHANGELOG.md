@@ -6,6 +6,34 @@ Note: historical entries below pre-date the `c11mux` → `c11` rename and refere
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-05-18
+
+Feature release. Headline: **default terminal agent** — a workspace-scoped + user-scoped resolver so the A-button on every new terminal opens the right tool for the job (claude, codex, gemini, kimi, raw shell) without the operator picking each time. Alongside it, a second menu-bar pass: the File menu now leads with New Workspace (the real entry point for new work), Open Folder retires, New Window moves to View where it sits with the rest of the chrome toggles, Close Other Tabs lands in Pane where the verb actually applies, and the Browse panel inside New Workspace now offers the New Folder affordance so starting a workspace can include creating its directory. Plus: About c11 inside Help, Full Disk Access auto-detect, faster workspace switching, tab close X moved to the left.
+
+### Added
+
+- **Default terminal agent: workspace-scoped + user-scoped resolver.** Every new terminal launches the right agent without the operator picking each time. User default lives in Settings → Agents; per-project override is discovered from `.c11/default-agent` (or `.cmux/default-agent`) when present, so a repo can declare "use codex here." The resolver threads through the CLI, the Workspace model, the New Surface menu, and the Settings UI. The Agents sidebar page is the single canonical home; the old per-action launcher knobs are gone. ([#168](https://github.com/Stage-11-Agentics/c11/pull/168), [#173](https://github.com/Stage-11-Agentics/c11/pull/173))
+- **`C11_DEFAULT_AGENT_LAUNCH` exported in every new shell.** Resolved per-shell at spawn time so the c11 skill can teach a single sub-agent launch pattern (`exec $C11_DEFAULT_AGENT_LAUNCH`) regardless of which agent the operator picked. Preference changes only affect newly-spawned shells. ([#173](https://github.com/Stage-11-Agentics/c11/pull/173))
+- **New Workspace in File menu.** The canonical entry point for starting a new work item now sits where users instinctively reach for it. Duplicates the Workspace menu entry so discovery is doubled, shortcut binding unchanged. ([#168](https://github.com/Stage-11-Agentics/c11/pull/168))
+- **New Folder affordance inside the Browse panel of New Workspace.** Starting a workspace can now include creating its directory in the same flow — the NSOpenPanel's New Folder button shows up where previously the panel was browse-only. ([#168](https://github.com/Stage-11-Agentics/c11/pull/168))
+- **About c11 lives inside the Help menu, in addition to the c11 app menu.** macOS auto-injects a Help menu (with its search field) whenever the slot is empty and SwiftUI can't reliably suppress it; populating the slot with a real action makes the menu earn its space. About c11 still lives in the c11 app menu too. ([#170](https://github.com/Stage-11-Agentics/c11/pull/170))
+- **Tab close X has a right-click menu with Close Tab + Close Pane.** Right-click the X to disambiguate "close this tab" from "close this whole pane" without remembering modifier keys. The X itself anchors on the left of the tab to match macOS convention. ([#165](https://github.com/Stage-11-Agentics/c11/pull/165))
+- **Full Disk Access grant is now runtime-detected, auto-continuing the TCC primer.** The primer no longer requires the operator to click Continue after granting FDA in System Settings — c11 detects the grant and advances the primer on its own. ([#138](https://github.com/Stage-11-Agentics/c11/pull/138))
+
+### Changed
+
+- **New Window moves from File to View.** Window-level toggles cluster with chrome controls (Toggle Sidebar, Appearance, Titlebar Controls); File is now reserved for new-work verbs. Shortcut binding unchanged. ([#168](https://github.com/Stage-11-Agentics/c11/pull/168))
+- **Close Other Tabs in Pane moves from File to Pane.** The verb's "in Pane" now actually lives in the Pane menu, ⌥⌘T preserved. ([#168](https://github.com/Stage-11-Agentics/c11/pull/168))
+- **Open Folder retires from the File menu.** New Workspace covers the same flow with the blueprint picker and agent-launch toggle; the Command Palette entry and Keyboard Shortcut Settings row remain intact for muscle-memory carryover. ([#168](https://github.com/Stage-11-Agentics/c11/pull/168))
+- **Workspace switching is faster after Phase 4a perf work.** Empty deferred portal-sync passes are now short-circuited so swapping between workspaces feels snappier, especially when the destination workspace's surfaces are already settled. ([#135](https://github.com/Stage-11-Agentics/c11/pull/135))
+- **Sidebar "Next Notification" button is taller (2× vertical) for prominence.** Easier to spot, easier to hit when triaging an unread queue.
+- **`c11mux` is gone from active code paths.** State directory migration, theme rename, and test fixes complete the c11mux → c11 transition begun in 0.38.0. Anyone still on a c11mux state dir is silently migrated. ([#164](https://github.com/Stage-11-Agentics/c11/pull/164))
+
+### Fixed
+
+- **Close Pane confirmation no longer shows literal "%lld" instead of the pane count.** The body string had an unsubstituted printf token that surfaced when the dialog actually rendered (e.g., "This will close 7 panes" showed up as "%lld panes"). Now formats correctly. ([b03f12592](https://github.com/Stage-11-Agentics/c11/commit/b03f12592))
+- **App Hang triggers around the Sparkle probe and persistent flash are now instrumented.** Internal observability lift so hang patterns we'd been chasing in support reports get attributed to the right culprit. ([#169](https://github.com/Stage-11-Agentics/c11/pull/169))
+
 ## [0.47.1] - 2026-05-15
 
 Hotfix release. Triggered by a New Workspace dialog regression observed in the 0.47.0 prod build (the dialog opened tiny on first show — only snapped to its intended size after focus moved away and back). The fix went out alongside a batch of operator-facing polish that had stacked up on `main` over the same day: a second-pass on the New Workspace dialog, a macOS menu-bar reorganization, and a few smaller correctness fixes.

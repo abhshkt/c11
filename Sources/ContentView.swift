@@ -10786,7 +10786,7 @@ private struct SidebarJumpToUnreadButton: View {
                     .lineLimit(1)
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .padding(.vertical, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
