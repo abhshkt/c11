@@ -220,7 +220,7 @@ jobs:
             -disableAutomaticPackageResolution \
             -destination "platform=macOS" \
             COMPILER_INDEX_STORE_ENABLE=NO \
-            build-for-testing
+            test
 
       - name: Test c11-logic scheme
         # Runtime regression signal for hostless tests. Host-required c11Tests

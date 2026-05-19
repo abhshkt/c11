@@ -8634,7 +8634,7 @@ struct VerticalTabsSidebar: View {
     private let hiddenTitlebarControlsLeadingInset = TopChromeMetrics.sidebarHiddenControlsLeadingInset
     /// Extra clearance between the traffic-light strip and the first
     /// workspace row so the row's selection highlight clears the
-    /// `SidebarTopScrim` gradient. The scrim is `trafficLightPadding + 20`
+    /// `SidebarTopScrim` gradient. The scrim is `sidebarTopChromeInset + 20`
     /// tall and its bottom 20pt is the soft fade; we need the first row
     /// to begin at least ~12pt past the scrim's center to keep the
     /// rounded top corners legible.
