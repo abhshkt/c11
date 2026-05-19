@@ -215,7 +215,7 @@ struct cmuxApp: App {
                 defaults.set(migrated.rawValue, forKey: SocketControlSettings.appStorageKey)
             }
         } else if let legacy = defaults.object(forKey: SocketControlSettings.legacyEnabledKey) as? Bool {
-            defaults.set(legacy ? SocketControlMode.cmuxOnly.rawValue : SocketControlMode.off.rawValue,
+            defaults.set(legacy ? SocketControlMode.c11Only.rawValue : SocketControlMode.off.rawValue,
                          forKey: SocketControlSettings.appStorageKey)
         }
         // Skip keychain migration for DEV/staging builds. Each tagged build gets a
@@ -5402,8 +5402,18 @@ struct SettingsView: View {
             SettingsCardDivider()
 
             SettingsCardRow(
-                String(localized: "settings.app.showBranchDirectory", defaultValue: "Show Branch + Directory in Sidebar"),
-                subtitle: String(localized: "settings.app.showBranchDirectory.subtitle", defaultValue: "Show the git branch and working directory row.")
+                // C11-104 v2 — relabeled. The toggle key
+                // `sidebarShowBranchDirectory` is preserved so existing
+                // user prefs survive the migration; the surface it gates
+                // is now the worktree+branch chip row.
+                String(
+                    localized: "settings.app.showWorktreeBranchChips",
+                    defaultValue: "Show worktree + branch chips in sidebar"
+                ),
+                subtitle: String(
+                    localized: "settings.app.showWorktreeBranchChips.subtitle",
+                    defaultValue: "Render worktree (colored-dot prefix) and branch chips on each workspace row — derived from cwd and gitfs."
+                )
             ) {
                 Toggle("", isOn: $sidebarShowBranchDirectory)
                     .labelsHidden()

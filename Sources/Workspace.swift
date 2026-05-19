@@ -490,7 +490,8 @@ extension Workspace {
         }
         let bridgedValues = PersistedMetadataBridge.encodeValues(
             snapshot.metadata,
-            surfaceIdForLog: paneUUID
+            surfaceIdForLog: paneUUID,
+            sources: snapshot.sources
         )
         let cappedValues = PersistedMetadataBridge.enforceSizeCap(
             bridgedValues,
@@ -620,7 +621,8 @@ extension Workspace {
             } else {
                 let bridgedValues = PersistedMetadataBridge.encodeValues(
                     snapshot.metadata,
-                    surfaceIdForLog: panelId
+                    surfaceIdForLog: panelId,
+                    sources: snapshot.sources
                 )
                 let cappedValues = PersistedMetadataBridge.enforceSizeCap(
                     bridgedValues,
@@ -5299,6 +5301,10 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var progress: SidebarProgressState?
     @Published var gitBranch: SidebarGitBranchState?
     @Published var panelGitBranches: [UUID: SidebarGitBranchState] = [:]
+    /// C11-104 — per-panel resolved worktree+branch context for the
+    /// sidebar chips. Written by `TabManager.applyWorkspaceGitMetadataSnapshot`
+    /// from the off-main probe. Nil signals "not a git directory."
+    @Published var panelGitContexts: [UUID: ResolvedGitContext?] = [:]
     @Published var pullRequest: SidebarPullRequestState?
     @Published var panelPullRequests: [UUID: SidebarPullRequestState] = [:]
     @Published var surfaceListeningPorts: [UUID: [Int]] = [:]
@@ -6710,6 +6716,22 @@ final class Workspace: Identifiable, ObservableObject {
         }
     }
 
+    /// C11-104 — write the resolved worktree+branch chip context for a
+    /// panel. Nil means "not a git directory"; we still write the nil
+    /// entry so the sidebar can render the absence (no chips) instead
+    /// of a stale prior value.
+    func updatePanelGitContext(panelId: UUID, context: ResolvedGitContext?) {
+        // Flatten the subscript's outer optional so "missing key" and
+        // "key present with nil value" compare identically.
+        let prior: ResolvedGitContext? = panelGitContexts[panelId] ?? nil
+        if prior == context { return }
+        panelGitContexts[panelId] = context
+    }
+
+    func clearPanelGitContext(panelId: UUID) {
+        panelGitContexts.removeValue(forKey: panelId)
+    }
+
     func updatePanelPullRequest(
         panelId: UUID,
         number: Int,
@@ -6781,6 +6803,7 @@ final class Workspace: Identifiable, ObservableObject {
         progress = nil
         gitBranch = nil
         panelGitBranches.removeAll()
+        panelGitContexts.removeAll()
         pullRequest = nil
         panelPullRequests.removeAll()
         surfaceListeningPorts.removeAll()
@@ -7209,6 +7232,7 @@ final class Workspace: Identifiable, ObservableObject {
         pinnedPanelIds = pinnedPanelIds.filter { validSurfaceIds.contains($0) }
         manualUnreadPanelIds = manualUnreadPanelIds.filter { validSurfaceIds.contains($0) }
         panelGitBranches = panelGitBranches.filter { validSurfaceIds.contains($0.key) }
+        panelGitContexts = panelGitContexts.filter { validSurfaceIds.contains($0.key) }
         manualUnreadMarkedAt = manualUnreadMarkedAt.filter { validSurfaceIds.contains($0.key) }
         surfaceListeningPorts = surfaceListeningPorts.filter { validSurfaceIds.contains($0.key) }
         surfaceTTYNames = surfaceTTYNames.filter { validSurfaceIds.contains($0.key) }

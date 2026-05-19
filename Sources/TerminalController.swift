@@ -51,7 +51,11 @@ class TerminalController {
         isTerminatingApp = value
     }
 
-    private nonisolated(unsafe) var socketPath = SocketControlSettings.stableDefaultSocketPath
+    // Empty until `start(...)` binds. Initializing to the stable default would
+    // make `stop()` unlink that shared path even in a never-started controller
+    // — the C11-105 production unlink mechanism. See `stop()` for the matching
+    // empty-path guard.
+    private nonisolated(unsafe) var socketPath = ""
     private nonisolated(unsafe) var serverSocket: Int32 = -1
     private nonisolated(unsafe) var isRunning = false
     private nonisolated(unsafe) var acceptLoopAlive = false
@@ -63,7 +67,7 @@ class TerminalController {
     private nonisolated let listenerStateLock = NSLock()
     private var clientHandlers: [Int32: Thread] = [:]
     private var tabManager: TabManager?
-    private var accessMode: SocketControlMode = .cmuxOnly
+    private var accessMode: SocketControlMode = .c11Only
     private let myPid = getpid()
     private nonisolated(unsafe) static var socketCommandPolicyDepth: Int = 0
     private nonisolated(unsafe) static var socketCommandFocusAllowanceStack: [Bool] = []
@@ -256,6 +260,23 @@ class TerminalController {
             return snapshot.socketPath
         }
         return preferredPath
+    }
+
+    /// Test seam: the raw `socketPath` field without any
+    /// running/preferred-path fallback. Used by C11-105 regression tests to
+    /// assert a never-started controller does not carry a shared default
+    /// that `stop()` would unlink.
+    var socketPathSnapshot: String {
+        withListenerState { socketPath }
+    }
+
+    /// Test seam: construct a fresh, never-started `TerminalController` whose
+    /// fields are at their default-init values. The production code path
+    /// always uses `TerminalController.shared`; this exists only so C11-105
+    /// regression tests can observe the default state without rebinding the
+    /// shared singleton mid-process.
+    static func makeForTesting() -> TerminalController {
+        TerminalController()
     }
 
     private nonisolated func shouldContinueAcceptLoop(generation: UInt64) -> Bool {
@@ -1177,10 +1198,17 @@ class TerminalController {
         if socketToClose >= 0 {
             close(socketToClose)
         }
-        unlink(socketPathToUnlink)
+        // Skip the unlink when we never bound a path. Calling unlink on the
+        // stable default while a sibling c11 process owns that bind point is
+        // the C11-105 production bug — the dentry is removed under the live
+        // owner, leaving every `c11 <cmd>` reporting "Socket not found".
+        if !socketPathToUnlink.isEmpty {
+            unlink(socketPathToUnlink)
+        }
     }
 
     private nonisolated func unlinkSocketPathIfListenerStillInactive(_ path: String) {
+        guard !path.isEmpty else { return }
         let shouldUnlink = withListenerState {
             Self.shouldUnlinkSocketPathAfterAcceptLoopCleanup(
                 pathMatches: socketPath == path,
@@ -1591,15 +1619,15 @@ class TerminalController {
     private func handleClient(_ socket: Int32, peerPid: pid_t? = nil) {
         defer { close(socket) }
 
-        // In cmuxOnly mode, verify the connecting process is a descendant of cmux.
+        // In c11Only mode, verify the connecting process is a descendant of c11.
         // In allowAll mode (env-var only), skip the ancestry check.
-        if accessMode == .cmuxOnly {
+        if accessMode == .c11Only {
             // Use pre-captured peer PID if available (captured in accept loop before
             // the peer can disconnect), falling back to live lookup.
             let pid = peerPid ?? getPeerPid(socket)
             if let pid {
                 guard isDescendant(pid) else {
-                    let msg = "ERROR: Access denied — only processes started inside cmux can connect\n"
+                    let msg = "ERROR: Access denied — only processes started inside c11 can connect\n"
                     msg.withCString { ptr in _ = write(socket, ptr, strlen(ptr)) }
                     return
                 }
@@ -7546,6 +7574,15 @@ class TerminalController {
         guard let text = params["text"] as? String else {
             return .err(code: "invalid_params", message: "Missing text", data: nil)
         }
+        // C11-108: `submit` defaults to true so `c11 send "..."` types the text AND
+        // submits it in one call. Callers building a partial line that should not
+        // execute (e.g. typing `cd ` then more) pass `submit: false` (CLI:
+        // `--no-submit`) and follow with explicit `c11 send-key enter` when ready.
+        // For an attached surface, the synthetic Return fires on the same @MainActor
+        // turn that delivered the text. For the queueing fallback (surface not yet
+        // attached) the trailing `\r` is appended to the queued payload so the
+        // flush on attach submits the line.
+        let submit = v2Bool(params, "submit") ?? true
 
         let phaseASema = DispatchSemaphore(value: 0)
         nonisolated(unsafe) var phaseAOutcome: SurfaceSendPhaseAOutcome = .err(.err(code: "internal_error", message: "Failed to send text", data: nil))
@@ -7590,6 +7627,9 @@ class TerminalController {
                 defer { phaseBSema.signal() }
                 if let liveSurface = resolved.terminalPanel.surface.surface {
                     sendSocketText(text, surface: liveSurface)
+                    if submit {
+                        _ = sendNamedKey(liveSurface, keyName: "enter")
+                    }
                     // Ensure we present a new frame after injecting input so snapshot-based tests
                     // (and socket-driven agents) can observe the updated terminal without requiring
                     // a focus change to trigger a draw.
@@ -7597,17 +7637,19 @@ class TerminalController {
                     attachedAtPhaseB = true
                 } else {
                     // Surface was torn down between Phase A and Phase B. Fall through to
-                    // the pending queue as a last resort.
-                    resolved.terminalPanel.sendText(text)
+                    // the pending queue as a last resort. Append \r when submit is on
+                    // so the queue flush submits the line on attach.
+                    resolved.terminalPanel.sendText(submit ? text + "\r" : text)
                 }
             }
             phaseBSema.wait()
             queued = !attachedAtPhaseB
         } else {
             // Surface not available within 2s (e.g., terminal not yet attached to any window).
-            // Fall back to the pending queue as a last resort.
+            // Fall back to the pending queue as a last resort. Same submit-aware append
+            // as the teardown fallback above.
             Task { @MainActor in
-                resolved.terminalPanel.sendText(text)
+                resolved.terminalPanel.sendText(submit ? text + "\r" : text)
                 phaseBSema.signal()
             }
             phaseBSema.wait()
@@ -8238,6 +8280,14 @@ class TerminalController {
         guard let source = MetadataSource(rawValue: sourceStr) else {
             return .err(code: "invalid_source", message: "source must be one of: explicit, declare, osc, heuristic", data: nil)
         }
+        // C11-104 v2 (B5a) — `derived` is reserved for c11-internal
+        // writers. External socket/CLI clients are rejected. Without
+        // this gate, an agent could write `source=derived` and claim
+        // their values are system-computed, nullifying the meaning
+        // of the precedence tier.
+        if source == .derived {
+            return .err(code: "invalid_source", message: "source 'derived' is reserved for c11-internal writers", data: nil)
+        }
 
         guard let resolved = v2ResolveSurfaceForMetadata(params: params) else {
             return .err(code: "surface_not_found", message: "Surface not found", data: nil)
@@ -8352,6 +8402,14 @@ class TerminalController {
         let sourceStr = (v2String(params, "source") ?? "explicit").lowercased()
         guard let source = MetadataSource(rawValue: sourceStr) else {
             return .err(code: "invalid_source", message: "source must be one of: explicit, declare, osc, heuristic", data: nil)
+        }
+        // C11-104 v2 (B5a) — `derived` is reserved for c11-internal
+        // writers. External socket/CLI clients are rejected. Without
+        // this gate, an agent could write `source=derived` and claim
+        // their values are system-computed, nullifying the meaning
+        // of the precedence tier.
+        if source == .derived {
+            return .err(code: "invalid_source", message: "source 'derived' is reserved for c11-internal writers", data: nil)
         }
 
         guard let resolved = v2ResolveSurfaceForMetadata(params: params) else {
@@ -9101,6 +9159,14 @@ class TerminalController {
         guard let source = MetadataSource(rawValue: sourceStr) else {
             return .err(code: "invalid_source", message: "source must be one of: explicit, declare, osc, heuristic", data: nil)
         }
+        // C11-104 v2 (B5a) — `derived` is reserved for c11-internal
+        // writers. External socket/CLI clients are rejected. Without
+        // this gate, an agent could write `source=derived` and claim
+        // their values are system-computed, nullifying the meaning
+        // of the precedence tier.
+        if source == .derived {
+            return .err(code: "invalid_source", message: "source 'derived' is reserved for c11-internal writers", data: nil)
+        }
 
         guard let resolved = v2ResolvePaneForMetadata(params: params) else {
             return .err(code: "pane_not_found", message: "Pane not found", data: nil)
@@ -9189,6 +9255,14 @@ class TerminalController {
         let sourceStr = (v2String(params, "source") ?? "explicit").lowercased()
         guard let source = MetadataSource(rawValue: sourceStr) else {
             return .err(code: "invalid_source", message: "source must be one of: explicit, declare, osc, heuristic", data: nil)
+        }
+        // C11-104 v2 (B5a) — `derived` is reserved for c11-internal
+        // writers. External socket/CLI clients are rejected. Without
+        // this gate, an agent could write `source=derived` and claim
+        // their values are system-computed, nullifying the meaning
+        // of the precedence tier.
+        if source == .derived {
+            return .err(code: "invalid_source", message: "source 'derived' is reserved for c11-internal writers", data: nil)
         }
 
         guard let resolved = v2ResolvePaneForMetadata(params: params) else {

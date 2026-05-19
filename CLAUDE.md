@@ -107,6 +107,7 @@ The one-liner: after any code change, `./scripts/reload.sh --tag <your-branch-sl
 - **Terminal find layering contract:** `SurfaceSearchOverlay` must be mounted from `GhosttySurfaceScrollView` in `Sources/GhosttyTerminalView.swift` (AppKit portal layer), not from SwiftUI panel containers such as `Sources/Panels/TerminalPanelView.swift`. Portal-hosted terminal views can sit above SwiftUI during split/workspace churn.
 - **Submodule safety:** When modifying a submodule (ghostty, vendor/bonsplit, etc.), always push the submodule commit to its remote `main` branch BEFORE committing the updated pointer in the parent repo. Never commit on a detached HEAD or temporary branch — the commit will be orphaned and lost. Verify with: `cd <submodule> && git merge-base --is-ancestor HEAD origin/main`.
 - **pbxproj edits via the `xcodeproj` Ruby gem normalize formatting on save** (3-tab → 2-tab indent, reordered `PBXBuildFile` entries, re-issued some object IDs). A "small" semantic edit can produce a multi-thousand-line diff; line-by-line review is not the right gate. Reviewers of future pbxproj-touching tickets should expect the diff bloat and gate on `xcodebuild -list` + file-membership counts + `xcodebuild -showBuildSettings` spot-checks instead. Don't fight the gem by hand-restoring whitespace; that just compounds churn on the next save.
+- **c11 CLI socket can go unreachable while the prod app is still alive.** Symptom: every `c11 <cmd>` errors with `Socket not found at ~/Library/Application Support/c11/c11.sock`, but the c11.app process is still running and the macOS UI / panes / agents are fully interactive. `lsof` shows the process is still bound to the path; the file has been unlinked from the filesystem. **Recovery (non-destructive):** Cmd+Shift+P → run **"Restart CLI Listener"** from the command palette. Invokes `AppDelegate.restartSocketListener(_:)` which stops + re-binds the socket without touching `TabManager`, workspaces, panes, or PTYs. **Root cause (C11-105):** `TerminalControllerSocketSecurityTests.swift` was a member of the `c11LogicTests` target (despite living in `c11Tests/` on disk). The test's `setUp` calls `TerminalController.shared.stop()`, and `TerminalController.socketPath` was default-initialized to `SocketControlSettings.stableDefaultSocketPath` — so any local `xcodebuild -scheme c11-logic test` run would `unlink()` the prod c11's bind dentry while its FD stayed live in-kernel. The fix moves the test back into `c11Tests`, empties the field's default, and gates `stop()`'s unlink on a non-empty path. The kqueue diagnostic at `tools/socket-watcher/` + `docs/c11-socket-unlink-diagnostic.md` remains as a canary for any future unlink source.
 
 ## Localization
 
@@ -139,7 +140,12 @@ c11 has two unit-test targets. The split is the whole point of C11-27.
 
   Expected wall time on a warm cache: around 30 seconds, dominated by `xcodebuild`'s ~10–15 s of inherent overhead rather than test execution (the test phase itself is ~5–10 s for 74 tests). Compare to the host scheme's ~35 s, where most of the gap is the DEV.app launch. **First invocation after a clean checkout pays the c11 app build cost** (multi-minute) because `c11-logic` depends on the `c11` target — Strategy B needs `c11.debug.dylib` available for the test bundle's `BUNDLE_LOADER` + rpath. Subsequent warm-build runs are ~30 s. Use this for any iteration on Mailbox, Theme, Workspace snapshot, Health parser, CLI runtime, persistence, and parser code.
 
-- **`c11Tests` (scheme: `c11-unit`)** — host-required. Spawns a `c11 DEV.app` XCTest host whose main thread is monopolized for ~22 s and whose window beachballs until the run completes (per the 2026-05-15 PR #164 incident — confirmed not to affect the operator's main c11 process, only the freshly-spawned test host). **Do not run locally.** Send to CI via GitHub Actions. The `c11-unit` scheme builds both targets but its TestAction runs both `c11Tests` and `c11LogicTests` sequentially in one invocation.
+- **`c11Tests` (scheme: `c11-unit`)** — host-required. Spawns a `c11 DEV.app` XCTest host whose main thread is monopolized for ~22 s and whose window beachballs until the run completes. The host previously stomped the operator's running c11 by binding (and on teardown, unlinking) `/tmp/c11-debug.sock`; C11-99 Area B added a per-PID socket guard in `SocketControlSettings.socketPath()` keyed on `XCTestConfigurationFilePath`, plus a `CMUX_TAG=local-xctest` env var on the scheme's TestAction, plus a `scripts/test-unit-local.sh` wrapper that exports a per-PID `CMUX_SOCKET_PATH`. **Use `scripts/test-unit-local.sh` for local c11-unit iteration** — it's safe to run with `/Applications/c11.app` and a `c11 DEV.app` already running. CI still drives the full host-bound suite via `ci.yml`. The `c11-unit` scheme builds both targets but its TestAction runs both `c11Tests` and `c11LogicTests` sequentially in one invocation.
+
+  ```
+  scripts/test-unit-local.sh                                             # full c11-unit
+  scripts/test-unit-local.sh -only-testing:c11Tests/<Class>/<test>       # narrow slice
+  ```
 
   Schemes that build c11-unit (or `c11-ci`) without the `test` action are safe — they only compile.
 
@@ -169,15 +175,15 @@ c11 has two unit-test targets. The split is the whole point of C11-27.
 
 ## Ghostty submodule workflow
 
-Ghostty changes must be committed in the `ghostty` submodule and pushed to the `manaflow-ai/ghostty` fork. Keep `docs/ghostty-fork.md` up to date with any fork changes and conflict notes.
+Ghostty changes must be committed in the `ghostty` submodule and pushed to the `Stage-11-Agentics/ghostty` fork. Keep `docs/ghostty-fork.md` up to date with any fork changes and conflict notes.
 
 ```bash
 cd ghostty
-git remote -v  # origin = upstream, manaflow = fork
+git remote -v  # origin = upstream (manaflow-ai/ghostty), stage11 = fork (Stage-11-Agentics/ghostty)
 git checkout -b <branch>
 git add <files>
 git commit -m "..."
-git push manaflow <branch>
+git push stage11 <branch>
 ```
 
 To keep the fork up to date with upstream:
@@ -187,7 +193,7 @@ cd ghostty
 git fetch origin
 git checkout main
 git merge origin/main
-git push manaflow main
+git push stage11 main
 ```
 
 Then update the parent repo with the new submodule SHA:
