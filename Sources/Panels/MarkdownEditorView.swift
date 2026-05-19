@@ -27,7 +27,11 @@ struct MarkdownEditorView: NSViewRepresentable {
         // menu hands over the action. Cleared in `dismantleNSView`.
         panel.activeTextView = container.textView
 
-        coordinator.applyTheme(colorScheme: colorScheme, themeManager: themeManager)
+        coordinator.applyTheme(
+            colorScheme: colorScheme,
+            themeManager: themeManager,
+            fontSize: panel.markdownFontSize
+        )
         coordinator.assignContent(panel.dirtyContent ?? panel.content)
         coordinator.applyHighlight()
         coordinator.startObserving()
@@ -46,7 +50,11 @@ struct MarkdownEditorView: NSViewRepresentable {
 
     func updateNSView(_ container: MarkdownEditorContainerView, context: Context) {
         let coordinator = context.coordinator
-        coordinator.applyTheme(colorScheme: colorScheme, themeManager: themeManager)
+        coordinator.applyTheme(
+            colorScheme: colorScheme,
+            themeManager: themeManager,
+            fontSize: panel.markdownFontSize
+        )
         coordinator.syncIfNeeded()
     }
 
@@ -91,6 +99,7 @@ struct MarkdownEditorView: NSViewRepresentable {
         private var isAssigningContent = false
         private var cancellables: [AnyCancellable] = []
         private var colors = MarkdownEditorColors.fallback(isDark: false)
+        private var fontSize = MarkdownPanel.defaultMarkdownFontSize
 
         private static let autoSaveDebounceNanos: UInt64 = 600_000_000      // 600 ms
 
@@ -101,13 +110,16 @@ struct MarkdownEditorView: NSViewRepresentable {
 
         // MARK: - Theme
 
-        func applyTheme(colorScheme: ColorScheme, themeManager: ThemeManager) {
+        func applyTheme(colorScheme: ColorScheme, themeManager: ThemeManager, fontSize: CGFloat) {
             let resolved = MarkdownEditorColors.resolve(colorScheme: colorScheme, themeManager: themeManager)
             colors = resolved
+            self.fontSize = fontSize
             guard let tv = textView else { return }
             tv.backgroundColor = resolved.background
             tv.insertionPointColor = resolved.text
             tv.textColor = resolved.text
+            tv.font = MarkdownEditorStyling.baseFont(fontSize: fontSize)
+            tv.typingAttributes = MarkdownEditorStyling.baseAttributes(colors: resolved, fontSize: fontSize)
             // Re-highlight so existing token attributes pick up the new palette.
             applyHighlight()
         }
@@ -262,12 +274,12 @@ struct MarkdownEditorView: NSViewRepresentable {
             isApplyingAttributes = true
             storage.beginEditing()
             let fullRange = NSRange(location: 0, length: storage.length)
-            storage.setAttributes(MarkdownEditorStyling.baseAttributes(colors: colors), range: fullRange)
+            storage.setAttributes(MarkdownEditorStyling.baseAttributes(colors: colors, fontSize: fontSize), range: fullRange)
             for token in tokens {
                 let bounded = NSIntersectionRange(token.range, fullRange)
                 guard bounded.length > 0 else { continue }
                 storage.addAttributes(
-                    MarkdownEditorStyling.attributes(for: token.kind, colors: colors),
+                    MarkdownEditorStyling.attributes(for: token.kind, colors: colors, fontSize: fontSize),
                     range: bounded
                 )
             }
@@ -374,7 +386,7 @@ final class MarkdownEditorContainerView: NSView {
             height: CGFloat.greatestFiniteMagnitude
         )
         textView.textContainer?.widthTracksTextView = true
-        textView.font = MarkdownEditorStyling.baseFont
+        textView.font = MarkdownEditorStyling.baseFont(fontSize: MarkdownPanel.defaultMarkdownFontSize)
 
         scrollView.documentView = textView
         addSubview(scrollView)
@@ -398,6 +410,22 @@ final class MarkdownEditorTextView: NSTextView {
     weak var coordinator: MarkdownEditorView.Coordinator?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if let action = browserZoomShortcutAction(
+            flags: event.modifierFlags,
+            chars: event.charactersIgnoringModifiers ?? "",
+            keyCode: event.keyCode,
+            literalChars: event.characters
+        ) {
+            switch action {
+            case .zoomIn:
+                return coordinator?.panel.zoomIn() ?? false
+            case .zoomOut:
+                return coordinator?.panel.zoomOut() ?? false
+            case .reset:
+                return coordinator?.panel.resetZoom() ?? false
+            }
+        }
+
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
            event.charactersIgnoringModifiers == "s" {
             coordinator?.flushNow()
@@ -450,29 +478,41 @@ struct MarkdownEditorColors {
 }
 
 enum MarkdownEditorStyling {
-    static let baseFontSize: CGFloat = 14
-    static let baseFont: NSFont = .systemFont(ofSize: baseFontSize)
-    static let monoFont: NSFont = .monospacedSystemFont(ofSize: baseFontSize - 1, weight: .regular)
-    static let italicFont: NSFont = {
-        let descriptor = NSFont.systemFont(ofSize: baseFontSize)
-            .fontDescriptor.withSymbolicTraits(.italic)
-        return NSFont(descriptor: descriptor, size: baseFontSize) ?? .systemFont(ofSize: baseFontSize)
-    }()
-    static let boldFont: NSFont = .boldSystemFont(ofSize: baseFontSize)
+    static func baseFont(fontSize: CGFloat) -> NSFont {
+        .systemFont(ofSize: fontSize)
+    }
 
-    static func baseAttributes(colors: MarkdownEditorColors) -> [NSAttributedString.Key: Any] {
+    static func monoFont(fontSize: CGFloat) -> NSFont {
+        .monospacedSystemFont(ofSize: max(8, fontSize - 1), weight: .regular)
+    }
+
+    static func italicFont(fontSize: CGFloat) -> NSFont {
+        let descriptor = NSFont.systemFont(ofSize: fontSize)
+            .fontDescriptor.withSymbolicTraits(.italic)
+        return NSFont(descriptor: descriptor, size: fontSize) ?? .systemFont(ofSize: fontSize)
+    }
+
+    static func boldFont(fontSize: CGFloat) -> NSFont {
+        .boldSystemFont(ofSize: fontSize)
+    }
+
+    static func baseAttributes(colors: MarkdownEditorColors, fontSize: CGFloat) -> [NSAttributedString.Key: Any] {
         [
-            .font: baseFont,
+            .font: baseFont(fontSize: fontSize),
             .foregroundColor: colors.text,
         ]
     }
 
-    static func attributes(for kind: MarkdownTokenKind, colors: MarkdownEditorColors) -> [NSAttributedString.Key: Any] {
+    static func attributes(
+        for kind: MarkdownTokenKind,
+        colors: MarkdownEditorColors,
+        fontSize: CGFloat
+    ) -> [NSAttributedString.Key: Any] {
         switch kind {
         case .headingMarker:
             return [.foregroundColor: colors.syntaxFaded]
         case .headingText(let level):
-            let scale = max(0.0, CGFloat(7 - level)) * 1.5 + baseFontSize
+            let scale = max(0.0, CGFloat(7 - level)) * 1.5 + fontSize
             return [
                 .font: NSFont.boldSystemFont(ofSize: scale),
                 .foregroundColor: colors.heading,
@@ -481,13 +521,13 @@ enum MarkdownEditorStyling {
             return [.foregroundColor: colors.syntaxFaded]
         case .codeBody:
             return [
-                .font: monoFont,
+                .font: monoFont(fontSize: fontSize),
                 .backgroundColor: colors.codeBlockBackground,
             ]
         case .bold:
-            return [.font: boldFont]
+            return [.font: boldFont(fontSize: fontSize)]
         case .italic:
-            return [.font: italicFont]
+            return [.font: italicFont(fontSize: fontSize)]
         case .strikethrough:
             return [
                 .strikethroughStyle: NSUnderlineStyle.single.rawValue,
@@ -495,7 +535,7 @@ enum MarkdownEditorStyling {
             ]
         case .inlineCode:
             return [
-                .font: monoFont,
+                .font: monoFont(fontSize: fontSize),
                 .foregroundColor: colors.inlineCode,
                 .backgroundColor: colors.codeBlockBackground,
             ]

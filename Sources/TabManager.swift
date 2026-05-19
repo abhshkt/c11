@@ -3079,6 +3079,36 @@ class TabManager: ObservableObject {
     }
 
     @discardableResult
+    func zoomInFocusedMarkdown() -> Bool {
+        focusedMarkdownPanel?.zoomIn() ?? false
+    }
+
+    @discardableResult
+    func zoomOutFocusedMarkdown() -> Bool {
+        focusedMarkdownPanel?.zoomOut() ?? false
+    }
+
+    @discardableResult
+    func resetZoomFocusedMarkdown() -> Bool {
+        focusedMarkdownPanel?.resetZoom() ?? false
+    }
+
+    @discardableResult
+    func zoomInFocusedContent() -> Bool {
+        zoomInFocusedMarkdown() || zoomInFocusedBrowser()
+    }
+
+    @discardableResult
+    func zoomOutFocusedContent() -> Bool {
+        zoomOutFocusedMarkdown() || zoomOutFocusedBrowser()
+    }
+
+    @discardableResult
+    func resetZoomFocusedContent() -> Bool {
+        resetZoomFocusedMarkdown() || resetZoomFocusedBrowser()
+    }
+
+    @discardableResult
     func toggleDeveloperToolsFocusedBrowser() -> Bool {
         focusedBrowserPanel?.toggleDeveloperTools() ?? false
     }

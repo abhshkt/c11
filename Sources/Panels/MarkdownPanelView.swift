@@ -150,7 +150,7 @@ struct MarkdownPanelView: View {
         return VStack(alignment: .leading, spacing: 4) {
             ScrollView(.horizontal, showsIndicators: true) {
                 Text(code)
-                    .font(.system(size: 13, design: .monospaced))
+                    .font(.system(size: max(8, panel.markdownFontSize - 1), design: .monospaced))
                     .foregroundColor(colorScheme == .dark
                         ? Color(red: 0.9, green: 0.9, blue: 0.9)
                         : Color(red: 0.2, green: 0.2, blue: 0.2))
@@ -164,7 +164,7 @@ struct MarkdownPanelView: View {
 
             if let renderer, !renderer.isAvailable, let hint = renderer.installHint {
                 Text(hint)
-                    .font(.system(size: 11))
+                    .font(.system(size: max(9, panel.markdownFontSize - 3)))
                     .foregroundColor(.secondary)
             }
         }
@@ -353,26 +353,37 @@ struct MarkdownPanelView: View {
             : Color(nsColor: NSColor(white: 0.98, alpha: 1.0))
     }
 
-    // The MarkdownUI `Theme` is built from ~25 closure modifiers; allocating a
-    // fresh one per access on every body re-eval (and per segment in
-    // `ForEach(panel.segments)`) was a dominant cost on the editor→preview
-    // toggle. The theme only depends on `colorScheme`, so we precompute one
-    // theme per scheme and hand back the cached value.
-    private static let lightMarkdownTheme: Theme = makeCmuxMarkdownTheme(colorScheme: .light)
-    private static let darkMarkdownTheme: Theme = makeCmuxMarkdownTheme(colorScheme: .dark)
+    // The MarkdownUI `Theme` is built from ~25 closure modifiers. Keep the
+    // default-size themes cached for ordinary renders, and build scaled themes
+    // only while a panel is zoomed.
+    private static let lightMarkdownTheme: Theme = makeCmuxMarkdownTheme(
+        colorScheme: .light,
+        baseFontSize: MarkdownPanel.defaultMarkdownFontSize
+    )
+    private static let darkMarkdownTheme: Theme = makeCmuxMarkdownTheme(
+        colorScheme: .dark,
+        baseFontSize: MarkdownPanel.defaultMarkdownFontSize
+    )
 
     private var cmuxMarkdownTheme: Theme {
-        colorScheme == .dark ? Self.darkMarkdownTheme : Self.lightMarkdownTheme
+        guard abs(panel.markdownFontSize - MarkdownPanel.defaultMarkdownFontSize) > 0.001 else {
+            return colorScheme == .dark ? Self.darkMarkdownTheme : Self.lightMarkdownTheme
+        }
+        return Self.makeCmuxMarkdownTheme(colorScheme: colorScheme, baseFontSize: panel.markdownFontSize)
     }
 
-    private static func makeCmuxMarkdownTheme(colorScheme: ColorScheme) -> Theme {
+    private static func makeCmuxMarkdownTheme(colorScheme: ColorScheme, baseFontSize: CGFloat) -> Theme {
         let isDark = colorScheme == .dark
+        let scale = baseFontSize / MarkdownPanel.defaultMarkdownFontSize
+        func scaled(_ value: CGFloat) -> CGFloat {
+            max(1, (value * scale * 10).rounded() / 10)
+        }
 
         return Theme()
             // Text
             .text {
                 ForegroundColor(isDark ? .white.opacity(0.9) : .primary)
-                FontSize(14)
+                FontSize(scaled(14))
             }
             // Headings
             .heading1 { configuration in
@@ -380,7 +391,7 @@ struct MarkdownPanelView: View {
                     configuration.label
                         .markdownTextStyle {
                             FontWeight(.bold)
-                            FontSize(28)
+                            FontSize(scaled(28))
                             ForegroundColor(isDark ? .white : .primary)
                         }
                     Divider()
@@ -392,7 +403,7 @@ struct MarkdownPanelView: View {
                     configuration.label
                         .markdownTextStyle {
                             FontWeight(.bold)
-                            FontSize(22)
+                            FontSize(scaled(22))
                             ForegroundColor(isDark ? .white : .primary)
                         }
                     Divider()
@@ -403,7 +414,7 @@ struct MarkdownPanelView: View {
                 configuration.label
                     .markdownTextStyle {
                         FontWeight(.semibold)
-                        FontSize(18)
+                        FontSize(scaled(18))
                         ForegroundColor(isDark ? .white : .primary)
                     }
                     .markdownMargin(top: 16, bottom: 8)
@@ -412,7 +423,7 @@ struct MarkdownPanelView: View {
                 configuration.label
                     .markdownTextStyle {
                         FontWeight(.semibold)
-                        FontSize(16)
+                        FontSize(scaled(16))
                         ForegroundColor(isDark ? .white : .primary)
                     }
                     .markdownMargin(top: 12, bottom: 6)
@@ -421,7 +432,7 @@ struct MarkdownPanelView: View {
                 configuration.label
                     .markdownTextStyle {
                         FontWeight(.medium)
-                        FontSize(14)
+                        FontSize(scaled(14))
                         ForegroundColor(isDark ? .white : .primary)
                     }
                     .markdownMargin(top: 10, bottom: 4)
@@ -430,7 +441,7 @@ struct MarkdownPanelView: View {
                 configuration.label
                     .markdownTextStyle {
                         FontWeight(.medium)
-                        FontSize(13)
+                        FontSize(scaled(13))
                         ForegroundColor(isDark ? .white.opacity(0.7) : .secondary)
                     }
                     .markdownMargin(top: 8, bottom: 4)
@@ -441,7 +452,7 @@ struct MarkdownPanelView: View {
                     configuration.label
                         .markdownTextStyle {
                             FontFamilyVariant(.monospaced)
-                            FontSize(13)
+                            FontSize(scaled(13))
                             ForegroundColor(isDark ? Color(red: 0.9, green: 0.9, blue: 0.9) : Color(red: 0.2, green: 0.2, blue: 0.2))
                         }
                         .padding(12)
@@ -455,7 +466,7 @@ struct MarkdownPanelView: View {
             // Inline code
             .code {
                 FontFamilyVariant(.monospaced)
-                FontSize(13)
+                FontSize(scaled(13))
                 ForegroundColor(isDark ? Color(red: 0.85, green: 0.6, blue: 0.95) : Color(red: 0.6, green: 0.2, blue: 0.7))
                 BackgroundColor(isDark
                     ? Color(nsColor: NSColor(white: 0.18, alpha: 1.0))
@@ -470,7 +481,7 @@ struct MarkdownPanelView: View {
                     configuration.label
                         .markdownTextStyle {
                             ForegroundColor(isDark ? .white.opacity(0.6) : .secondary)
-                            FontSize(14)
+                            FontSize(scaled(14))
                         }
                         .padding(.leading, 12)
                 }

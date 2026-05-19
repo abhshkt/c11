@@ -106,6 +106,68 @@ final class MarkdownPanelEditModeTests: XCTestCase {
     }
 
     @MainActor
+    func testMarkdownZoomAdjustsFontSizeAndResets() throws {
+        let url = temporaryRoot.appendingPathComponent("zoom.md")
+        try "x\n".write(to: url, atomically: true, encoding: .utf8)
+        let panel = MarkdownPanel(workspaceId: UUID(), filePath: url.path)
+
+        XCTAssertEqual(panel.markdownFontSize, MarkdownPanel.defaultMarkdownFontSize)
+
+        XCTAssertTrue(panel.zoomIn())
+        XCTAssertEqual(panel.markdownFontSize, MarkdownPanel.defaultMarkdownFontSize + 1)
+
+        XCTAssertTrue(panel.zoomOut())
+        XCTAssertEqual(panel.markdownFontSize, MarkdownPanel.defaultMarkdownFontSize)
+
+        XCTAssertFalse(panel.resetZoom())
+
+        XCTAssertTrue(panel.zoomOut())
+        XCTAssertEqual(panel.markdownFontSize, MarkdownPanel.defaultMarkdownFontSize - 1)
+
+        XCTAssertTrue(panel.resetZoom())
+        XCTAssertEqual(panel.markdownFontSize, MarkdownPanel.defaultMarkdownFontSize)
+    }
+
+    @MainActor
+    func testMarkdownZoomClampsToSupportedRange() throws {
+        let url = temporaryRoot.appendingPathComponent("zoom-clamp.md")
+        try "x\n".write(to: url, atomically: true, encoding: .utf8)
+        let panel = MarkdownPanel(workspaceId: UUID(), filePath: url.path)
+
+        for _ in 0..<100 {
+            _ = panel.zoomIn()
+        }
+        XCTAssertEqual(panel.markdownFontSize, MarkdownPanel.maximumMarkdownFontSize)
+        XCTAssertFalse(panel.zoomIn())
+
+        for _ in 0..<100 {
+            _ = panel.zoomOut()
+        }
+        XCTAssertEqual(panel.markdownFontSize, MarkdownPanel.minimumMarkdownFontSize)
+        XCTAssertFalse(panel.zoomOut())
+    }
+
+    @MainActor
+    func testTabManagerRoutesZoomToFocusedMarkdownPanel() throws {
+        let url = temporaryRoot.appendingPathComponent("focused-zoom.md")
+        try "# focused\n".write(to: url, atomically: true, encoding: .utf8)
+
+        let manager = TabManager()
+        let workspace = try XCTUnwrap(manager.selectedWorkspace)
+        let paneId = try XCTUnwrap(workspace.bonsplitController.allPaneIds.first)
+        let panel = try XCTUnwrap(
+            workspace.newMarkdownSurface(inPane: paneId, filePath: url.path, focus: true)
+        )
+
+        XCTAssertTrue(manager.zoomInFocusedContent())
+        XCTAssertEqual(panel.markdownFontSize, MarkdownPanel.defaultMarkdownFontSize + 1)
+        XCTAssertFalse(manager.zoomInFocusedBrowser())
+
+        XCTAssertTrue(manager.resetZoomFocusedContent())
+        XCTAssertEqual(panel.markdownFontSize, MarkdownPanel.defaultMarkdownFontSize)
+    }
+
+    @MainActor
     func testEncodingPreservationLatin1RoundTrip() throws {
         let url = temporaryRoot.appendingPathComponent("latin1.md")
         // Byte 0xE9 is "é" in Latin-1 but invalid as a standalone UTF-8 sequence.
