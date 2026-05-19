@@ -2338,6 +2338,16 @@ class GhosttyApp {
                 #endif
                 return false
             }
+            // Opt/Alt held at click time forces external browser, bypassing
+            // BrowserLinkOpenSettings routing (cmuxBrowser default, host whitelist, regex).
+            if NSEvent.modifierFlags.contains(.option) {
+                #if DEBUG
+                dlog("link.openURL opt-held, forcing external url=\(target.url)")
+                #endif
+                return performOnMain {
+                    NSWorkspace.shared.open(target.url)
+                }
+            }
             if !BrowserLinkOpenSettings.openTerminalLinksInCmuxBrowser() {
                 #if DEBUG
                 dlog("link.openURL cmuxBrowser=disabled, opening externally url=\(target.url)")
