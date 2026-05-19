@@ -490,7 +490,8 @@ extension Workspace {
         }
         let bridgedValues = PersistedMetadataBridge.encodeValues(
             snapshot.metadata,
-            surfaceIdForLog: paneUUID
+            surfaceIdForLog: paneUUID,
+            sources: snapshot.sources
         )
         let cappedValues = PersistedMetadataBridge.enforceSizeCap(
             bridgedValues,
@@ -620,7 +621,8 @@ extension Workspace {
             } else {
                 let bridgedValues = PersistedMetadataBridge.encodeValues(
                     snapshot.metadata,
-                    surfaceIdForLog: panelId
+                    surfaceIdForLog: panelId,
+                    sources: snapshot.sources
                 )
                 let cappedValues = PersistedMetadataBridge.enforceSizeCap(
                     bridgedValues,
@@ -4840,11 +4842,14 @@ enum SidebarBranchOrdering {
         let isDirty: Bool
     }
 
-    struct BranchDirectoryEntry: Equatable {
-        let branch: String?
-        let isDirty: Bool
-        let directory: String?
-    }
+    // (C11-106) `struct BranchDirectoryEntry` and
+    // `static func orderedUniqueBranchDirectoryEntries(...)` were
+    // retired alongside `sidebarBranchDirectoryEntriesInDisplayOrder`
+    // — they fed the legacy AC24-retired text branch+directory row.
+    // The worktree+branch chips that replaced that row consume
+    // `WorktreeChipRow` directly via `WorktreeChipProjector`. Grep
+    // confirms no other consumer; both `c11-logic` and `c11-unit`
+    // compile after removal.
 
     static func orderedPaneIds(tree: ExternalTreeNode) -> [String] {
         switch tree {
@@ -4983,113 +4988,6 @@ enum SidebarBranchOrdering {
         }
 
         return orderedKeys.compactMap { pullRequestsByKey[$0] }
-    }
-
-    static func orderedUniqueBranchDirectoryEntries(
-        orderedPanelIds: [UUID],
-        panelBranches: [UUID: SidebarGitBranchState],
-        panelDirectories: [UUID: String],
-        defaultDirectory: String?,
-        fallbackBranch: SidebarGitBranchState?
-    ) -> [BranchDirectoryEntry] {
-        struct EntryKey: Hashable {
-            let directory: String?
-            let branch: String?
-        }
-
-        struct MutableEntry {
-            var branch: String?
-            var isDirty: Bool
-            var directory: String?
-        }
-
-        func normalized(_ text: String?) -> String? {
-            guard let text else { return nil }
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
-        }
-
-        func canonicalDirectoryKey(_ directory: String?) -> String? {
-            guard let directory = normalized(directory) else { return nil }
-            let expanded = NSString(string: directory).expandingTildeInPath
-            let standardized = NSString(string: expanded).standardizingPath
-            let cleaned = standardized.trimmingCharacters(in: .whitespacesAndNewlines)
-            return cleaned.isEmpty ? nil : cleaned
-        }
-
-        let normalizedFallbackBranch = normalized(fallbackBranch?.branch)
-        let shouldUseFallbackBranchPerPanel = !orderedPanelIds.contains {
-            normalized(panelBranches[$0]?.branch) != nil
-        }
-        let defaultBranchForPanels = shouldUseFallbackBranchPerPanel ? normalizedFallbackBranch : nil
-        let defaultBranchDirty = shouldUseFallbackBranchPerPanel ? (fallbackBranch?.isDirty ?? false) : false
-
-        var order: [EntryKey] = []
-        var entries: [EntryKey: MutableEntry] = [:]
-
-        for panelId in orderedPanelIds {
-            let panelBranch = normalized(panelBranches[panelId]?.branch)
-            let branch = panelBranch ?? defaultBranchForPanels
-            let directory = normalized(panelDirectories[panelId] ?? defaultDirectory)
-            guard branch != nil || directory != nil else { continue }
-
-            let panelDirty = panelBranch != nil
-                ? (panelBranches[panelId]?.isDirty ?? false)
-                : defaultBranchDirty
-
-            let key: EntryKey
-            if let directoryKey = canonicalDirectoryKey(directory) {
-                // Keep one line per directory and allow the latest branch state to overwrite.
-                key = EntryKey(directory: directoryKey, branch: nil)
-            } else {
-                key = EntryKey(directory: nil, branch: branch)
-            }
-
-            guard key.directory != nil || key.branch != nil else { continue }
-
-            if var existing = entries[key] {
-                if key.directory != nil {
-                    if let branch {
-                        existing.branch = branch
-                        existing.isDirty = panelDirty
-                    } else if existing.branch == nil {
-                        existing.isDirty = panelDirty
-                    }
-                    if let directory {
-                        existing.directory = directory
-                    }
-                    entries[key] = existing
-                } else if panelDirty {
-                    existing.isDirty = true
-                    entries[key] = existing
-                }
-            } else {
-                order.append(key)
-                entries[key] = MutableEntry(branch: branch, isDirty: panelDirty, directory: directory)
-            }
-        }
-
-        if order.isEmpty {
-            let fallbackDirectory = normalized(defaultDirectory)
-            if normalizedFallbackBranch != nil || fallbackDirectory != nil {
-                return [
-                    BranchDirectoryEntry(
-                        branch: normalizedFallbackBranch,
-                        isDirty: fallbackBranch?.isDirty ?? false,
-                        directory: fallbackDirectory
-                    )
-                ]
-            }
-        }
-
-        return order.compactMap { key in
-            guard let entry = entries[key] else { return nil }
-            return BranchDirectoryEntry(
-                branch: entry.branch,
-                isDirty: entry.isDirty,
-                directory: entry.directory
-            )
-        }
     }
 }
 
@@ -5299,6 +5197,10 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var progress: SidebarProgressState?
     @Published var gitBranch: SidebarGitBranchState?
     @Published var panelGitBranches: [UUID: SidebarGitBranchState] = [:]
+    /// C11-104 — per-panel resolved worktree+branch context for the
+    /// sidebar chips. Written by `TabManager.applyWorkspaceGitMetadataSnapshot`
+    /// from the off-main probe. Nil signals "not a git directory."
+    @Published var panelGitContexts: [UUID: ResolvedGitContext?] = [:]
     @Published var pullRequest: SidebarPullRequestState?
     @Published var panelPullRequests: [UUID: SidebarPullRequestState] = [:]
     @Published var surfaceListeningPorts: [UUID: [Int]] = [:]
@@ -6710,6 +6612,22 @@ final class Workspace: Identifiable, ObservableObject {
         }
     }
 
+    /// C11-104 — write the resolved worktree+branch chip context for a
+    /// panel. Nil means "not a git directory"; we still write the nil
+    /// entry so the sidebar can render the absence (no chips) instead
+    /// of a stale prior value.
+    func updatePanelGitContext(panelId: UUID, context: ResolvedGitContext?) {
+        // Flatten the subscript's outer optional so "missing key" and
+        // "key present with nil value" compare identically.
+        let prior: ResolvedGitContext? = panelGitContexts[panelId] ?? nil
+        if prior == context { return }
+        panelGitContexts[panelId] = context
+    }
+
+    func clearPanelGitContext(panelId: UUID) {
+        panelGitContexts.removeValue(forKey: panelId)
+    }
+
     func updatePanelPullRequest(
         panelId: UUID,
         number: Int,
@@ -6781,6 +6699,7 @@ final class Workspace: Identifiable, ObservableObject {
         progress = nil
         gitBranch = nil
         panelGitBranches.removeAll()
+        panelGitContexts.removeAll()
         pullRequest = nil
         panelPullRequests.removeAll()
         surfaceListeningPorts.removeAll()
@@ -7209,6 +7128,7 @@ final class Workspace: Identifiable, ObservableObject {
         pinnedPanelIds = pinnedPanelIds.filter { validSurfaceIds.contains($0) }
         manualUnreadPanelIds = manualUnreadPanelIds.filter { validSurfaceIds.contains($0) }
         panelGitBranches = panelGitBranches.filter { validSurfaceIds.contains($0.key) }
+        panelGitContexts = panelGitContexts.filter { validSurfaceIds.contains($0.key) }
         manualUnreadMarkedAt = manualUnreadMarkedAt.filter { validSurfaceIds.contains($0.key) }
         surfaceListeningPorts = surfaceListeningPorts.filter { validSurfaceIds.contains($0.key) }
         surfaceTTYNames = surfaceTTYNames.filter { validSurfaceIds.contains($0.key) }
@@ -7261,21 +7181,13 @@ final class Workspace: Identifiable, ObservableObject {
         sidebarGitBranchesInDisplayOrder(orderedPanelIds: sidebarOrderedPanelIds())
     }
 
-    func sidebarBranchDirectoryEntriesInDisplayOrder(
-        orderedPanelIds: [UUID]
-    ) -> [SidebarBranchOrdering.BranchDirectoryEntry] {
-        SidebarBranchOrdering.orderedUniqueBranchDirectoryEntries(
-            orderedPanelIds: orderedPanelIds,
-            panelBranches: panelGitBranches,
-            panelDirectories: panelDirectories,
-            defaultDirectory: currentDirectory,
-            fallbackBranch: gitBranch
-        )
-    }
-
-    func sidebarBranchDirectoryEntriesInDisplayOrder() -> [SidebarBranchOrdering.BranchDirectoryEntry] {
-        sidebarBranchDirectoryEntriesInDisplayOrder(orderedPanelIds: sidebarOrderedPanelIds())
-    }
+    // (C11-106) `sidebarBranchDirectoryEntriesInDisplayOrder` (both
+    // overloads) was retired here. AC24 (C11-104) replaced the legacy
+    // text branch+directory sidebar row with the worktree+branch chip
+    // row; no production caller for these helpers survived. See the
+    // dead-code-cleanup commit on this branch for the safety protocol
+    // (grep → compile both `c11-logic` and `c11-unit` schemes → audit
+    // snapshot-restore + persistence migration paths).
 
     func sidebarPullRequestsInDisplayOrder(orderedPanelIds: [UUID]) -> [SidebarPullRequestState] {
         let validPanelPullRequests = panelPullRequests.filter { panelId, state in

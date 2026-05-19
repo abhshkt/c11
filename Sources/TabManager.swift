@@ -691,6 +691,10 @@ class TabManager: ObservableObject {
         let branch: String?
         let isDirty: Bool
         let pullRequest: WorkspacePullRequestSnapshot
+        /// C11-104 — resolved worktree + branch context for the sidebar
+        /// chips, computed on the same off-main probe pass so we do not
+        /// fork additional git invocations on the hot path.
+        let gitContext: ResolvedGitContext?
     }
 
     private struct CommandResult {
@@ -1011,6 +1015,16 @@ class TabManager: ObservableObject {
     )
     private var workspaceGitProbeGenerationByKey: [WorkspaceGitProbeKey: UUID] = [:]
     private var workspaceGitProbeTimersByKey: [WorkspaceGitProbeKey: [DispatchSourceTimer]] = [:]
+
+    /// (C11-106) Process-wide cache for `GitContextResolver` results,
+    /// shared across all workspaces and surfaces. Reads/writes are
+    /// internally locked (`@unchecked Sendable` with an NSLock), so
+    /// it is safe to share across the `initialWorkspaceGitProbeQueue`
+    /// and any future ad-hoc derivation queues. Lifecycle is tied
+    /// to the TabManager singleton; on workspace deletion the cache
+    /// entries naturally expire via LRU eviction since no further
+    /// resolve will refresh them.
+    nonisolated(unsafe) static let gitContextResolverCache = GitContextResolverCache(capacity: 256)
 
     // Recent tab history for back/forward navigation (like browser history)
     private var tabHistory: [UUID] = []
@@ -1594,6 +1608,23 @@ class TabManager: ObservableObject {
             break
         }
 
+        // C11-104 — apply the resolved worktree+branch context.
+        // Path:
+        //   1. workspace.panelGitContexts (fast path for the sidebar).
+        //   2. SurfaceMetadataStore.setInternal(.derived) for `worktree`
+        //      and `branch` so external readers (c11 get-metadata,
+        //      future Lattice queries) see the same data without
+        //      reaching into Workspace internals.
+        workspace.updatePanelGitContext(
+            panelId: probeKey.panelId,
+            context: snapshot.gitContext
+        )
+        applyDerivedWorktreeBranchMetadata(
+            workspaceId: probeKey.workspaceId,
+            surfaceId: probeKey.panelId,
+            context: snapshot.gitContext
+        )
+
 #if DEBUG
         let branchLabel = snapshot.branch ?? "none"
         let prLabel: String = {
@@ -1631,19 +1662,42 @@ class TabManager: ObservableObject {
     private nonisolated static func initialWorkspaceGitMetadataSnapshot(
         for directory: String
     ) -> InitialWorkspaceGitMetadataSnapshot {
+        // C11-104 — resolve the worktree/branch chip context first.
+        // Runs the same off-main probe queue; the resolver itself
+        // shells out to `git rev-parse` with a bounded timeout. We
+        // resolve here unconditionally because the resolver also
+        // handles the "no git" case (returns nil) which we want to
+        // capture even when the legacy branch probe also returns nil.
+        //
+        // (C11-106) Goes through `resolveCached` so repeat probes
+        // against a stable HEAD don't re-shell to git. The cache is
+        // keyed on `(cwd, mtime(headPath), mtime(superHeadPath?))`;
+        // see `GitContextResolver.resolveCached` for the full policy
+        // (linked worktrees, submodules, nil-result bypass, etc.).
+        let gitContext = GitContextResolver.resolveCached(
+            cwd: directory,
+            cache: Self.gitContextResolverCache
+        )
+
         let branch = normalizedBranchName(runGitCommand(directory: directory, arguments: ["branch", "--show-current"]))
         guard let branch else {
             return InitialWorkspaceGitMetadataSnapshot(
                 branch: nil,
                 isDirty: false,
-                pullRequest: .notFound
+                pullRequest: .notFound,
+                gitContext: gitContext
             )
         }
 
         let statusOutput = runGitCommand(directory: directory, arguments: ["status", "--porcelain", "-uno"])
         let isDirty = !(statusOutput?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         let pullRequest = workspacePullRequestSnapshot(directory: directory, branch: branch)
-        return InitialWorkspaceGitMetadataSnapshot(branch: branch, isDirty: isDirty, pullRequest: pullRequest)
+        return InitialWorkspaceGitMetadataSnapshot(
+            branch: branch,
+            isDirty: isDirty,
+            pullRequest: pullRequest,
+            gitContext: gitContext
+        )
     }
 
     private nonisolated static func runGitCommand(directory: String, arguments: [String]) -> String? {
@@ -2304,6 +2358,79 @@ class TabManager: ObservableObject {
         )
     }
 
+    /// C11-104 — write the resolved worktree/branch labels into the
+    /// surface manifest with source `.derived`. Called from the
+    /// off-main probe apply step (already on the main actor via the
+    /// Task hop in `scheduleWorkspaceGitMetadataRefresh`). External
+    /// callers should NOT invoke this directly — it's keyed off the
+    /// resolver output.
+    private func applyDerivedWorktreeBranchMetadata(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        context: ResolvedGitContext?
+    ) {
+        let store = SurfaceMetadataStore.shared
+
+        guard let context else {
+            store.setInternal(
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                key: MetadataKey.worktree,
+                value: "",
+                source: .derived
+            )
+            store.setInternal(
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                key: MetadataKey.branch,
+                value: "",
+                source: .derived
+            )
+            return
+        }
+
+        let worktreeValue: String
+        switch context.outer {
+        case .mainCheckout:
+            worktreeValue = ""
+        case .linkedWorktree(let basename, _, _):
+            worktreeValue = basename
+        case .notInRepo, .stale:
+            // (C11-106) Both states clear the worktree value. Same
+            // observable result as the nil-context branch handled
+            // above; the explicit cases compile-check that future
+            // enum additions are considered here too.
+            worktreeValue = ""
+        }
+
+        let branchValue: String
+        switch context.outer {
+        case .mainCheckout(let branch), .linkedWorktree(_, _, let branch):
+            switch branch {
+            case .attached(let name): branchValue = name
+            case .detached(let sha):  branchValue = "(detached @ \(sha))"
+            case .noBranch:           branchValue = ""
+            }
+        case .notInRepo, .stale:
+            branchValue = ""
+        }
+
+        store.setInternal(
+            workspaceId: workspaceId,
+            surfaceId: surfaceId,
+            key: MetadataKey.worktree,
+            value: worktreeValue,
+            source: .derived
+        )
+        store.setInternal(
+            workspaceId: workspaceId,
+            surfaceId: surfaceId,
+            key: MetadataKey.branch,
+            value: branchValue,
+            source: .derived
+        )
+    }
+
     func clearSurfaceGitBranch(tabId: UUID, surfaceId: UUID) {
         guard let tab = tabs.first(where: { $0.id == tabId }) else { return }
         let hadBranch = tab.panelGitBranches[surfaceId] != nil
@@ -2491,23 +2618,16 @@ class TabManager: ObservableObject {
             }
             return
         }
-        // Anchor on the currently-displayed workspace when it is itself part
-        // of the close set (per delegator decision): consistent with the
-        // previous window-modal NSAlert behavior, avoids flash-cycling
-        // across the multi-select. When the displayed workspace is NOT in
-        // the close set (sidebar multi-select can exclude the focused tab),
-        // fall through to the first workspace in the close set so the
-        // overlay never renders on a workspace that isn't being closed.
-        // The plan listing in the message tells the user exactly which
-        // workspaces are about to close — the anchor only matters for
-        // *where* the overlay is mounted.
-        let host: Workspace? = {
-            if let selected = selectedWorkspace,
-               workspaces.contains(where: { $0.id == selected.id }) {
-                return selected
-            }
-            return workspaces.first
-        }()
+        // Anchor on the currently-displayed workspace so the overlay always
+        // mounts on a visible content area. Off-screen workspaces are
+        // isHidden=true (perf #127); their anchor view doesn't report a
+        // window-coord frame, so mounting on one strands the runtime active
+        // with no card visible (operator sees a no-op). The plan listing in
+        // `plan.message` names every workspace being closed, so anchoring
+        // away from the close set doesn't lose context. Fall back to the
+        // first workspace in the close set only when there's no selection
+        // at all.
+        let host: Workspace? = selectedWorkspace ?? workspaces.first
         guard let host else { return }
         Task { @MainActor [weak self] in
             let accepted = await host.presentConfirmCloseWorkspace(
@@ -2690,9 +2810,17 @@ class TabManager: ObservableObject {
             // content area only, with a centered confirm/cancel card. Lands above
             // portal-hosted terminal/browser content via themeFrame mount. Sidebar
             // stays visible. Plan §3.1, §3.3.
-            Task { @MainActor [weak self, weak workspace] in
-                guard let self, let workspace else { return }
-                let accepted = await workspace.presentConfirmCloseWorkspace(
+            //
+            // Host vs target: off-screen workspaces are isHidden=true (perf #127),
+            // so their anchor view doesn't report a window-coord frame and the
+            // overlay controller bails on `guard let anchor`. Mounting on the
+            // currently-selected workspace guarantees the card is visible; the
+            // dialog message already names the workspace being closed, so the
+            // operator still knows what they're confirming.
+            let host = selectedWorkspace ?? workspace
+            Task { @MainActor [weak self, weak workspace, weak host] in
+                guard let self, let workspace, let host else { return }
+                let accepted = await host.presentConfirmCloseWorkspace(
                     title: title,
                     message: message,
                     source: .local

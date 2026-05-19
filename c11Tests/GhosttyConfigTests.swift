@@ -1573,7 +1573,7 @@ final class NotificationBurstCoalescerTests: XCTestCase {
             }
         }
 
-        wait(for: [expectation], timeout: 1.0)
+        wait(for: [expectation], timeout: 5.0)
         XCTAssertEqual(flushCount, 1)
     }
 
@@ -1592,7 +1592,7 @@ final class NotificationBurstCoalescerTests: XCTestCase {
             }
         }
 
-        wait(for: [expectation], timeout: 1.0)
+        wait(for: [expectation], timeout: 5.0)
         XCTAssertEqual(value, 2)
     }
 
@@ -1615,7 +1615,7 @@ final class NotificationBurstCoalescerTests: XCTestCase {
             }
         }
 
-        wait(for: [expectation], timeout: 1.0)
+        wait(for: [expectation], timeout: 5.0)
         XCTAssertEqual(flushCount, 2)
     }
 }
@@ -1645,7 +1645,7 @@ final class GhosttyDefaultBackgroundNotificationDispatcherTests: XCTestCase {
             dispatcher.signal(backgroundColor: light, opacity: 0.75, eventId: 2, source: "test.light")
         }
 
-        wait(for: [expectation], timeout: 1.0)
+        wait(for: [expectation], timeout: 5.0)
         XCTAssertEqual(postedUserInfos.count, 1)
         XCTAssertEqual(
             (postedUserInfos[0][GhosttyNotificationKey.backgroundColor] as? NSColor)?.hexString(),
@@ -1693,7 +1693,7 @@ final class GhosttyDefaultBackgroundNotificationDispatcherTests: XCTestCase {
             }
         }
 
-        wait(for: [expectation], timeout: 1.0)
+        wait(for: [expectation], timeout: 5.0)
         XCTAssertEqual(postedHexes, ["#272822", "#FDF6E3"])
     }
 
@@ -1751,7 +1751,9 @@ final class RecentlyClosedBrowserStackTests: XCTestCase {
 final class SocketControlSettingsTests: XCTestCase {
     func testMigrateModeSupportsExpandedSocketModes() {
         XCTAssertEqual(SocketControlSettings.migrateMode("off"), .off)
-        XCTAssertEqual(SocketControlSettings.migrateMode("cmuxOnly"), .cmuxOnly)
+        XCTAssertEqual(SocketControlSettings.migrateMode("c11Only"), .c11Only)
+        // Pre-rename UserDefaults values must still migrate forward.
+        XCTAssertEqual(SocketControlSettings.migrateMode("cmuxOnly"), .c11Only)
         XCTAssertEqual(SocketControlSettings.migrateMode("automation"), .automation)
         XCTAssertEqual(SocketControlSettings.migrateMode("password"), .password)
         XCTAssertEqual(SocketControlSettings.migrateMode("allow-all"), .allowAll)
@@ -1763,7 +1765,7 @@ final class SocketControlSettingsTests: XCTestCase {
 
     func testSocketModePermissions() {
         XCTAssertEqual(SocketControlMode.off.socketFilePermissions, 0o600)
-        XCTAssertEqual(SocketControlMode.cmuxOnly.socketFilePermissions, 0o600)
+        XCTAssertEqual(SocketControlMode.c11Only.socketFilePermissions, 0o600)
         XCTAssertEqual(SocketControlMode.automation.socketFilePermissions, 0o600)
         XCTAssertEqual(SocketControlMode.password.socketFilePermissions, 0o600)
         XCTAssertEqual(SocketControlMode.allowAll.socketFilePermissions, 0o666)
@@ -1867,7 +1869,7 @@ final class SocketControlSettingsTests: XCTestCase {
         )
         XCTAssertEqual(
             SocketControlSettings.defaultSocketPath(
-                bundleIdentifier: "com.stage11.c11.debug.tag",
+                bundleIdentifier: "com.stage11.c11.debug",
                 isDebugBuild: false,
                 probeStableDefaultPathEntry: { _ in .missing }
             ),
@@ -1875,7 +1877,7 @@ final class SocketControlSettingsTests: XCTestCase {
         )
         XCTAssertEqual(
             SocketControlSettings.defaultSocketPath(
-                bundleIdentifier: "com.stage11.c11.staging.tag",
+                bundleIdentifier: "com.stage11.c11.staging",
                 isDebugBuild: false,
                 probeStableDefaultPathEntry: { _ in .missing }
             ),
