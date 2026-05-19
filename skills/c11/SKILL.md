@@ -66,6 +66,24 @@ c11 set-description  --surface "$C11_SURFACE_ID" "Planning the migration off the
 
 **If the user's opening message is absent or ambiguous, ask before orienting.** This aligns with the global "dialogue" norm — don't silently rename a tab `"Explore"` just to have something in the sidebar. A direct request ("fix this bug", "what is X called") is not ambiguous; proceed with the request and run orientation in the same turn.
 
+**If the user's opening message is bootstrap-only, defer titling to the next user message.** A bootstrap-only first message is one whose payload is "hydrate context" rather than "do work." Examples: `"load the c11 skill"`, `"you are running inside c11, load the c11 skill"` (the current launcher style), `"load the c11 and lattice skills"`. The operator's real first query is one turn behind, and the title should reflect that, not the bootstrap directive.
+
+While deferring:
+
+- Run identity orientation immediately. `c11 identify`, `c11 tree`, `c11 set-agent` declare *who* the agent is, independent of work, and are safe to fire now.
+- Set a placeholder title and description that honestly reflect the orienting state:
+
+```bash
+c11 rename-tab       --surface "$C11_SURFACE_ID" "Awaiting first task"
+c11 set-description  --surface "$C11_SURFACE_ID" "c11 skill loaded. Send your first task to name this surface."
+```
+
+- **On the next real user message, your very first action is to title the surface, before any other tool call.** The "next real user message" is the first turn from the user that isn't itself another bootstrap directive: another `"load X skill"` keeps you deferring; anything that describes work is what you title from. A stale `"Awaiting first task"` lingering past the first work message is a navigation failure, not a minor cosmetic lapse. If you are in a chat whose only turn so far is `"load the c11 skill"`, you wait. The moment the operator's real query arrives, the title is the first thing you set.
+
+The rule is intentionally narrow. It does **not** cover `"read /path/to/X and follow instructions"` (the work lives in the file; read it, then title) or slash-command first turns (the slash skill takes over and titles for its own work). If a bootstrap clause is bundled with real work in the same message (`"load the c11 skill, then plan ticket LAT-42"`), title from the work clause; the bootstrap is noise. If no follow-up ever arrives, the placeholder persists; the operator handles naming via the Bonsplit tab UI or a direct rename instruction.
+
+**Titling is not a one-shot.** After the first real titling, proactively refresh both fields as the work pivots: new ticket, new file, new sub-task, scope change of any meaningful kind. Don't wait for the operator to ask, and don't batch it for the end of the session. The *Keep them current when scope shifts* section below covers the broader discipline; the deferral case above is just the first moment where it matters.
+
 ### Declaring your agent
 
 `c11 set-agent` writes `terminal_type` and `model` to the surface manifest:
@@ -225,7 +243,7 @@ The operator is running parallel work and context-switching between surfaces; ti
 
 ### Keep them current when scope shifts
 
-Title and description are only useful as a navigable index if they reflect what the surface is *right now*. When your work pivots — planning → implementation, one ticket → another, one file → another, one sub-task → another — refresh both fields **at the pivot**, not at the end of the session. The operator glancing at the sidebar should never see a stale breadcrumb.
+Title and description are only useful as a navigable index if they reflect what the surface is *right now*. When your work pivots — planning → implementation, one ticket → another, one file → another, one sub-task → another — proactively refresh both fields **at the pivot**, not at the end of the session and not when the operator prompts you to. The operator glancing at the sidebar should never see a stale breadcrumb.
 
 Rough test for "did I drift?": if an operator scanning the sidebar would make a different routing decision based on the new state of the work, the title or description is out of date.
 
@@ -373,6 +391,27 @@ c11 send --workspace $WS --surface $SURF "cd /path && $C11_DEFAULT_AGENT_LAUNCH 
 ```
 
 This is the default pattern for orchestrated sub-agent launches.
+
+### Pin the sub-agent's base
+
+When the sub-agent will work in a worktree, the prompt must name the base
+branch or SHA explicitly. Don't say "fresh worktree" — the agent will
+inherit whatever HEAD is at spawn time, which may be a working branch you
+don't intend to include.
+
+```text
+# WRONG — agent inherits caller's branch, transitively pulls in work
+# that may not belong in this scope.
+"Work in a fresh worktree and ship a PR for X."
+
+# RIGHT — base is explicit; lineage is auditable.
+"Branch off origin/main at <SHA from `git rev-parse origin/main`> and ship a PR for X."
+"Branch off release/v0.49.0 and ship a PR for X."
+```
+
+The cost is one line in the prompt. The benefit is no downstream
+"what is this branch actually based on?" mystery — and no surprise when
+the sub-agent's PR transitively requires another open PR to land first.
 
 > **Spawning a second instance of your own agent type is the polling-deadlock case.** Two-call launches that wait for the sidebar to settle on `Idle` are workspace-scoped, so a second claude (or second codex, etc.) in the same workspace makes the status row never decisively report idle and the loop hangs. Default to the one-shot pattern above. Before reaching for two-call polling or any agent-specific quirk (the claude wrapper, codex `--yolo` vs `exec`, banner-string scraping), check [`references/orchestration.md#per-agent-launch-quirks`](references/orchestration.md#per-agent-launch-quirks).
 

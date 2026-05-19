@@ -228,17 +228,75 @@ final class GitContextResolverTests: XCTestCase {
 
         let fs = FakeFileSystem(existing: [cwd])
         let result = resolveOffMain(cwd: cwd, runner: runner, fs: fs)
-        // No throw, no crash — just `.unknown` in the branch slot.
+        // No throw, no crash — just `.noBranch` in the branch slot.
         switch result?.outer {
         case .linkedWorktree(_, _, let branch):
-            XCTAssertEqual(branch, .unknown)
+            XCTAssertEqual(branch, .noBranch)
         default:
             XCTFail("expected linkedWorktree, got \(String(describing: result?.outer))")
         }
     }
 
+    // MARK: - AC10: Stale worktree (worktree removed while pane is open)
+    //
+    // (C11-106) Closes the AC10 FAIL row from the C11-104 validation
+    // report. When `git worktree remove` is run from a sibling pane,
+    // the affected pane's gitdir HEAD path is pruned (e.g.
+    // `<common-dir>/worktrees/<name>/HEAD` disappears) but the cwd
+    // directory often remains. The resolver detects this by
+    // resolving `--git-path HEAD` and observing the resulting file
+    // is missing on disk → returns `.stale`. Cache layer (C11-106
+    // §1) is responsible for not storing `.stale` so a recreated
+    // worktree is picked up on the next resolution.
+
+    func testStaleWorktreeReturnsStaleWhenHeadPathFileMissing() {
+        let cwd = "/Users/atin/code/c11-worktrees/pruned-worktree"
+        let staleHeadPath = "/Users/atin/code/c11/.git/worktrees/pruned-worktree/HEAD"
+        let runner = FakeGitRunner()
+        // `git rev-parse --git-path HEAD` still resolves the absolute
+        // path git would point at — git itself doesn't notice the
+        // worktree was pruned until it tries to read the file.
+        runner.stub(cwd: cwd, args: ["rev-parse", "--git-path", "HEAD"], result: staleHeadPath)
+
+        // cwd directory still exists on disk; the HEAD file does not.
+        var fs = FakeFileSystem(existing: [cwd])
+        fs.existing.remove(staleHeadPath)
+        // Nothing else needs stubbing — `.stale` should short-circuit
+        // before the resolver issues any further git invocations.
+
+        let result = resolveOffMain(cwd: cwd, runner: runner, fs: fs)
+        XCTAssertEqual(result?.outer, .stale)
+        XCTAssertNil(result?.inner)
+        // Asserts: only the `--git-path HEAD` invocation happened.
+        // Any further runner invocations would mean the `.stale`
+        // short-circuit didn't fire.
+        XCTAssertEqual(runner.invocations.count, 1, "stale short-circuit must skip the rest of the probe")
+    }
+
+    func testHeadPathExistingOnDiskFallsThroughToRegularResolution() {
+        let cwd = "/Users/atin/code/c11"
+        let liveHeadPath = "/Users/atin/code/c11/.git/HEAD"
+        let runner = FakeGitRunner()
+        runner.stub(cwd: cwd, args: ["rev-parse", "--git-path", "HEAD"], result: liveHeadPath)
+        // Regular resolution after the stale check falls through.
+        runner.stub(cwd: cwd, args: ["rev-parse", "--show-superproject-working-tree"], result: nil)
+        runner.stub(cwd: cwd, args: ["rev-parse", "--show-toplevel"], result: cwd)
+        runner.stub(cwd: cwd, args: ["rev-parse", "--git-common-dir"], result: cwd + "/.git")
+        runner.stub(cwd: cwd, args: ["rev-parse", "--git-dir"], result: cwd + "/.git")
+        runner.stub(cwd: cwd, args: ["symbolic-ref", "--short", "HEAD"], result: "main")
+
+        let fs = FakeFileSystem(existing: [cwd, liveHeadPath])
+        let result = resolveOffMain(cwd: cwd, runner: runner, fs: fs)
+        XCTAssertEqual(result?.outer, .mainCheckout(branch: .attached("main")))
+    }
+
     // MARK: - AC12: Cache invalidates on .git/HEAD mtime change
 
+    // (C11-106) Cache-class-level tests. Production cache wiring +
+    // submodule + nil-result tests live in
+    // GitContextResolverCacheWiringTests.swift (separate file because
+    // they exercise the production `resolveCached` entry point and a
+    // submodule fixture deserves its own setup).
     func testCacheHitDoesNotReinvokeRunner() {
         let cwd = "/tmp/cached"
         let runner = FakeGitRunner()
@@ -254,20 +312,21 @@ final class GitContextResolverTests: XCTestCase {
         let key = GitContextResolverCache.Key(cwd: cwd, headMtime: mtime)
 
         if cache.get(key) == nil {
-            let value = resolveOffMain(cwd: cwd, runner: runner, fs: fs)
+            guard let value = resolveOffMain(cwd: cwd, runner: runner, fs: fs) else {
+                XCTFail("expected a resolved value")
+                return
+            }
             cache.set(key, value: value)
         }
         let first = runner.invocations.count
         XCTAssertGreaterThan(first, 0)
 
-        // Second lookup with the same key → cache hit. The outer
-        // optional means "present in cache"; the inner is the resolver
-        // result. We expect a present-and-non-nil mainCheckout entry.
-        guard let cached = cache.get(key), let resolved = cached else {
+        // Second lookup with the same key → cache hit.
+        guard let cached = cache.get(key) else {
             XCTFail("expected cache hit")
             return
         }
-        XCTAssertEqual(resolved.outer, .mainCheckout(branch: .attached("main")))
+        XCTAssertEqual(cached.outer, .mainCheckout(branch: .attached("main")))
         XCTAssertEqual(runner.invocations.count, first, "cache hit must not invoke the runner")
     }
 
@@ -285,7 +344,10 @@ final class GitContextResolverTests: XCTestCase {
         let t1 = Date(timeIntervalSince1970: 1000)
         let key1 = GitContextResolverCache.Key(cwd: cwd, headMtime: t1)
 
-        let v1 = resolveOffMain(cwd: cwd, runner: runner, fs: fs)
+        guard let v1 = resolveOffMain(cwd: cwd, runner: runner, fs: fs) else {
+            XCTFail("expected first resolution to succeed")
+            return
+        }
         cache.set(key1, value: v1)
         let beforeChange = runner.invocations.count
 
@@ -294,7 +356,10 @@ final class GitContextResolverTests: XCTestCase {
         let key2 = GitContextResolverCache.Key(cwd: cwd, headMtime: t2)
         XCTAssertNil(cache.get(key2), "different mtime must miss")
 
-        let v2 = resolveOffMain(cwd: cwd, runner: runner, fs: fs)
+        guard let v2 = resolveOffMain(cwd: cwd, runner: runner, fs: fs) else {
+            XCTFail("expected re-resolution to succeed")
+            return
+        }
         cache.set(key2, value: v2)
         XCTAssertGreaterThan(
             runner.invocations.count, beforeChange,
@@ -325,15 +390,40 @@ final class GitContextResolverTests: XCTestCase {
         XCTAssertTrue(label.hasPrefix("release/2026"), "head context preserved")
     }
 
-    // MARK: - Hot-path discipline (plan-review I2)
-
+    // MARK: - AC20: Hot-path discipline (plan-review I2; C11-106 explicit downgrade)
+    //
+    // (C11-106) AC20 from the v2 validation plan asked for a
+    // deterministic main-thread precondition trip. In-process
+    // testing of `dispatchPrecondition(.notOnQueue(.main))` is
+    // unsafe in XCTest: the precondition aborts with
+    // EXC_BAD_INSTRUCTION, which XCTExpectFailure does NOT trap
+    // (XCTExpectFailure catches XCTFails, not fatal signals).
+    //
+    // The trident plan review (revise-then-proceed verdict,
+    // 2026-05-19) offered two paths: (a) build a subprocess
+    // fatal-test harness — child binary invokes the resolver from
+    // main, parent asserts non-zero termination + precondition
+    // diagnostic in stderr; or (b) explicit downgrade — keep this
+    // sentinel test plus a documented residual gap. C11-106 took
+    // path (b): the cost of the subprocess harness is high, the
+    // residual risk is bounded (a regression to no-op preconditions
+    // would surface in any off-main test failing), and the
+    // sentinel still ensures the precondition compiles into the
+    // shipped binary. Future ticket may reopen path (a) if
+    // observability needs grow.
+    //
+    // What this test verifies:
+    //   - Off-main resolution succeeds (no precondition trip on
+    //     the legitimate path).
+    //   - The resolver's symbol surface includes the
+    //     `dispatchPrecondition` call site (compile-checked by
+    //     `@testable import c11`).
+    //
+    // What this test does NOT verify:
+    //   - That main-thread invocation actually crashes. That gap
+    //     is recorded in the PR body and the C11-106 validation
+    //     plan addendum.
     func testResolverPreconditionTripsOnMainThread() {
-        // We can't easily intercept `dispatchPrecondition` in-process,
-        // but we can confirm the resolver compiles with the precondition
-        // and runs cleanly off-main via every other test in this file.
-        // This test is a sentinel: if dispatchPrecondition is ever
-        // weakened to a no-op assertion, future maintainers will see
-        // this test exists and revisit the contract.
         let runner = FakeGitRunner()
         runner.stub(cwd: "/tmp", args: ["rev-parse", "--show-superproject-working-tree"], result: nil)
         runner.stub(cwd: "/tmp", args: ["rev-parse", "--show-toplevel"], result: nil)
@@ -447,15 +537,15 @@ final class GitContextResolverTests: XCTestCase {
 
     func testCacheEvictsOldestEntriesPastCapacity() {
         let cache = GitContextResolverCache(capacity: 2)
-        let k1 = GitContextResolverCache.Key(cwd: "/a", headMtime: nil)
-        let k2 = GitContextResolverCache.Key(cwd: "/b", headMtime: nil)
-        let k3 = GitContextResolverCache.Key(cwd: "/c", headMtime: nil)
-        cache.set(k1, value: nil)
-        cache.set(k2, value: nil)
-        cache.set(k3, value: nil)
+        let mtime = Date(timeIntervalSince1970: 1000)
+        let value = ResolvedGitContext(outer: .mainCheckout(branch: .attached("main")))
+        let k1 = GitContextResolverCache.Key(cwd: "/a", headMtime: mtime)
+        let k2 = GitContextResolverCache.Key(cwd: "/b", headMtime: mtime)
+        let k3 = GitContextResolverCache.Key(cwd: "/c", headMtime: mtime)
+        cache.set(k1, value: value)
+        cache.set(k2, value: value)
+        cache.set(k3, value: value)
         XCTAssertEqual(cache.count, 2)
-        // `cache.get` returns Optional<Optional<ResolvedGitContext>>.
-        // The outer nil means "not in cache" — that's what eviction yields.
         XCTAssertTrue(cache.get(k1) == nil, "oldest entry must have been evicted")
         XCTAssertTrue(cache.get(k2) != nil)
         XCTAssertTrue(cache.get(k3) != nil)
