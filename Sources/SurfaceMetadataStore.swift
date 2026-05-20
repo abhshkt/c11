@@ -155,11 +155,10 @@ final class SurfaceMetadataStore: @unchecked Sendable {
 
     /// Reserved canonical keys. Keys not in this set accept any JSON value.
     ///
-    /// `claude.session_id` is reserved because its value is interpolated
-    /// into the `cc --resume <id>` shell command at restore time by
-    /// `AgentRestartRegistry.phase1`. Accepting arbitrary strings here
-    /// would make the metadata layer a command-injection vector. See
-    /// `validateReservedKey` for the UUIDv4 grammar enforced at write time.
+    /// `*.session_id` reserved keys are interpolated into shell commands at
+    /// restore time by `AgentRestartRegistry.phase1`. Accepting arbitrary
+    /// strings here would make the metadata layer a command-injection vector.
+    /// See `validateReservedKey` for the UUID grammar enforced at write time.
     static let reservedKeys: Set<String> = [
         "role",
         "status",
@@ -173,7 +172,9 @@ final class SurfaceMetadataStore: @unchecked Sendable {
         "worktree",
         "branch",
         "claude.session_id",
-        "claude.session_project_dir"
+        "claude.session_project_dir",
+        "codex.session_id",
+        "codex.session_project_dir"
     ]
 
     static func validateReservedKey(_ key: String, _ value: Any) -> WriteError? {
@@ -185,7 +186,16 @@ final class SurfaceMetadataStore: @unchecked Sendable {
         case "task":
             return validateString(key: key, value: value, maxLen: 128)
         case "model":
-            return validateKebab(key: key, value: value, maxLen: 64)
+            guard let s = value as? String else {
+                return .reservedKeyInvalidType(key, "expected string")
+            }
+            if !isValidSurfaceModelId(s) {
+                return .reservedKeyInvalidType(
+                    key,
+                    "must be 1-64 ASCII chars: letters, digits, dot, underscore, colon, slash, plus, hyphen"
+                )
+            }
+            return nil
         case "progress":
             guard let num = value as? NSNumber, !(num is Bool) else {
                 return .reservedKeyInvalidType(key, "expected number")
@@ -252,12 +262,27 @@ final class SurfaceMetadataStore: @unchecked Sendable {
         case "claude.session_id":
             // Claude SessionStart's `session_id` is a UUIDv4; reject
             // anything else. The value is interpolated verbatim into
-            // `cc --resume <id>` at restore time, so a non-UUID value
+            // a restore command at restore time, so a non-UUID value
             // would be a command-injection vector.
             guard let s = value as? String else {
                 return .reservedKeyInvalidType(key, "expected string")
             }
             if !isValidClaudeSessionId(s) {
+                return .reservedKeyInvalidType(
+                    key,
+                    "must match UUIDv4 shape 8-4-4-4-12 hex"
+                )
+            }
+            return nil
+        case "codex.session_id":
+            // Codex SessionStart's `session_id` is used by
+            // `codex resume <id>` at restore time. Keep the same
+            // UUID-only boundary as Claude so the resume command cannot be
+            // shaped by arbitrary metadata.
+            guard let s = value as? String else {
+                return .reservedKeyInvalidType(key, "expected string")
+            }
+            if !isValidCodexSessionId(s) {
                 return .reservedKeyInvalidType(
                     key,
                     "must match UUIDv4 shape 8-4-4-4-12 hex"
@@ -276,6 +301,20 @@ final class SurfaceMetadataStore: @unchecked Sendable {
                 return .reservedKeyInvalidType(key, "expected string")
             }
             if !isValidClaudeSessionProjectDir(s) {
+                return .reservedKeyInvalidType(
+                    key,
+                    "must be an absolute POSIX path (≤4096 chars, no NUL/newline/single-quote)"
+                )
+            }
+            return nil
+        case "codex.session_project_dir":
+            // Project directory the codex session was created in;
+            // interpolated into `cd '<path>' && ...` at restore time.
+            // Use the same absolute-path grammar as Claude.
+            guard let s = value as? String else {
+                return .reservedKeyInvalidType(key, "expected string")
+            }
+            if !isValidCodexSessionProjectDir(s) {
                 return .reservedKeyInvalidType(
                     key,
                     "must be an absolute POSIX path (≤4096 chars, no NUL/newline/single-quote)"
@@ -466,13 +505,33 @@ final class SurfaceMetadataStore: @unchecked Sendable {
         sources: [String: SourceRecord]
     ) {
         queue.sync {
-            metadata[workspaceId, default: [:]][surfaceId] = values
-            self.sources[workspaceId, default: [:]][surfaceId] = sources
+            let sanitized = Self.sanitizedSnapshotMetadata(values: values, sources: sources)
+            metadata[workspaceId, default: [:]][surfaceId] = sanitized.values
+            self.sources[workspaceId, default: [:]][surfaceId] = sanitized.sources
             // Bump the revision so a post-restore autosave tick sees the
             // fingerprint differ from the pre-restore state, writing the
             // restored contents back to disk with a fresh createdAt.
             metadataStoreRevision &+= 1
         }
+    }
+
+    private static func sanitizedSnapshotMetadata(
+        values: [String: Any],
+        sources: [String: SourceRecord]
+    ) -> (values: [String: Any], sources: [String: SourceRecord]) {
+        var restoredValues = values
+        var restoredSources = sources
+
+        for (key, value) in values where reservedKeys.contains(key) {
+            if validateReservedKey(key, value) != nil {
+                restoredValues.removeValue(forKey: key)
+                restoredSources.removeValue(forKey: key)
+            }
+        }
+
+        let valueKeys = Set(restoredValues.keys)
+        restoredSources = restoredSources.filter { valueKeys.contains($0.key) }
+        return (restoredValues, restoredSources)
     }
 
     /// Remove all metadata for a surface. Called from `pruneSurfaceMetadata`

@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+"""
+Regression checks for the c11 Codex hook bridge.
+
+This drives the real CLI against a running c11 socket because the bridge's
+contract is socket-visible behavior: surface metadata, notifications, and
+sidebar status rows.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+
+def resolve_c11_cli() -> str:
+    explicit = os.environ.get("C11_CLI_BIN") or os.environ.get("CMUX_CLI_BIN") or os.environ.get("CMUX_CLI")
+    if explicit and os.path.exists(explicit) and os.access(explicit, os.X_OK):
+        return explicit
+
+    raise RuntimeError("Set C11_CLI_BIN to the tagged c11 CLI binary under test.")
+
+
+def can_connect(cli_path: str, path: str) -> bool:
+    proc = subprocess.run(
+        [cli_path, "--socket", path, "ping"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=2,
+    )
+    return proc.returncode == 0
+
+
+def resolve_socket_path(cli_path: str) -> str:
+    for key in ("C11_SOCKET", "CMUX_SOCKET_PATH", "CMUX_SOCKET"):
+        candidate = os.environ.get(key)
+        if candidate and os.path.exists(candidate) and can_connect(cli_path, candidate):
+            return candidate
+
+    raise RuntimeError("Set C11_SOCKET to the tagged c11 socket under test.")
+
+
+def run_cli(
+    cli_path: str,
+    socket_path: str,
+    args: list[str],
+    *,
+    payload: dict | None = None,
+    env: dict[str, str] | None = None,
+    clean_c11_env: bool = False,
+) -> str:
+    command_env = os.environ.copy()
+    command_env["CMUX_CLI_SENTRY_DISABLED"] = "1"
+    command_env["C11_QUIET_DISCOVERY"] = "1"
+    if clean_c11_env:
+        for key in ("CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_SOCKET_PATH", "C11_WORKSPACE_ID", "C11_SURFACE_ID", "C11_SOCKET"):
+            command_env.pop(key, None)
+    if env:
+        command_env.update(env)
+
+    proc = subprocess.run(
+        [cli_path, "--socket", socket_path, *args],
+        input=json.dumps(payload) if payload is not None else None,
+        text=True,
+        capture_output=True,
+        env=command_env,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"c11 {' '.join(args)} failed:\n"
+            f"exit={proc.returncode}\nstdout={proc.stdout}\nstderr={proc.stderr}"
+        )
+    return proc.stdout.strip()
+
+
+def parse_ok_id(output: str) -> str:
+    if output.startswith("OK "):
+        return output[3:].strip()
+    raise RuntimeError(f"Expected OK id response, got {output!r}")
+
+
+def first_surface_id(output: str) -> str:
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.lstrip("* ").split()
+        for part in parts:
+            if part.startswith("surface:"):
+                return part
+    raise RuntimeError(f"No surface found in output {output!r}")
+
+
+def tree_uuid_for_ref(tree_output: str, kind: str, ref: str) -> str:
+    for line in tree_output.splitlines():
+        parts = line.strip().split()
+        for index, part in enumerate(parts):
+            if part == kind and index + 2 < len(parts) and parts[index + 1] == ref:
+                return parts[index + 2]
+    raise RuntimeError(f"Could not resolve {kind} {ref} in tree output {tree_output!r}")
+
+
+def list_notifications(cli_path: str, socket_path: str, workspace_uuid: str) -> list[dict[str, str]]:
+    output = run_cli(cli_path, socket_path, ["list-notifications"])
+    if output == "No notifications" or not output:
+        return []
+
+    items: list[dict[str, str]] = []
+    for line in output.splitlines():
+        if ":" not in line:
+            continue
+        _, payload = line.split(":", 1)
+        parts = payload.split("|", 6)
+        if len(parts) < 7:
+            continue
+        notification_id, tab_id, surface_id, read_text, title, subtitle, body = parts
+        if tab_id != workspace_uuid:
+            continue
+        items.append(
+            {
+                "id": notification_id,
+                "workspace_id": tab_id,
+                "surface_id": surface_id,
+                "is_read": read_text,
+                "title": title,
+                "subtitle": subtitle,
+                "body": body,
+            }
+        )
+    return items
+
+
+def wait_for_notifications(cli_path: str, socket_path: str, workspace_uuid: str, minimum: int) -> list[dict[str, str]]:
+    deadline = time.time() + 4
+    latest: list[dict[str, str]] = []
+    while time.time() < deadline:
+        latest = list_notifications(cli_path, socket_path, workspace_uuid)
+        if len(latest) >= minimum:
+            return latest
+        time.sleep(0.05)
+    return latest
+
+
+def expect(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(message)
+
+
+def main() -> int:
+    try:
+        cli_path = resolve_c11_cli()
+        socket_path = resolve_socket_path(cli_path)
+    except Exception as exc:
+        print(f"FAIL: {exc}")
+        return 1
+
+    workspace_id = ""
+    try:
+        workspace_id = parse_ok_id(run_cli(cli_path, socket_path, ["new-workspace"]))
+        surfaces_output = run_cli(cli_path, socket_path, ["list-panels", "--workspace", workspace_id])
+        surface_id = first_surface_id(surfaces_output)
+        tree_output = run_cli(cli_path, socket_path, ["--id-format", "both", "tree", "--workspace", workspace_id, "--no-layout"])
+        workspace_uuid = tree_uuid_for_ref(tree_output, "workspace", workspace_id)
+        hook_env = {
+            "CMUX_SOCKET_PATH": socket_path,
+            "CMUX_WORKSPACE_ID": workspace_id,
+            "CMUX_SURFACE_ID": surface_id,
+            "CMUX_CODEX_PID": str(os.getpid()),
+        }
+
+        run_cli(cli_path, socket_path, ["clear-notifications", "--workspace", workspace_id])
+        run_cli(
+            cli_path,
+            socket_path,
+            ["notify", "--title", "Guard", "--body", "Keep me", "--workspace", workspace_id, "--surface", surface_id],
+        )
+        guard_items = wait_for_notifications(cli_path, socket_path, workspace_uuid, minimum=1)
+        expect(any(item["title"] == "Guard" for item in guard_items), "Expected guard notification before no-target check")
+
+        no_target_output = run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "prompt-submit", "{}"],
+            clean_c11_env=True,
+        )
+        expect(no_target_output == "", f"No-target codex-hook should exit quietly, got {no_target_output!r}")
+        post_no_target_items = list_notifications(cli_path, socket_path, workspace_uuid)
+        expect(
+            any(item["title"] == "Guard" for item in post_no_target_items),
+            "No-target codex-hook must not clear notifications from the focused workspace",
+        )
+
+        project_dir = Path(tempfile.gettempdir()) / f"c11_codex_hook_project_{os.getpid()}"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        other_project_dir = Path(tempfile.gettempdir()) / f"c11_codex_hook_other_{os.getpid()}"
+        other_project_dir.mkdir(parents=True, exist_ok=True)
+        session_id = "abc12345-ef67-890a-bcde-f0123456789a"
+
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "session-start"],
+            payload={
+                "hook_event_name": "SessionStart",
+                "session_id": "badbad00-0000-4000-8000-000000000000",
+                "cwd": str(other_project_dir),
+                "model": "gpt-5.5",
+            },
+            env={**hook_env, "CMUX_CODEX_PROJECT_DIR": str(project_dir)},
+        )
+        empty_metadata = run_cli(
+            cli_path,
+            socket_path,
+            [
+                "get-metadata",
+                "--workspace",
+                workspace_id,
+                "--surface",
+                surface_id,
+                "--key",
+                "codex.session_id",
+            ],
+        )
+        expect(
+            "badbad00-0000-4000-8000-000000000000" not in empty_metadata,
+            f"Project-mismatched Codex hook must not write metadata: {empty_metadata!r}",
+        )
+
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "session-start"],
+            payload={
+                "hook_event_name": "SessionStart",
+                "session_id": session_id,
+                "cwd": str(project_dir),
+                "model": "gpt-5.5",
+            },
+            env=hook_env,
+        )
+        metadata = run_cli(
+            cli_path,
+            socket_path,
+            [
+                "get-metadata",
+                "--workspace",
+                workspace_id,
+                "--surface",
+                surface_id,
+                "--key",
+                "codex.session_id",
+                "--key",
+                "codex.session_project_dir",
+                "--key",
+                "model",
+            ],
+        )
+        expect(f"codex.session_id = {session_id}" in metadata, f"Missing codex.session_id metadata: {metadata!r}")
+        expect(f"codex.session_project_dir = {project_dir}" in metadata, f"Missing project-dir metadata: {metadata!r}")
+        expect("model = gpt-5.5" in metadata, f"Missing Codex model metadata: {metadata!r}")
+
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "permission-request"],
+            payload={
+                "hook_event_name": "PermissionRequest",
+                "session_id": session_id,
+                "cwd": str(project_dir),
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": "git status --short",
+                    "description": "Need approval for bridge test",
+                },
+            },
+            env=hook_env,
+        )
+        permission_items = wait_for_notifications(cli_path, socket_path, workspace_uuid, minimum=1)
+        expect(
+            any(item["title"] == "Codex" and item["subtitle"] == "Permission" and "bridge test" in item["body"] for item in permission_items),
+            f"Expected Codex permission notification, got {permission_items!r}",
+        )
+        status = run_cli(cli_path, socket_path, ["list-status", "--workspace", workspace_id])
+        expect("codex=Needs input" in status, f"Expected Needs input status, got {status!r}")
+
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "post-tool-use"],
+            payload={
+                "hook_event_name": "PostToolUse",
+                "session_id": session_id,
+                "cwd": str(project_dir),
+                "tool_name": "Bash",
+                "tool_input": {"command": "git status --short"},
+            },
+            env=hook_env,
+        )
+        post_tool_items = list_notifications(cli_path, socket_path, workspace_uuid)
+        expect(post_tool_items == [], f"PostToolUse should clear stale notifications, got {post_tool_items!r}")
+        status = run_cli(cli_path, socket_path, ["list-status", "--workspace", workspace_id])
+        expect("codex=Running" in status, f"Expected Running status after PostToolUse, got {status!r}")
+
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "notify"],
+            payload={
+                "hook_event_name": "Stop",
+                "session_id": session_id,
+                "cwd": str(project_dir),
+                "last_assistant_message": "Bridge done",
+            },
+            env=hook_env,
+        )
+        completion_items = wait_for_notifications(cli_path, socket_path, workspace_uuid, minimum=1)
+        expect(
+            any(item["title"] == "Codex" and item["subtitle"].startswith("Completed") and "Bridge done" in item["body"] for item in completion_items),
+            f"Expected Codex completion notification, got {completion_items!r}",
+        )
+        status = run_cli(cli_path, socket_path, ["list-status", "--workspace", workspace_id])
+        expect("codex=Idle" in status, f"Expected Idle status after notify, got {status!r}")
+
+        before_status_only_count = len(list_notifications(cli_path, socket_path, workspace_uuid))
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "stop", "--status-only"],
+            payload={
+                "hook_event_name": "Stop",
+                "session_id": session_id,
+                "cwd": str(project_dir),
+                "last_assistant_message": "No duplicate please",
+            },
+            env=hook_env,
+        )
+        after_status_only = list_notifications(cli_path, socket_path, workspace_uuid)
+        expect(
+            len(after_status_only) == before_status_only_count,
+            f"status-only Stop must not add a notification: before={before_status_only_count} after={after_status_only!r}",
+        )
+
+        print("PASS: codex-hook bridge updates metadata, notifications, status, and no-target safety")
+        return 0
+
+    except Exception as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    finally:
+        if workspace_id:
+            try:
+                run_cli(cli_path, socket_path, ["close-workspace", "--workspace", workspace_id])
+            except Exception:
+                pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

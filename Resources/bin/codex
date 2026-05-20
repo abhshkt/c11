@@ -1,30 +1,58 @@
 #!/usr/bin/env bash
-# c11 codex wrapper - session-resume capture for codex.
+# c11 codex wrapper - lifecycle bridge for Codex.
 #
 # When running inside a c11 terminal (CMUX_SURFACE_ID set + socket live),
-# this wrapper marks the surface as terminal_type=codex so that the c11
-# session-restore path types `codex resume --last\n` into this terminal
-# on next c11 launch. Outside c11 (or when the socket is unreachable),
-# it passes through to the real codex binary unchanged.
+# this wrapper marks the surface as terminal_type=codex, injects Codex's
+# `notify` command for the no-trust turn-complete path, and starts Codex with a
+# c11-owned `--profile-v2 c11` hook layer. That layer lives under c11's runtime
+# state, mirrors auth/state entries from the operator's Codex home, and is
+# reviewed by Codex's own hook-trust UI. The operator's `config.toml` is copied
+# into the c11-owned overlay rather than symlinked, so Codex hook-trust writes
+# cannot mutate `~/.codex/config.toml`. c11 never writes tenant-owned project
+# `.codex/` files or shell rc files. c11 captures codex.session_id from trusted
+# hook payloads, from explicit `codex resume <id>` invocations, or from a
+# guarded local Codex state lookup when exactly one fresh session exists. It also
+# pins Codex to the pane's effective project directory with `--cd` when needed
+# and exports that directory so trusted hooks can ignore nested/background Codex
+# sessions whose payload cwd does not match the pane.
+# That lets restore use deterministic `codex resume <id>`, while Codex's TUI
+# notifications (and the notify bridge when Codex invokes it) give Codex the
+# same completion-notification path Claude already has. When the invocation
+# includes an initial prompt, the wrapper also marks the workspace Running until
+# Codex's notify bridge marks it Idle. Outside c11 (or when the socket is
+# unreachable), it passes through to the real codex binary unchanged.
 #
-# Why no session-id capture (unlike Claude Code's wrapper)?
-#
-#   codex 0.124.0 has no `--session-id <id>` flag for forcing a UUID at
-#   start of a new session — codex generates its own. We can't pre-write
-#   `codex.session_id` to metadata before exec the way the claude wrapper
-#   does. Instead we rely on codex's built-in default behaviour: `codex
-#   resume` filters by current working directory unless `--all` is passed,
-#   and `--last` picks the most recent matching session. Combined with c11
-#   restoring each panel's cwd, `codex resume --last` ends up resuming the
-#   right session per panel as long as panels have distinct cwds. The
-#   degenerate case (two codex panels sharing one cwd) resolves to
-#   most-recent — acceptable best-effort.
+# Codex lifecycle hooks are discovered from real config layers such as
+# `$CODEX_HOME/config.toml`, `--profile-v2 <name>`, or `<repo>/.codex/config.toml`;
+# as of Codex 0.132, `-c hooks.*=...` runtime overrides parse but do not
+# register executable hook sources. c11 therefore uses a profile layer in a
+# c11-owned CODEX_HOME overlay instead of ignored `-c hooks.*` overrides, and it
+# does not use `--dangerously-bypass-hook-trust`. Non-managed hook trust belongs
+# to Codex's own review path, not to this wrapper. The `notify` bridge is
+# intentionally separate because Codex notification commands do not use the hook
+# trust browser and are needed for completion parity before an operator reviews
+# hooks. Codex only calls `notify` when TUI notifications fire, so c11-managed
+# Codex sessions also force TUI notifications on and set their condition to
+# `always`; otherwise a focused c11 pane can complete without invoking the
+# command.
 #
 # See `Resources/bin/claude` for the reference implementation of the
 # session-resume wrapper pattern and the four constraints all wrappers
 # must honour.
 
 set -uo pipefail
+
+if [[ -z "${CMUX_SOCKET_PATH:-}" && -n "${C11_SOCKET:-}" ]]; then
+    export CMUX_SOCKET_PATH="$C11_SOCKET"
+elif [[ -z "${CMUX_SOCKET_PATH:-}" && -n "${CMUX_SOCKET:-}" ]]; then
+    export CMUX_SOCKET_PATH="$CMUX_SOCKET"
+fi
+if [[ -z "${CMUX_WORKSPACE_ID:-}" && -n "${C11_WORKSPACE_ID:-}" ]]; then
+    export CMUX_WORKSPACE_ID="$C11_WORKSPACE_ID"
+fi
+if [[ -z "${CMUX_SURFACE_ID:-}" && -n "${C11_SURFACE_ID:-}" ]]; then
+    export CMUX_SURFACE_ID="$C11_SURFACE_ID"
+fi
 
 # Find the real codex binary, skipping our own directory.
 find_real_codex() {
@@ -38,16 +66,177 @@ find_real_codex() {
     return 1
 }
 
-# Return 0 only when CMUX_SOCKET_PATH points to a live c11 socket.
-c11_socket_available() {
-    local socket="${CMUX_SOCKET_PATH:-}"
-    [[ -n "$socket" && -S "$socket" ]] || return 1
-
+find_c11_bin() {
     local self_dir c11_bin
     self_dir="$(cd "$(dirname "$0")" && pwd)"
     c11_bin="$self_dir/c11"
     [[ -x "$c11_bin" ]] || c11_bin="$(command -v c11 || true)"
     [[ -n "$c11_bin" ]] || return 1
+    printf '%s' "$c11_bin"
+}
+
+toml_string() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '"%s"' "$value"
+}
+
+toml_array() {
+    local first=1
+    printf '['
+    for value in "$@"; do
+        if [[ "$first" == "0" ]]; then
+            printf ','
+        fi
+        toml_string "$value"
+        first=0
+    done
+    printf ']'
+}
+
+codex_real_home_dir() {
+    local real_home="${CMUX_CODEX_REAL_HOME:-${CODEX_HOME:-$HOME/.codex}}"
+    if [[ "$real_home" == "~" ]]; then
+        real_home="$HOME"
+    elif [[ "$real_home" == "~/"* ]]; then
+        real_home="$HOME/${real_home#~/}"
+    elif [[ "$real_home" != /* ]]; then
+        real_home="$(cd "$real_home" 2>/dev/null && pwd -P)" || return 1
+    fi
+    [[ "$real_home" == /* && -d "$real_home" ]] || return 1
+    printf '%s' "$real_home"
+}
+
+codex_home_overlay_key() {
+    local real_home="$1"
+    local key=""
+    if [[ -x /sbin/md5 ]]; then
+        key="$(printf '%s' "$real_home" | /sbin/md5 -q 2>/dev/null || true)"
+    elif command -v md5sum >/dev/null 2>&1; then
+        key="$(printf '%s' "$real_home" | md5sum 2>/dev/null | awk '{print $1}' || true)"
+    fi
+
+    if [[ "$key" =~ ^[0-9a-fA-F]{32}$ ]]; then
+        printf '%s' "$key"
+        return 0
+    fi
+
+    key="${real_home//\//_}"
+    key="${key// /_}"
+    key="${key//:/_}"
+    printf '%s' "${key:0:80}"
+}
+
+prepare_c11_codex_home_overlay() {
+    local real_home="$1"
+    local base="${CMUX_CODEX_HOME_OVERLAY_DIR:-$HOME/Library/Application Support/c11/codex-home}"
+    local key overlay profile_tmp
+    key="$(codex_home_overlay_key "$real_home")" || return 1
+    overlay="$base/$key"
+
+    mkdir -p "$overlay" || return 1
+
+    local entry name target
+    for entry in "$real_home"/* "$real_home"/.[!.]* "$real_home"/..?*; do
+        [[ -e "$entry" || -L "$entry" ]] || continue
+        name="${entry##*/}"
+        case "$name" in
+            .|..|c11.config.toml|config.toml)
+                continue
+                ;;
+        esac
+        target="$overlay/$name"
+        if [[ ! -e "$target" && ! -L "$target" ]]; then
+            ln -s "$entry" "$target" 2>/dev/null || true
+        fi
+    done
+
+    # `config.toml` is deliberately copied instead of symlinked. Codex persists
+    # hook trust back through the user config layer; if this were a symlink, a
+    # c11-managed hook review could mutate the operator's real ~/.codex/config.toml.
+    # Keep any existing c11-owned copy so hook trust reviewed inside c11 can
+    # persist in the overlay.
+    local real_config="$real_home/config.toml"
+    local overlay_config="$overlay/config.toml"
+    if [[ -L "$overlay_config" ]]; then
+        rm -f "$overlay_config" || return 1
+    fi
+    if [[ ! -e "$overlay_config" && -f "$real_config" ]]; then
+        cp -p "$real_config" "$overlay_config" 2>/dev/null || cp "$real_config" "$overlay_config" || return 1
+    fi
+
+    profile_tmp="$overlay/c11.config.toml.tmp.$$"
+    cat > "$profile_tmp" <<'EOF' || return 1
+[features]
+hooks = true
+
+[[hooks.SessionStart]]
+matcher = "startup|resume|clear"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "command -v c11 >/dev/null && c11 codex-hook session-start || true"
+timeout = 10
+statusMessage = "Connecting Codex to c11"
+
+[[hooks.UserPromptSubmit]]
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "command -v c11 >/dev/null && c11 codex-hook prompt-submit || true"
+timeout = 10
+statusMessage = "Updating c11 status"
+
+[[hooks.PermissionRequest]]
+matcher = "*"
+
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = "command -v c11 >/dev/null && c11 codex-hook permission-request || true"
+timeout = 10
+statusMessage = "Notifying c11"
+
+[[hooks.PreToolUse]]
+matcher = "*"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "command -v c11 >/dev/null && c11 codex-hook pre-tool-use || true"
+timeout = 5
+statusMessage = "Updating c11 status"
+
+[[hooks.PostToolUse]]
+matcher = "*"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "command -v c11 >/dev/null && c11 codex-hook post-tool-use || true"
+timeout = 5
+statusMessage = "Updating c11 status"
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = "command -v c11 >/dev/null && c11 codex-hook stop --status-only || true"
+timeout = 10
+statusMessage = "Updating c11 status"
+EOF
+    mv "$profile_tmp" "$overlay/c11.config.toml" || return 1
+    printf '%s' "$overlay"
+}
+
+# Return 0 only when CMUX_SOCKET_PATH points to a live c11 socket.
+c11_socket_available() {
+    local socket="${CMUX_SOCKET_PATH:-}"
+    [[ -n "$socket" && -S "$socket" ]] || return 1
+
+    local c11_bin
+    c11_bin="$(find_c11_bin)" || return 1
 
     # Bounded check so codex startup isn't blocked behind the CLI default
     # timeout (15s) when the socket is stale or hung.
@@ -55,7 +244,489 @@ c11_socket_available() {
         "$c11_bin" --socket "$socket" ping >/dev/null 2>&1
 }
 
-# Pass through if not in a c11 terminal, hooks are disabled, or the
+is_codex_session_id() {
+    [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
+}
+
+codex_state_db_path() {
+    local codex_home="${CODEX_HOME:-$HOME/.codex}"
+    if [[ "$codex_home" == "~/"* ]]; then
+        codex_home="$HOME/${codex_home#~/}"
+    fi
+    [[ "$codex_home" == /* ]] || return 1
+
+    local db_path="$codex_home/state_5.sqlite"
+    [[ -r "$db_path" ]] || return 1
+    printf '%s' "$db_path"
+}
+
+codex_project_dir_filter() {
+    local cwd="${PWD:-}"
+    if [[ "$cwd" != /* ]]; then
+        cwd="$(pwd -P 2>/dev/null || true)"
+    fi
+    [[ "$cwd" == /* ]] || return 1
+    case "$cwd" in
+        *$'\n'*|*$'\r'*|*$'\t'*|*"'"*) return 1 ;;
+    esac
+    printf '%s' "$cwd"
+}
+
+codex_normalize_project_dir() {
+    local candidate="$1"
+    [[ -n "$candidate" ]] || return 1
+    if [[ "$candidate" != /* ]]; then
+        local base="${PWD:-}"
+        if [[ "$base" != /* ]]; then
+            base="$(pwd -P 2>/dev/null || true)"
+        fi
+        [[ "$base" == /* ]] || return 1
+        candidate="$base/$candidate"
+    fi
+
+    if [[ -d "$candidate" ]]; then
+        candidate="$(cd "$candidate" 2>/dev/null && pwd -P)" || return 1
+    fi
+    [[ "$candidate" == /* ]] || return 1
+    case "$candidate" in
+        *$'\n'*|*$'\r'*|*$'\t'*|*"'"*) return 1 ;;
+    esac
+    printf '%s' "$candidate"
+}
+
+codex_explicit_project_dir_arg() {
+    local arg next
+    local args=("$@")
+    local i=0
+    while (( i < ${#args[@]} )); do
+        arg="${args[$i]}"
+        case "$arg" in
+            --)
+                return 1
+                ;;
+            --cd=*)
+                codex_normalize_project_dir "${arg#--cd=}"
+                return $?
+                ;;
+            --cd|-C)
+                if (( i + 1 >= ${#args[@]} )); then
+                    return 1
+                fi
+                next="${args[$((i + 1))]}"
+                codex_normalize_project_dir "$next"
+                return $?
+                ;;
+        esac
+        i=$((i + 1))
+    done
+    return 1
+}
+
+codex_effective_project_dir() {
+    local explicit
+    if explicit="$(codex_explicit_project_dir_arg "$@" 2>/dev/null)"; then
+        printf '%s' "$explicit"
+        return 0
+    fi
+    codex_project_dir_filter
+}
+
+codex_args_include_cd() {
+    for arg in "$@"; do
+        case "$arg" in
+            --)
+                return 1
+                ;;
+            --cd|-C|--cd=*)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+codex_args_include_profile_v2() {
+    for arg in "$@"; do
+        case "$arg" in
+            --)
+                return 1
+                ;;
+            --profile-v2|--profile-v2=*)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+codex_command_name() {
+    local args=("$@")
+    local i=0
+    local arg
+    while (( i < ${#args[@]} )); do
+        arg="${args[$i]}"
+        case "$arg" in
+            --)
+                return 1
+                ;;
+            --help|-h|--version|-V|-VV)
+                printf '%s' "$arg"
+                return 0
+                ;;
+            -c|--config|--enable|--disable|--remote|--remote-auth-token-env|-i|--image|-m|--model|--local-provider|-p|--profile|--profile-v2|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval)
+                i=$((i + 2))
+                continue
+                ;;
+            --config=*|--enable=*|--disable=*|--remote=*|--remote-auth-token-env=*|--image=*|--model=*|--local-provider=*|--profile=*|--profile-v2=*|--sandbox=*|--cd=*|--add-dir=*|--ask-for-approval=*)
+                i=$((i + 1))
+                continue
+                ;;
+            --strict-config|--oss|--dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-hook-trust|--search|--no-alt-screen)
+                i=$((i + 1))
+                continue
+                ;;
+            -*)
+                return 1
+                ;;
+            *)
+                printf '%s' "$arg"
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+codex_should_passthrough() {
+    local command
+    command="$(codex_command_name "$@" 2>/dev/null || true)"
+    case "$command" in
+        exec|e|review|login|logout|mcp|mcp-server|app-server|app|completion|sandbox|debug|apply|a|cloud|exec-server|features|plugin|remote-control|update|doctor|help|--help|-h|--version|-V|-VV)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+codex_resume_session_id_arg() {
+    local args=("$@")
+    local i=0
+    local arg
+    local saw_resume=0
+    while (( i < ${#args[@]} )); do
+        arg="${args[$i]}"
+        if [[ "$saw_resume" == "0" ]]; then
+            case "$arg" in
+                --)
+                    return 1
+                    ;;
+                -c|--config|--enable|--disable|--remote|--remote-auth-token-env|-i|--image|-m|--model|--local-provider|-p|--profile|--profile-v2|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval)
+                    i=$((i + 2))
+                    continue
+                    ;;
+                --config=*|--enable=*|--disable=*|--remote=*|--remote-auth-token-env=*|--image=*|--model=*|--local-provider=*|--profile=*|--profile-v2=*|--sandbox=*|--cd=*|--add-dir=*|--ask-for-approval=*)
+                    i=$((i + 1))
+                    continue
+                    ;;
+                --strict-config|--oss|--dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-hook-trust|--search|--no-alt-screen|--help|-h|--version|-V|-VV)
+                    i=$((i + 1))
+                    continue
+                    ;;
+                -*)
+                    return 1
+                    ;;
+                resume)
+                    saw_resume=1
+                    i=$((i + 1))
+                    continue
+                    ;;
+                *)
+                    return 1
+                    ;;
+            esac
+        fi
+
+        case "$arg" in
+            --)
+                i=$((i + 1))
+                continue
+                ;;
+            -c|--config|--enable|--disable|--remote|--remote-auth-token-env|-i|--image|-m|--model|--local-provider|-p|--profile|--profile-v2|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval)
+                i=$((i + 2))
+                continue
+                ;;
+            --config=*|--enable=*|--disable=*|--remote=*|--remote-auth-token-env=*|--image=*|--model=*|--local-provider=*|--profile=*|--profile-v2=*|--sandbox=*|--cd=*|--add-dir=*|--ask-for-approval=*)
+                i=$((i + 1))
+                continue
+                ;;
+            --last|--all|--include-non-interactive|--strict-config|--oss|--dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-hook-trust|--search|--no-alt-screen|--help|-h|--version|-V|-VV)
+                i=$((i + 1))
+                continue
+                ;;
+            -*)
+                return 1
+                ;;
+            *)
+                if is_codex_session_id "$arg"; then
+                    printf '%s' "$arg"
+                    return 0
+                fi
+                return 1
+                ;;
+        esac
+    done
+    return 1
+}
+
+codex_args_have_initial_prompt() {
+    local args=("$@")
+    local i=0
+    local arg
+    while (( i < ${#args[@]} )); do
+        arg="${args[$i]}"
+        case "$arg" in
+            --)
+                i=$((i + 1))
+                (( i < ${#args[@]} )) && return 0
+                return 1
+                ;;
+            -c|--config|--enable|--disable|--remote|--remote-auth-token-env|-i|--image|-m|--model|--local-provider|-p|--profile|--profile-v2|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval)
+                i=$((i + 2))
+                continue
+                ;;
+            --config=*|--enable=*|--disable=*|--remote=*|--remote-auth-token-env=*|--image=*|--model=*|--local-provider=*|--profile=*|--profile-v2=*|--sandbox=*|--cd=*|--add-dir=*|--ask-for-approval=*)
+                i=$((i + 1))
+                continue
+                ;;
+            --strict-config|--oss|--dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-hook-trust|--search|--no-alt-screen)
+                i=$((i + 1))
+                continue
+                ;;
+            -*)
+                # Unknown future option: stay conservative rather than treating
+                # its value as a prompt and falsely reporting Running.
+                return 1
+                ;;
+            resume|fork)
+                return 1
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+sanitize_codex_parent_environment() {
+    # c11 is often launched from an agent-owned shell. Do not let a parent
+    # Codex process's private session routing leak into a fresh c11 pane.
+    local has_parent_codex_context=0
+    if [[ -n "${CODEX_THREAD_ID+x}" || -n "${CODEX_INTERNAL_ORIGINATOR_OVERRIDE+x}" ]]; then
+        has_parent_codex_context=1
+    fi
+    unset CODEX_THREAD_ID
+    unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE
+    if [[ "$has_parent_codex_context" == "1" ]]; then
+        unset CODEX_SHELL
+        unset CODEX_CI
+        unset CODEX_SANDBOX_NETWORK_DISABLED
+    fi
+}
+
+set_codex_metadata_value() {
+    local c11_bin="$1"
+    local socket="$2"
+    local workspace="$3"
+    local surface="$4"
+    local key="$5"
+    local value="$6"
+
+    [[ -n "$value" ]] || return 0
+
+    local args=("$c11_bin" "--socket" "$socket" "set-metadata" "--key" "$key" "--value" "$value")
+    if [[ -n "$workspace" ]]; then
+        args+=("--workspace" "$workspace")
+    fi
+    if [[ -n "$surface" ]]; then
+        args+=("--surface" "$surface")
+    fi
+
+    CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC=0.75 "${args[@]}" >/dev/null 2>&1 || true
+}
+
+set_codex_agent_pid_bg() {
+    local c11_bin="$1"
+    local socket="$2"
+    local workspace="$3"
+    local pid="$4"
+
+    [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 0 ]] || return 0
+
+    local args=("$c11_bin" "--socket" "$socket" "set-agent-pid" "codex" "$pid")
+    if [[ -n "$workspace" ]]; then
+        args+=("--workspace" "$workspace")
+    fi
+
+    (
+        CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC=0.75 "${args[@]}" \
+            </dev/null >/dev/null 2>&1
+    ) &
+    disown 2>/dev/null || true
+}
+
+set_codex_running_for_initial_prompt_bg() {
+    local c11_bin="$1"
+    local socket="$2"
+    local workspace="$3"
+    local pid="$4"
+
+    [[ -n "$workspace" ]] || return 0
+
+    (
+        CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC=0.75 \
+            "$c11_bin" --socket "$socket" clear-notifications --workspace "$workspace" \
+            </dev/null >/dev/null 2>&1 || true
+
+        local args=(
+            "$c11_bin" "--socket" "$socket"
+            "set-status" "codex" "Running"
+            "--icon" "bolt.fill"
+            "--color" "#4C8DFF"
+            "--workspace" "$workspace"
+        )
+        if [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 0 ]]; then
+            args+=("--pid" "$pid")
+        fi
+        CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC=0.75 "${args[@]}" \
+            </dev/null >/dev/null 2>&1 || true
+    ) &
+    disown 2>/dev/null || true
+}
+
+start_codex_state_watcher() {
+    local c11_bin="$1"
+    local socket="$2"
+    local workspace="$3"
+    local surface="$4"
+    local start_sec="$5"
+    local codex_pid="$6"
+    local shell_project_dir="$7"
+
+    [[ "$start_sec" =~ ^[0-9]+$ && "$start_sec" -gt 0 ]] || return 0
+    [[ -n "$shell_project_dir" ]] || return 0
+    [[ -x /usr/bin/sqlite3 ]] || return 0
+
+    (
+        local floor_sec=$(( start_sec > 2 ? start_sec - 2 : 0 ))
+        local floor_ms=$(( floor_sec * 1000 ))
+        local global_fallback_not_before_sec=$(( start_sec + 3 ))
+        local created_expr="coalesce(created_at_ms, CAST(created_at AS INTEGER) * 1000, 0)"
+        local query="
+SELECT id, cwd
+FROM threads
+WHERE coalesce(archived, 0) = 0
+  AND cwd = '${shell_project_dir}'
+  AND ${created_expr} >= ${floor_ms}
+ORDER BY ${created_expr} DESC, id DESC
+LIMIT 3;
+"
+        local global_query="
+SELECT id, cwd
+FROM threads
+WHERE coalesce(archived, 0) = 0
+  AND ${created_expr} >= ${floor_ms}
+ORDER BY ${created_expr} DESC, id DESC
+LIMIT 3;
+"
+
+        while kill -0 "$codex_pid" 2>/dev/null; do
+            local db_path
+            db_path="$(codex_state_db_path)" || {
+                sleep 1
+                continue
+            }
+
+            local rows
+            rows="$(/usr/bin/sqlite3 -readonly -separator $'\t' "$db_path" "$query" 2>/dev/null)" || {
+                sleep 1
+                continue
+            }
+
+            local count=0
+            local session_id=""
+            local candidate_project_dir=""
+            while IFS=$'\t' read -r raw_session raw_cwd _; do
+                [[ -n "$raw_session" ]] || continue
+                is_codex_session_id "$raw_session" || continue
+                count=$((count + 1))
+                session_id="$raw_session"
+                candidate_project_dir="$raw_cwd"
+            done <<< "$rows"
+
+            if [[ "$count" -eq 1 ]]; then
+                set_codex_metadata_value "$c11_bin" "$socket" "$workspace" "$surface" "codex.session_id" "$session_id"
+                if [[ "$candidate_project_dir" == /* ]]; then
+                    set_codex_metadata_value "$c11_bin" "$socket" "$workspace" "$surface" "codex.session_project_dir" "$candidate_project_dir"
+                fi
+                exit 0
+            fi
+
+            # Multiple fresh sessions in this project directory and time window
+            # means the DB cannot identify this pane safely. Leave restore on
+            # --last rather than writing the wrong session id.
+            if [[ "$count" -gt 1 ]]; then
+                exit 0
+            fi
+
+            # Codex can write its state row shortly after process start. Give
+            # the stronger cwd-filtered query a short head start before
+            # considering the weaker one-candidate global fallback.
+            local now_sec
+            now_sec="$(date +%s 2>/dev/null || printf '0')"
+            if [[ "$now_sec" =~ ^[0-9]+$ && "$now_sec" -lt "$global_fallback_not_before_sec" ]]; then
+                sleep 1
+                continue
+            fi
+
+            rows="$(/usr/bin/sqlite3 -readonly -separator $'\t' "$db_path" "$global_query" 2>/dev/null)" || {
+                sleep 1
+                continue
+            }
+
+            count=0
+            session_id=""
+            candidate_project_dir=""
+            while IFS=$'\t' read -r raw_session raw_cwd _; do
+                [[ -n "$raw_session" ]] || continue
+                is_codex_session_id "$raw_session" || continue
+                count=$((count + 1))
+                session_id="$raw_session"
+                candidate_project_dir="$raw_cwd"
+            done <<< "$rows"
+
+            if [[ "$count" -eq 1 ]]; then
+                set_codex_metadata_value "$c11_bin" "$socket" "$workspace" "$surface" "codex.session_id" "$session_id"
+                if [[ "$candidate_project_dir" == /* ]]; then
+                    set_codex_metadata_value "$c11_bin" "$socket" "$workspace" "$surface" "codex.session_project_dir" "$candidate_project_dir"
+                fi
+                exit 0
+            fi
+
+            # If the Codex state DB has multiple fresh threads globally and
+            # none matched this shell cwd, there is no safe pane-specific
+            # inference. Keep waiting only for the zero-candidate case.
+            if [[ "$count" -gt 1 ]]; then
+                exit 0
+            fi
+
+            sleep 1
+        done
+    ) >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+}
+
+# Pass through if not in a c11 terminal, integration is disabled, or the
 # socket is unavailable.
 IN_C11=0
 if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then
@@ -72,25 +743,27 @@ REAL_CODEX="$(find_real_codex)" || { echo "Error: codex not found in PATH" >&2; 
 # Pass through subcommands that aren't interactive sessions. `exec`,
 # `review`, `login`, `logout`, `mcp`, `completion`, `apply`, `sandbox`,
 # `debug`, `cloud`, `features`, `mcp-server`, `app-server`, `app`,
-# `exec-server`, `plugin`, `help`, and `--help`/`-h`/`-V` are all
+# `exec-server`, `plugin`, `remote-control`, `update`, `doctor`, `help`,
+# and `--help`/`-h`/`-V` are all
 # non-interactive or auxiliary; they should not flip the surface's
 # terminal_type to "codex" (would lie — the surface isn't an interactive
 # codex session).
-case "${1:-}" in
-    exec|review|login|logout|mcp|mcp-server|app-server|app|completion|sandbox|debug|apply|cloud|exec-server|features|plugin|help|--help|-h|--version|-V|-VV)
-        exec "$REAL_CODEX" "$@"
-        ;;
-esac
+if codex_should_passthrough "$@"; then
+    exec "$REAL_CODEX" "$@"
+fi
 
 # Resolve the c11 binary (bundle-relative first, fall back to PATH so a
 # misconfigured bundle still works in dev builds).
-self_dir="$(cd "$(dirname "$0")" && pwd)"
-c11_bin="$self_dir/c11"
-[[ -x "$c11_bin" ]] || c11_bin="$(command -v c11 || true)"
+c11_bin="$(find_c11_bin || true)"
+if [[ -z "$c11_bin" ]]; then
+    exec "$REAL_CODEX" "$@"
+fi
 
-# Best-effort surface-metadata write: mark this surface as a codex
-# terminal so the c11 session-restore registry knows to send
-# `codex resume --last\n` into it on the next launch.
+sanitize_codex_parent_environment
+
+# Best-effort surface-metadata write: mark this surface as a codex terminal
+# immediately, before Codex's notify path or any trusted hook has
+# a chance to fire.
 #
 # Run in the background so codex startup latency is unaffected;
 # `disown` so a stale write can't keep the wrapper process alive after
@@ -105,4 +778,71 @@ if [[ -n "$c11_bin" ]]; then
     disown 2>/dev/null || true
 fi
 
-exec "$REAL_CODEX" "$@"
+export CMUX_CODEX_PID="$$"
+export CMUX_CODEX_START_SEC="$(date +%s 2>/dev/null || printf '0')"
+CODEX_PROJECT_DIR="$(codex_effective_project_dir "$@" || true)"
+if [[ -n "$CODEX_PROJECT_DIR" ]]; then
+    export CMUX_CODEX_PROJECT_DIR="$CODEX_PROJECT_DIR"
+fi
+codex_profile_args=()
+if [[ "${CMUX_CODEX_DISABLE_PROFILE_HOOKS:-}" != "1" ]] && ! codex_args_include_profile_v2 "$@"; then
+    CODEX_ORIGINAL_HOME="$(codex_real_home_dir || true)"
+    if [[ -n "$CODEX_ORIGINAL_HOME" ]]; then
+        C11_CODEX_HOME="$(prepare_c11_codex_home_overlay "$CODEX_ORIGINAL_HOME" || true)"
+        if [[ -n "$C11_CODEX_HOME" ]]; then
+            export CMUX_CODEX_REAL_HOME="$CODEX_ORIGINAL_HOME"
+            export CODEX_HOME="$C11_CODEX_HOME"
+            export CMUX_CODEX_HOME_OVERLAY="$C11_CODEX_HOME"
+            codex_profile_args+=("--profile-v2" "c11")
+        fi
+    fi
+fi
+set_codex_agent_pid_bg "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_CODEX_PID}"
+if codex_args_have_initial_prompt "$@"; then
+    set_codex_running_for_initial_prompt_bg "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_CODEX_PID}"
+fi
+
+resume_session_id="$(codex_resume_session_id_arg "$@" 2>/dev/null || true)"
+if [[ -n "$resume_session_id" ]]; then
+    export CMUX_CODEX_RESUME_SESSION_ID="$resume_session_id"
+fi
+
+if [[ -n "${CMUX_CODEX_RESUME_SESSION_ID:-}" ]]; then
+    (
+        set_codex_metadata_value "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_SURFACE_ID:-}" "codex.session_id" "${CMUX_CODEX_RESUME_SESSION_ID}"
+        if [[ -n "$CODEX_PROJECT_DIR" ]]; then
+            set_codex_metadata_value "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_SURFACE_ID:-}" "codex.session_project_dir" "$CODEX_PROJECT_DIR"
+        fi
+    ) &
+    disown 2>/dev/null || true
+else
+    if [[ "${CMUX_CODEX_DISABLE_STATE_WATCHER:-}" != "1" && -n "$CODEX_PROJECT_DIR" ]]; then
+        start_codex_state_watcher "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_SURFACE_ID:-}" "${CMUX_CODEX_START_SEC}" "$$" "$CODEX_PROJECT_DIR"
+    fi
+fi
+
+notify_args=("$c11_bin" "--socket" "${CMUX_SOCKET_PATH}" "codex-hook" "notify")
+if [[ -n "${CMUX_WORKSPACE_ID:-}" ]]; then
+    notify_args+=("--workspace" "${CMUX_WORKSPACE_ID}")
+fi
+if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then
+    notify_args+=("--surface" "${CMUX_SURFACE_ID}")
+fi
+notify_args+=("--started-at" "${CMUX_CODEX_START_SEC}")
+
+CODEX_NOTIFY_CONFIG="notify=$(toml_array "${notify_args[@]}")"
+CODEX_TUI_NOTIFICATIONS_CONFIG="tui.notifications=true"
+CODEX_TUI_NOTIFICATION_CONDITION_CONFIG='tui.notification_condition="always"'
+
+real_codex_args=()
+if [[ -n "$CODEX_PROJECT_DIR" ]] && ! codex_args_include_cd "$@"; then
+    real_codex_args+=("--cd" "$CODEX_PROJECT_DIR")
+fi
+real_codex_args+=("$@")
+
+exec "$REAL_CODEX" \
+    -c "$CODEX_NOTIFY_CONFIG" \
+    -c "$CODEX_TUI_NOTIFICATIONS_CONFIG" \
+    -c "$CODEX_TUI_NOTIFICATION_CONDITION_CONFIG" \
+    "${codex_profile_args[@]}" \
+    "${real_codex_args[@]}"

@@ -456,6 +456,9 @@ if [[ -x "$GHOSTTY_HELPER_SRC" ]]; then
   cp "$GHOSTTY_HELPER_SRC" "$BIN_DIR/ghostty"
   chmod +x "$BIN_DIR/ghostty"
 fi
+if [[ -n "$TAG" ]]; then
+  /usr/bin/codesign --force --sign - --timestamp=none --generate-entitlement-der "$APP_PATH" >/dev/null
+fi
 CLI_PATH="$APP_PATH/Contents/Resources/bin/c11"
 if [[ -x "$CLI_PATH" ]]; then
   echo "$CLI_PATH" > /tmp/c11-last-cli-path || true

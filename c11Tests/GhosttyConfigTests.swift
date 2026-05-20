@@ -553,6 +553,37 @@ final class GhosttyConfigTests: XCTestCase {
         XCTAssertFalse(ClaudeCodeIntegrationSettings.hooksEnabled(defaults: defaults))
     }
 
+    func testCodexIntegrationDefaultsToEnabledWhenUnset() {
+        let suiteName = "cmux.tests.codex-hooks.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Failed to create isolated user defaults suite")
+            return
+        }
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        defaults.removeObject(forKey: CodexIntegrationSettings.hooksEnabledKey)
+        XCTAssertTrue(CodexIntegrationSettings.hooksEnabled(defaults: defaults))
+    }
+
+    func testCodexIntegrationRespectsStoredPreference() {
+        let suiteName = "cmux.tests.codex-hooks.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Failed to create isolated user defaults suite")
+            return
+        }
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        defaults.set(true, forKey: CodexIntegrationSettings.hooksEnabledKey)
+        XCTAssertTrue(CodexIntegrationSettings.hooksEnabled(defaults: defaults))
+
+        defaults.set(false, forKey: CodexIntegrationSettings.hooksEnabledKey)
+        XCTAssertFalse(CodexIntegrationSettings.hooksEnabled(defaults: defaults))
+    }
+
     func testTelemetryDefaultsToEnabledWhenUnset() {
         let suiteName = "cmux.tests.telemetry.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
@@ -1155,6 +1186,36 @@ final class RemoteLoopbackHTTPRequestRewriterTests: XCTestCase {
 }
 
 final class GhosttyTerminalStartupEnvironmentTests: XCTestCase {
+    func testAgentIntegrationHookEnvironmentOmitsDisabledFlagsWhenEnabled() {
+        let env = TerminalSurface.agentIntegrationHookEnvironment(
+            claudeHooksEnabled: true,
+            codexHooksEnabled: true
+        )
+
+        XCTAssertNil(env["CMUX_CLAUDE_HOOKS_DISABLED"])
+        XCTAssertNil(env["CMUX_CODEX_HOOKS_DISABLED"])
+    }
+
+    func testAgentIntegrationHookEnvironmentSetsCodexDisabledFlag() {
+        let env = TerminalSurface.agentIntegrationHookEnvironment(
+            claudeHooksEnabled: true,
+            codexHooksEnabled: false
+        )
+
+        XCTAssertNil(env["CMUX_CLAUDE_HOOKS_DISABLED"])
+        XCTAssertEqual(env["CMUX_CODEX_HOOKS_DISABLED"], "1")
+    }
+
+    func testAgentIntegrationHookEnvironmentSetsBothDisabledFlags() {
+        let env = TerminalSurface.agentIntegrationHookEnvironment(
+            claudeHooksEnabled: false,
+            codexHooksEnabled: false
+        )
+
+        XCTAssertEqual(env["CMUX_CLAUDE_HOOKS_DISABLED"], "1")
+        XCTAssertEqual(env["CMUX_CODEX_HOOKS_DISABLED"], "1")
+    }
+
     func testMergedStartupEnvironmentAllowsSessionReplayAndInitialEnvCMUXKeys() {
         let replayPath = "/tmp/cmux-replay-\(UUID().uuidString)"
         let merged = TerminalSurface.mergedStartupEnvironment(

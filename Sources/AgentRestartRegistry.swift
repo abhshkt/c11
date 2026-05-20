@@ -1,34 +1,5 @@
 import Foundation
 
-/// UUIDv4 (Claude SessionStart `session_id`) grammar. Must match the exact
-/// 8-4-4-4-12 hex shape with dashes. Anchored so any non-matching suffix or
-/// prefix — shell metacharacters, embedded newlines, extra tokens — is
-/// rejected. Declared `nonisolated` and file-scoped so
-/// `SurfaceMetadataStore.validateReservedKey` (off the main actor) and the
-/// `AgentRestartRegistry.phase1` resolver closure (Sendable) can share one
-/// compiled regex without cross-actor traffic.
-///
-/// Defence in depth: the store rejects malformed writes at the boundary;
-/// the registry re-validates at synthesis time so a value that somehow
-/// slipped past the store (direct in-process writer, future bypass) still
-/// cannot become a shell command.
-let claudeSessionIdUUIDPattern: NSRegularExpression = {
-    // swiftlint:disable:next force_try
-    return try! NSRegularExpression(
-        pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
-        options: []
-    )
-}()
-
-/// Returns true iff `candidate` matches the UUIDv4 shape exactly.
-/// Trims nothing — callers are expected to normalise whitespace before
-/// calling (the registry does, the store's reserved-key validator does not
-/// because values it receives have already passed `WriteMode` normalisation).
-func isValidClaudeSessionId(_ candidate: String) -> Bool {
-    let range = NSRange(location: 0, length: (candidate as NSString).length)
-    return claudeSessionIdUUIDPattern.firstMatch(in: candidate, options: [], range: range) != nil
-}
-
 /// Wrap a path in single quotes for safe interpolation into a shell
 /// command. `isValidClaudeSessionProjectDir` already rejects single
 /// quotes; this helper still escapes them defensively so a bypass of the
@@ -143,9 +114,16 @@ struct AgentRestartRegistry: Sendable {
     /// command, sees `--resume`, skips its own `--session-id` injection, and
     /// forwards to real claude with the hooks settings JSON intact.
     ///
-    /// Codex uses `--last` best-effort to resume the most recent session
-    /// globally. Opencode and kimi have no verified resume flag and launch
-    /// fresh — best-effort is preferable to a broken flag.
+    /// Codex now uses captured `codex.session_id` metadata for deterministic
+    /// `codex resume <id>` when available. Codex treats an explicit UUID
+    /// argument as the session identity, so the project-dir hint preserves cwd
+    /// fidelity but is not required for identity. Older snapshots without a
+    /// captured id still fall back to `codex resume --last`, but malformed
+    /// captured ids fail closed rather than guessing with `--last`. Like Claude,
+    /// a malformed project_dir hint is dropped while the valid session id is
+    /// still resumed.
+    /// Opencode and kimi have no verified resume flag and launch fresh —
+    /// best-effort is preferable to a broken flag.
     static let phase1: AgentRestartRegistry = .init(name: "phase1", rows: [
         Row(terminalType: "claude-code") { sessionId, metadata in
             guard let raw = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -168,10 +146,27 @@ struct AgentRestartRegistry: Sendable {
             }
             return "\(resume)\n"
         },
-        Row(terminalType: "codex") { _, _ in
-            // codex resume --last resumes the most recent codex session globally.
-            // Best-effort: may not match the exact session in the snapshot.
-            "codex resume --last\n"
+        Row(terminalType: SurfaceMetadataKeyName.terminalTypeCodex) { sessionId, metadata in
+            let metadataCandidate = metadata[SurfaceMetadataKeyName.codexSessionId]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let fallbackCandidate = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let candidate = metadataCandidate ?? fallbackCandidate
+            guard let raw = candidate, !raw.isEmpty else {
+                // Older snapshots or disabled hooks retain the historical
+                // best-effort behavior. Once a snapshot claims a specific
+                // Codex id, though, malformed metadata must not degrade into
+                // the potentially wrong newest session for that cwd.
+                return "codex resume --last\n"
+            }
+            guard isValidCodexSessionId(raw) else { return nil }
+            let resume = "codex resume \(raw)"
+            if let rawDir = metadata[SurfaceMetadataKeyName.codexSessionProjectDir]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !rawDir.isEmpty,
+               isValidCodexSessionProjectDir(rawDir) {
+                return "cd \(shellSingleQuote(rawDir)) && \(resume)\n"
+            }
+            return "\(resume)\n"
         },
         Row(terminalType: "opencode") { _, _ in
             // no stable resume flag known; launches fresh.

@@ -395,6 +395,32 @@ enum GhosttyDefaultBackgroundUpdateScope: Int {
     }
 }
 
+@MainActor
+private func markCodexIdleFromTerminalNotification(
+    tabId: UUID,
+    surfaceId: UUID?,
+    owningManager: TabManager?
+) {
+    guard let surfaceId,
+          let workspace = owningManager?.tabs.first(where: { $0.id == tabId }) else {
+        return
+    }
+    let metadata = SurfaceMetadataStore.shared
+        .getMetadata(workspaceId: tabId, surfaceId: surfaceId)
+        .metadata
+    guard metadata[SurfaceMetadataKeyName.terminalType] as? String == SurfaceMetadataKeyName.terminalTypeCodex else {
+        return
+    }
+
+    workspace.statusEntries["codex"] = SidebarStatusEntry(
+        key: "codex",
+        value: "Idle",
+        icon: "pause.circle.fill",
+        color: "#8E8E93",
+        timestamp: Date()
+    )
+}
+
 /// Coalesces Ghostty background notifications so consumers only observe
 /// the latest runtime background for a burst of updates.
 final class GhosttyDefaultBackgroundNotificationDispatcher {
@@ -1970,6 +1996,11 @@ class GhosttyApp {
                         subtitle: "",
                         body: body
                     )
+                    markCodexIdleFromTerminalNotification(
+                        tabId: tabId,
+                        surfaceId: surfaceId,
+                        owningManager: owningManager
+                    )
                     return true
                 }
             }
@@ -2249,6 +2280,11 @@ class GhosttyApp {
                     title: command,
                     subtitle: "",
                     body: body
+                )
+                markCodexIdleFromTerminalNotification(
+                    tabId: tabId,
+                    surfaceId: surfaceId,
+                    owningManager: owningManager
                 )
             }
             return true
@@ -2763,6 +2799,20 @@ final class TerminalSurface: Identifiable, ObservableObject {
         return merged
     }
 
+    static func agentIntegrationHookEnvironment(
+        claudeHooksEnabled: Bool,
+        codexHooksEnabled: Bool
+    ) -> [String: String] {
+        var env: [String: String] = [:]
+        if !claudeHooksEnabled {
+            env["CMUX_CLAUDE_HOOKS_DISABLED"] = "1"
+        }
+        if !codexHooksEnabled {
+            env["CMUX_CODEX_HOOKS_DISABLED"] = "1"
+        }
+        return env
+    }
+
     func isAttached(to view: GhosttyNSView) -> Bool {
         attachedView === view && surface != nil
     }
@@ -3228,9 +3278,12 @@ final class TerminalSurface: Identifiable, ObservableObject {
             setManagedEnvironmentValue("CMUX_PORT_RANGE", String(Self.sessionPortRangeSize))
         }
 
-        let claudeHooksEnabled = ClaudeCodeIntegrationSettings.hooksEnabled()
-        if !claudeHooksEnabled {
-            setManagedEnvironmentValue("CMUX_CLAUDE_HOOKS_DISABLED", "1")
+        let hookEnvironment = Self.agentIntegrationHookEnvironment(
+            claudeHooksEnabled: ClaudeCodeIntegrationSettings.hooksEnabled(),
+            codexHooksEnabled: CodexIntegrationSettings.hooksEnabled()
+        )
+        for (key, value) in hookEnvironment {
+            setManagedEnvironmentValue(key, value)
         }
 
         if let cliBinPath = Bundle.main.resourceURL?.appendingPathComponent("bin").path {

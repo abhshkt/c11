@@ -35,7 +35,11 @@ def parse_settings_arg(argv: list[str]) -> dict:
     index = argv.index("--settings")
     if index + 1 >= len(argv):
         return {}
-    return json.loads(argv[index + 1])
+    raw = argv[index + 1]
+    path = Path(raw)
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(raw)
 
 
 def run_wrapper(*, socket_state: str, argv: list[str]) -> tuple[int, list[str], list[str], str, str]:
@@ -68,7 +72,7 @@ done
         )
 
         make_executable(
-            wrapper_dir / "cmux",
+            wrapper_dir / "c11",
             """#!/usr/bin/env bash
 set -euo pipefail
 printf '%s timeout=%s\\n' "$*" "${CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC-__UNSET__}" >> "$FAKE_CMUX_LOG"

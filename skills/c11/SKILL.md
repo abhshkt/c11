@@ -93,7 +93,7 @@ c11 set-agent --type claude-code --model claude-opus-4-7
 c11 set-agent --type codex --task lat-412
 ```
 
-Common types: `claude-code`, `codex`, `kimi`, `opencode`. Any kebab-case string is accepted. Inside Claude Code, `claude.session_id` is populated automatically by the wrapper.
+Common types: `claude-code`, `codex`, `kimi`, `opencode`. Any kebab-case string is accepted. Inside Claude Code, `claude.session_id` is populated automatically by the wrapper. Inside Codex, the wrapper starts interactive sessions with a c11-owned `--profile-v2 c11` hook layer under c11 Application Support; after Codex's hook-review UI trusts those commands, `codex.session_id` is populated from hook payloads. c11 also captures explicit `codex resume <id>` invocations, or a guarded local-state lookup that prefers the effective project dir (`--cd` when supplied, otherwise the launch cwd) and otherwise accepts only one fresh global Codex session after a short delay. The Codex wrapper clears stale notifications and marks Codex `Running` when the invocation includes an initial command-line prompt; plain `codex` sessions wait for trusted hooks or self-reporting. Codex hook payloads with a different `cwd` than the wrapper's effective project dir are ignored so nested/background Codex work does not overwrite the pane. The wrapper's generated Codex `Stop` hook uses `c11 codex-hook stop --status-only` so completion notifications do not duplicate the wrapper-injected Codex `notify` bridge.
 
 ## Targeting
 
@@ -331,6 +331,13 @@ c11 list-status
 c11 clear-status task
 ```
 
+Agent lifecycle wrappers can register a process without adding a visible status pill:
+
+```bash
+c11 set-agent-pid codex 12345
+c11 clear-agent-pid codex
+```
+
 **Constraint**: these only work from a direct c11 child process. Headless `claude -p` subprocesses are reparented to `launchd` and lose the auth chain — they cannot call any `c11` command. Interactive `claude` keeps the chain intact.
 
 ## Surface flash — asynchronous attention
@@ -550,8 +557,11 @@ c11 list-snapshots
 # Restore by id (fresh shells)
 c11 restore 01KQ0XYZ…
 
-# Restore with cc session resume: each Claude Code surface re-spawns as
-# `cc --resume <claude.session_id>` via the Phase 1 restart registry.
+# Restore with agent session resume: Claude Code surfaces re-spawn as
+# `claude --dangerously-skip-permissions --resume <claude.session_id>` and
+# Codex surfaces re-spawn as `codex resume <codex.session_id>` when the
+# wrapper captured one unambiguous session id; older or ambiguous Codex
+# snapshots fall back to `codex resume --last`.
 C11_SESSION_RESUME=1 c11 restore 01KQ0XYZ…
 ```
 
@@ -566,7 +576,7 @@ If `c11` on your PATH does not resolve to the active bundle's CLI (or you're uns
 - **[references/api.md](references/api.md)** — full command surface: addressing, discovery, workspace/pane/surface management, surface initialization quirks, sidebar metadata, notifications, troubleshooting
 - **[references/orchestration.md](references/orchestration.md)** — multi-agent patterns: layout, tab naming, launching Claude Code sub-agents, agent-to-agent communication, sidebar reporting, writing c11-aware prompts
 - **[references/metadata.md](references/metadata.md)** — metadata deep dive: socket methods, precedence table, all canonical keys, sidecar sources, consumer patterns
-- **[references/claude-resume.md](references/claude-resume.md)** — Claude session resume: operator-installed SessionStart hook and the `C11_SESSION_RESUME` gate
+- **[references/claude-resume.md](references/claude-resume.md)** — agent session resume: Claude/Codex metadata and the `C11_SESSION_RESUME` gate
 - **[../c11-browser/SKILL.md](../c11-browser/SKILL.md)** — c11 embedded browser automation
 - **[../c11-markdown/SKILL.md](../c11-markdown/SKILL.md)** — markdown surface viewer
 

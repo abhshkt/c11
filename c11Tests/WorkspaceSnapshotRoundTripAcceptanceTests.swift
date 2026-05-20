@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 import Bonsplit
 
 #if canImport(c11_DEV)
@@ -30,7 +31,7 @@ import Bonsplit
 /// 5. Strip `command` from the terminal surfaces (simulating "no explicit
 ///    command, let the restart registry decide"), apply with
 ///    `ApplyOptions(restartRegistry: .phase1)`, and assert both terminals
-///    receive the correct `cc --resume <session-id>` send-text.
+///    receive the correct Claude resume send-text.
 /// 6. Round-trip checks: no `restart_registry_declined` failures,
 ///    `mailbox.*` pane metadata byte-for-byte equal, surface titles
 ///    byte-equal, layout tree structural fingerprint preserved.
@@ -45,6 +46,7 @@ final class WorkspaceSnapshotRoundTripAcceptanceTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        _ = NSApplication.shared
         tabManager = TabManager()
     }
 
@@ -142,7 +144,7 @@ final class WorkspaceSnapshotRoundTripAcceptanceTests: XCTestCase {
         )
 
         // Every terminal in the restored workspace should have received the
-        // synthesised `cc --resume <session-id>` via sendText. Inspect the
+        // synthesised Claude resume command via sendText. Inspect the
         // Ghostty surface's pending input buffer (the same path Phase 0's
         // acceptance fixture reads through).
         for surfaceSpec in registryPlan.surfaces where surfaceSpec.kind == .terminal {
@@ -251,6 +253,84 @@ final class WorkspaceSnapshotRoundTripAcceptanceTests: XCTestCase {
         }
     }
 
+    func testRestoreSameCwdCodexPanelsQueuesDistinctResumeCommands() throws {
+        try skipIfReleaseBuild()
+
+        let projectDir = "/Users/test/same-cwd-codex"
+        let sessionA = "11111111-1111-4111-8111-111111111111"
+        let sessionB = "22222222-2222-4222-8222-222222222222"
+        let plan = WorkspaceApplyPlan(
+            version: 1,
+            workspace: WorkspaceSpec(
+                title: "Codex same cwd restore",
+                workingDirectory: projectDir
+            ),
+            layout: .split(.init(
+                orientation: .horizontal,
+                dividerPosition: 0.5,
+                first: .pane(.init(surfaceIds: ["codex-a"])),
+                second: .pane(.init(surfaceIds: ["codex-b"]))
+            )),
+            surfaces: [
+                SurfaceSpec(
+                    id: "codex-a",
+                    kind: .terminal,
+                    title: "codex A",
+                    command: nil,
+                    metadata: [
+                        SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeCodex),
+                        SurfaceMetadataKeyName.codexSessionId: .string(sessionA),
+                        SurfaceMetadataKeyName.codexSessionProjectDir: .string(projectDir)
+                    ]
+                ),
+                SurfaceSpec(
+                    id: "codex-b",
+                    kind: .terminal,
+                    title: "codex B",
+                    command: nil,
+                    metadata: [
+                        SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeCodex),
+                        SurfaceMetadataKeyName.codexSessionId: .string(sessionB),
+                        SurfaceMetadataKeyName.codexSessionProjectDir: .string(projectDir)
+                    ]
+                )
+            ]
+        )
+
+        let result = WorkspaceLayoutExecutor.apply(
+            plan,
+            options: ApplyOptions(select: false, restartRegistry: .phase1),
+            dependencies: makeDependencies()
+        )
+
+        XCTAssertFalse(result.workspaceRef.isEmpty)
+        XCTAssertTrue(
+            result.failures.allSatisfy { $0.code != "restart_registry_declined" },
+            "captured Codex session ids should not fall back or decline: \(result.failures)"
+        )
+        let restoredWorkspace = try XCTUnwrap(resolveWorkspace(from: result.workspaceRef))
+
+        let expected: [String: String] = [
+            "codex-a": "cd '\(projectDir)' && codex resume \(sessionA)",
+            "codex-b": "cd '\(projectDir)' && codex resume \(sessionB)"
+        ]
+
+        for surfaceSpec in plan.surfaces {
+            let panelId = try XCTUnwrap(parseUUIDSuffix(result.surfaceRefs[surfaceSpec.id]))
+            let terminal = try XCTUnwrap(restoredWorkspace.panels[panelId] as? TerminalPanel)
+            let sent = terminalPendingInput(terminal) ?? ""
+            XCTAssertEqual(
+                sent,
+                expected[surfaceSpec.id],
+                "surface[\(surfaceSpec.id)] must resume its own Codex session, not the newest same-cwd session"
+            )
+            XCTAssertFalse(
+                sent.contains("--last"),
+                "captured same-cwd Codex sessions must not use ambiguous resume --last"
+            )
+        }
+    }
+
     // MARK: - P7: browser-first and markdown-first layouts
 
     /// Phase 1 acceptance puts a terminal first. Phase 3 will exercise
@@ -258,7 +338,7 @@ final class WorkspaceSnapshotRoundTripAcceptanceTests: XCTestCase {
     /// them, but there is no integration test. P7 adds one per
     /// non-terminal kind and asserts that the distinguishing surface
     /// field (`url` / `filePath`) round-trips and the trailing terminal
-    /// still receives `cc --resume <session-id>`.
+    /// still receives the Claude resume command.
     func testCaptureAndRestoreBrowserFirstLayout() throws {
         try skipIfReleaseBuild()
         // C11-99 Area C: fixed in BrowserPanel.init by seeding `currentURL`
@@ -287,7 +367,7 @@ final class WorkspaceSnapshotRoundTripAcceptanceTests: XCTestCase {
     /// Shared body for the two P7 fixtures. Seeds the plan, captures, runs
     /// the round-trip through the store + converter, restores with
     /// restartRegistry: .phase1, and asserts both the distinguishing
-    /// non-terminal field and the `cc --resume` command on the trailing
+    /// non-terminal field and the Claude resume command on the trailing
     /// terminal.
     private func runMixedFirstFixtureRoundTrip(
         fixtureName: String,

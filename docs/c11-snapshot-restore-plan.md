@@ -36,13 +36,13 @@ The fix is structural: **the caller describes the end state; the app materialize
 
 ## Principle check (unchanged from prior revision)
 
-- **Unopinionated about the terminal.** Writes only to c11-scoped paths: `~/.cmux-snapshots/` (Snapshots), `.cmux/blueprints/` + `~/.config/cmux/blueprints/` (Blueprints). Does not write to `~/.claude/settings.json`, `~/.codex/*`, or shell rc files.
-- **Observe-from-outside session capture.** The Claude SessionStart hook is **operator-installed**, documented in the `c11` skill. c11 does not install it. `Resources/bin/claude` is a grandfathered exception, not a pattern to extend.
+- **Unopinionated about the terminal.** Writes only to c11-scoped paths: `~/.c11-snapshots/` / legacy `~/.cmux-snapshots/` (Snapshots), `.c11/blueprints/` / legacy `.cmux/blueprints/`, `~/.config/c11/blueprints/`, and c11-owned wrapper runtime paths. Does not write to `~/.claude/settings.json`, `~/.codex/*`, or shell rc files.
+- **Session capture through c11-owned adapters.** Claude and Codex wrappers are PATH-scoped inside c11 terminals, pass through outside c11, and keep hook/profile state in c11-owned paths. They must not mutate tenant config.
 - **Automation as first-class consumer.** Bounded, inspectable, structured, fast.
 
 ## Verified preconditions
 
-- `cc --resume <id>` works (cc is a shell alias; flags pass through).
+- `claude --dangerously-skip-permissions --resume <id>` and `codex resume <id>` work when launched from the captured project directory.
 - `claude` SessionStart hook receives `session_id` on stdin JSON (`source`, `cwd`, `model` also).
 - `terminal_type = claude-code` is already written to surface manifests (`SurfaceMetadataStore`).
 - Tier 1 layout persistence already round-trips workspaces, panes, split tree, titles, metadata, status pills, git state, and (truncated) scrollback.
@@ -137,11 +137,11 @@ Execution order:
 2. **Build layout tree.** Walk `LayoutTreeSpec` depth-first. For a `.pane`, the current root panel is it. For a `.split`, call `workspace.newTerminalSplit`/`newBrowserSplit`/`newMarkdownSplit` (or a generalized internal split operation) to subdivide. The workspace starts with a single pane; we use it as the left/top of the first split, recurse on right/bottom.
 3. **Create surfaces per pane.** For each pane, apply the first surface to the existing panel's surface, then add extras as new tabs inside the pane. `Workspace.swift` has the machinery; we thread through it without going out to a socket.
 4. **Write metadata at creation time.** `SurfaceMetadataStore.shared.set(workspaceId:surfaceId:...)` and `PaneMetadataStore.shared.set(...)` directly — no round-trip through `c11 set-metadata`. Title/description use their existing typed setters so the store's revision bump + autosave hash update fires correctly (`SessionPersistence.swift:2789+`).
-5. **Dispatch restart commands.** For each terminal surface with `metadata["agent.claude.session_id"]`, send `cc --resume <id>\n` via the existing terminal-write path *after* the shell reports ready. Fallback table:
+5. **Dispatch restart commands.** For each terminal surface with captured session metadata, send the agent-specific resume command via the existing terminal-write path *after* the shell reports ready. Fallback table:
 
    ```
-   claude-code + session_id    -> cc --resume <id>
-   claude-code                 -> cc
+   claude-code + session_id    -> claude --dangerously-skip-permissions --resume <id>
+   claude-code                 -> claude --dangerously-skip-permissions
    codex + session_id          -> codex resume <id>
    codex                       -> codex resume --last
    opencode + session_id       -> opencode -s <id>
@@ -236,8 +236,8 @@ The prior revision walked `split_path` breadcrumbs from a flat pane list. With n
 
 ### Edge cases
 
-- **JSONL missing.** Stat `~/.claude/projects/<cwd-slug>/<id>.jsonl` before dispatching `cc --resume`; fall back to fresh `cc` with a sidebar warning.
-- **Multi-cc in one workspace.** Each surface dispatches independently; the executor doesn't wait for one before moving on.
+- **JSONL missing.** Stat `~/.claude/projects/<cwd-slug>/<id>.jsonl` before dispatching Claude resume; fall back to fresh Claude with a sidebar warning.
+- **Multiple same-agent panes in one workspace.** Each surface dispatches independently from its own metadata; the executor doesn't wait for one before moving on.
 - **Unknown terminal_type.** No restart command. Respect `SurfaceSpec.command` if present; else leave the shell.
 - **Shell send ordering.** Don't send restart commands until the PTY has reported ready. The executor tracks per-surface readiness, not a global barrier.
 - **User disabled the hook.** Snapshots still round-trip layout + cwd + scrollback; only the cc rehydrate is skipped. Record a warning on restore.
@@ -266,7 +266,7 @@ The prior revision walked `split_path` breadcrumbs from a flat pane list. With n
 
 **Exit criteria.** Executor materializes arbitrary mixed workspaces in one app-side pass. Welcome quad flows through the executor with no behavior change.
 
-### Phase 1 — Snapshots + `cc --resume` restart registry
+### Phase 1 — Snapshots + agent restart registry
 
 **Scope.** `c11 snapshot`, `c11 restore`, `c11 list-snapshots`. Terminal surfaces. Claude session resume.
 

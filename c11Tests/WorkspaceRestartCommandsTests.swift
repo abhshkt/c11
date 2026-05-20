@@ -25,7 +25,6 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
     // MARK: - pendingRestartCommands
 
     func testExtractsResumeCommandFromTerminalSnapshot() {
-        let workspace = Workspace()
         let panelId = UUID()
         let snapshot = makeSnapshot(panels: [
             makePanelSnapshot(
@@ -38,7 +37,7 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
             )
         ])
 
-        let pending = workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
+        let pending = Workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
 
         XCTAssertEqual(pending.count, 1)
         XCTAssertEqual(pending.first?.panelId, panelId)
@@ -49,7 +48,6 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
     }
 
     func testSkipsNonTerminalPanels() {
-        let workspace = Workspace()
         let metadata: [String: PersistedJSONValue] = [
             SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeClaudeCode),
             SurfaceMetadataKeyName.claudeSessionId: .string(claudeSessionId)
@@ -59,7 +57,7 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
             makePanelSnapshot(id: UUID(), type: .markdown, metadata: metadata)
         ])
 
-        let pending = workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
+        let pending = Workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
 
         XCTAssertTrue(
             pending.isEmpty,
@@ -68,7 +66,6 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
     }
 
     func testSkipsTerminalsWithoutSessionId() {
-        let workspace = Workspace()
         let snapshot = makeSnapshot(panels: [
             // terminal_type set but no claude.session_id → registry declines
             makePanelSnapshot(
@@ -80,11 +77,10 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
             )
         ])
 
-        XCTAssertTrue(workspace.pendingRestartCommands(from: snapshot, registry: .phase1).isEmpty)
+        XCTAssertTrue(Workspace.pendingRestartCommands(from: snapshot, registry: .phase1).isEmpty)
     }
 
     func testSkipsTerminalsWithoutTerminalType() {
-        let workspace = Workspace()
         let snapshot = makeSnapshot(panels: [
             makePanelSnapshot(
                 id: UUID(),
@@ -95,20 +91,18 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
             )
         ])
 
-        XCTAssertTrue(workspace.pendingRestartCommands(from: snapshot, registry: .phase1).isEmpty)
+        XCTAssertTrue(Workspace.pendingRestartCommands(from: snapshot, registry: .phase1).isEmpty)
     }
 
     func testSkipsTerminalsWithMissingMetadata() {
-        let workspace = Workspace()
         let snapshot = makeSnapshot(panels: [
             makePanelSnapshot(id: UUID(), type: .terminal, metadata: nil)
         ])
 
-        XCTAssertTrue(workspace.pendingRestartCommands(from: snapshot, registry: .phase1).isEmpty)
+        XCTAssertTrue(Workspace.pendingRestartCommands(from: snapshot, registry: .phase1).isEmpty)
     }
 
     func testSkipsTerminalsWithInvalidSessionId() {
-        let workspace = Workspace()
         let snapshot = makeSnapshot(panels: [
             makePanelSnapshot(
                 id: UUID(),
@@ -121,13 +115,12 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
         ])
 
         XCTAssertTrue(
-            workspace.pendingRestartCommands(from: snapshot, registry: .phase1).isEmpty,
+            Workspace.pendingRestartCommands(from: snapshot, registry: .phase1).isEmpty,
             "registry rejects malformed UUIDs even at the boundary"
         )
     }
 
     func testReturnsOneCommandPerEligibleTerminal() {
-        let workspace = Workspace()
         let panelA = UUID()
         let panelB = UUID()
         let panelC = UUID()
@@ -154,7 +147,7 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
             makePanelSnapshot(id: panelC, type: .terminal, metadata: nil)
         ])
 
-        let pending = workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
+        let pending = Workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
         XCTAssertEqual(pending.count, 2)
         let byPanel = Dictionary(uniqueKeysWithValues: pending.map { ($0.panelId, $0.command) })
         XCTAssertEqual(
@@ -172,7 +165,6 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
         // The store rejects non-string writes for these reserved keys, so this
         // path is defensive only — but the helper must not crash or coerce
         // a number/bool into a UUID.
-        let workspace = Workspace()
         let snapshot = makeSnapshot(panels: [
             makePanelSnapshot(
                 id: UUID(),
@@ -183,13 +175,12 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
                 ]
             )
         ])
-        XCTAssertTrue(workspace.pendingRestartCommands(from: snapshot, registry: .phase1).isEmpty)
+        XCTAssertTrue(Workspace.pendingRestartCommands(from: snapshot, registry: .phase1).isEmpty)
     }
 
     // MARK: - claude.session_project_dir
 
     func testPrependsCdWhenProjectDirRecorded() {
-        let workspace = Workspace()
         let panelId = UUID()
         let projectDir = "/Users/test/repo/c11-worktrees/feature-branch"
         let snapshot = makeSnapshot(panels: [
@@ -204,7 +195,7 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
             )
         ])
 
-        let pending = workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
+        let pending = Workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
 
         XCTAssertEqual(pending.count, 1)
         XCTAssertEqual(
@@ -216,7 +207,6 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
     func testFallsBackToBareResumeWhenProjectDirAbsent() {
         // Existing surfaces captured before the project_dir field shipped
         // must keep working — bare `claude --resume` is the right behavior.
-        let workspace = Workspace()
         let snapshot = makeSnapshot(panels: [
             makePanelSnapshot(
                 id: UUID(),
@@ -228,7 +218,7 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
             )
         ])
 
-        let pending = workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
+        let pending = Workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
 
         XCTAssertEqual(
             pending.first?.command,
@@ -241,7 +231,6 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
         // re-validation must still drop a bypass. Defense-in-depth: a
         // relative path or one with shell metacharacters cannot become
         // part of the synthesized command.
-        let workspace = Workspace()
         let snapshot = makeSnapshot(panels: [
             makePanelSnapshot(
                 id: UUID(),
@@ -255,7 +244,7 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
             )
         ])
 
-        let pending = workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
+        let pending = Workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
 
         XCTAssertEqual(
             pending.first?.command,
@@ -267,7 +256,6 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
     func testProjectDirWithSpacesIsSingleQuoted() {
         // Real-world paths can have spaces. The single-quote escape must
         // wrap the whole path so `cd` receives one argument.
-        let workspace = Workspace()
         let projectDir = "/Users/test/My Projects/repo"
         let snapshot = makeSnapshot(panels: [
             makePanelSnapshot(
@@ -281,11 +269,99 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
             )
         ])
 
-        let pending = workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
+        let pending = Workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
 
         XCTAssertEqual(
             pending.first?.command,
             "cd '\(projectDir)' && claude --dangerously-skip-permissions --resume \(claudeSessionId)\n"
+        )
+    }
+
+    // MARK: - codex.session_id
+
+    func testExtractsCodexResumeCommandFromTerminalSnapshot() {
+        let panelId = UUID()
+        let codexSessionId = "abc12345-ef67-890a-bcde-f0123456789a"
+        let projectDir = "/Users/test/repo"
+        let snapshot = makeSnapshot(panels: [
+            makePanelSnapshot(
+                id: panelId,
+                type: .terminal,
+                metadata: [
+                    SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeCodex),
+                    SurfaceMetadataKeyName.codexSessionId: .string(codexSessionId),
+                    SurfaceMetadataKeyName.codexSessionProjectDir: .string(projectDir)
+                ]
+            )
+        ])
+
+        let pending = Workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
+
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertEqual(pending.first?.panelId, panelId)
+        XCTAssertEqual(
+            pending.first?.command,
+            "cd '\(projectDir)' && codex resume \(codexSessionId)\n"
+        )
+    }
+
+    func testCodexWithoutSessionIdFallsBackToLast() {
+        let panelId = UUID()
+        let snapshot = makeSnapshot(panels: [
+            makePanelSnapshot(
+                id: panelId,
+                type: .terminal,
+                metadata: [
+                    SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeCodex)
+                ]
+            )
+        ])
+
+        let pending = Workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
+
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertEqual(pending.first?.panelId, panelId)
+        XCTAssertEqual(pending.first?.command, "codex resume --last\n")
+    }
+
+    func testCodexSameCwdPanelsResumeDistinctSessionIds() {
+        let panelA = UUID()
+        let panelB = UUID()
+        let sessionA = "11111111-1111-4111-8111-111111111111"
+        let sessionB = "22222222-2222-4222-8222-222222222222"
+        let projectDir = "/Users/test/repo"
+        let snapshot = makeSnapshot(panels: [
+            makePanelSnapshot(
+                id: panelA,
+                type: .terminal,
+                metadata: [
+                    SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeCodex),
+                    SurfaceMetadataKeyName.codexSessionId: .string(sessionA),
+                    SurfaceMetadataKeyName.codexSessionProjectDir: .string(projectDir)
+                ]
+            ),
+            makePanelSnapshot(
+                id: panelB,
+                type: .terminal,
+                metadata: [
+                    SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeCodex),
+                    SurfaceMetadataKeyName.codexSessionId: .string(sessionB),
+                    SurfaceMetadataKeyName.codexSessionProjectDir: .string(projectDir)
+                ]
+            )
+        ])
+
+        let pending = Workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
+
+        XCTAssertEqual(pending.count, 2)
+        let byPanel = Dictionary(uniqueKeysWithValues: pending.map { ($0.panelId, $0.command) })
+        XCTAssertEqual(
+            byPanel[panelA],
+            "cd '\(projectDir)' && codex resume \(sessionA)\n"
+        )
+        XCTAssertEqual(
+            byPanel[panelB],
+            "cd '\(projectDir)' && codex resume \(sessionB)\n"
         )
     }
 

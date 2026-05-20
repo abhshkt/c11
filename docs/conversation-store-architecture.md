@@ -7,13 +7,13 @@
 
 ## TL;DR
 
-c11 grows a first-class `Conversation` primitive decoupled from any specific TUI process. Each surface that hosts an agent has one or more `ConversationRef`s persisted across c11 restarts. Per-TUI **strategies** in c11 own how to capture and resume conversations using whatever signals each TUI provides: hooks where available, on-disk file scrape as fallback. Wrappers shrink to "declare the kind." This replaces the per-TUI bespoke wrapper pattern that ships in 0.43.0/0.44.0-pre, fixes the SessionEnd-clears-on-quit race, replaces codex's `codex resume --last` global lookup with per-pane session-id resume (Claude is push-id deterministic; codex is heuristic with an explicit ambiguity policy for same-cwd cases that aren't yet disambiguable), and opens a path to remote/cloud agents and conversation history without re-architecting again.
+c11 grows a first-class `Conversation` primitive decoupled from any specific TUI process. Each surface that hosts an agent has one or more `ConversationRef`s persisted across c11 restarts. Per-TUI **strategies** in c11 own how to capture and resume conversations using whatever signals each TUI provides: hooks where available, on-disk file scrape as fallback. Wrappers shrink to "declare the kind." This replaces the per-TUI bespoke wrapper pattern that ships in 0.43.0/0.44.0-pre, fixes the SessionEnd-clears-on-quit race, replaces codex's `codex resume --last` global lookup with per-pane session-id resume (Claude is push-id deterministic; current Codex is hook/notify-capable when hook trust and unambiguous local state permit capture, with explicit ambiguity handling for same-cwd cases), and opens a path to remote/cloud agents and conversation history without re-architecting again.
 
 ## Why we're doing this
 
 Three concrete failures, observed in 0.44.0 staging QA on 2026-04-27:
 
-1. **Two Codex panes opened in the same project, both restored to the most-recent global Codex session ("B")** — not their own. The current registry hardcodes `codex resume --last\n`. The wrapper has no mechanism to capture per-pane Codex session ids (Codex 0.124 has no `--session-id` injection flag, no SessionStart-style hook).
+1. **Two Codex panes opened in the same project, both restored to the most-recent global Codex session ("B")** — not their own. At the time of this draft, the registry hardcoded `codex resume --last\n` and Codex 0.124 had no verified `SessionStart`-style hook. Current Codex exposes hooks plus explicit `codex resume <session_id>`, and c11's wrapper now captures `codex.session_id` when hook payloads, explicit resume argv, or one unambiguous fresh state row provide it after preferring the launch cwd. The architecture concern remains for ambiguous same-cwd panes and for future TUIs without strong identity signals.
 2. **Two Claude panes both restored blank.** Capture today writes `claude.session_id` to per-surface metadata via the SessionStart hook. The SessionEnd hook clears that key when claude exits. On Cmd+Q, c11 kills terminals; claude exits; SessionEnd fires; metadata cleared, racing the snapshot capture in `applicationShouldTerminate`. By next launch, per-surface session ids are gone.
 3. **Opencode and Kimi do not resume at all.** Their wrappers launch fresh because neither TUI exposes an injection flag or hook surface that the bespoke wrapper pattern can hang off.
 
@@ -106,7 +106,7 @@ This lives separately from `surface.metadata`. Surface metadata stays for surfac
 
 ## Capture
 
-Three signal sources, fused inside the store under per-strategy reconciliation rules. **Push vs pull primacy is per-strategy, not global.** Claude Code is push-primary on the live path because the SessionStart hook reports the real session id. Codex is pull-primary on the live path because it exposes no hook surface; the wrapper-claim mints only a placeholder. Crash recovery is always pull-primary regardless of strategy (push values may be stale and the on-disk file may have advanced).
+Three signal sources, fused inside the store under per-strategy reconciliation rules. **Push vs pull primacy is per-strategy, not global.** Claude Code is push-primary on the live path because the SessionStart hook reports the real session id. Current Codex can be push-primary once the c11 hook command is trusted, and otherwise falls back to notification-driven guarded state lookup rather than guessing. Crash recovery is always pull-primary regardless of strategy (push values may be stale and the on-disk file may have advanced).
 
 ### Push (primary for hooked TUIs)
 
@@ -231,10 +231,10 @@ A merge-blocking fixture-driven test reproduces the 2-pane same-cwd staging-QA f
 
 ### Codex
 
-- **Capture push:** Wrapper at launch issues `c11 conversation claim --kind codex --cwd "$PWD"`. The store mints a ref with `placeholder: true`, `id = "<surface-uuid>:<launch-ts>"` (placeholder format is irrelevant; recognition is via the `placeholder` field, not id parsing). No hook surface from codex itself.
-- **Capture pull:** Scrape `~/.codex/sessions/*.jsonl` (path verified at impl). Filter: same cwd as the surface AND mtime ≥ wrapper-claim time AND mtime ≥ surface's last-activity timestamp (see §Surface activity). Filename pattern `<uuid>.jsonl` carries the session id; the scraper does not parse transcript content.
+- **Capture push:** Wrapper at launch issues `c11 conversation claim --kind codex --cwd "$PWD"`. The store mints a ref with `placeholder: true`, `id = "<surface-uuid>:<launch-ts>"` (placeholder format is irrelevant; recognition is via the `placeholder` field, not id parsing). Current Codex also exposes lifecycle hooks; c11's wrapper starts interactive sessions with a c11-owned `--profile-v2 c11` hook layer, so after Codex's hook-review UI trusts those commands, `SessionStart` can replace the placeholder with the real Codex session id.
+- **Capture pull:** Scrape `~/.codex/sessions/*.jsonl` (path verified at impl), or the equivalent path under the c11-owned CODEX_HOME overlay when the wrapper is active. Filter: same cwd as the surface AND mtime ≥ wrapper-claim time AND mtime ≥ surface's last-activity timestamp (see §Surface activity). Filename pattern `<uuid>.jsonl` carries the session id; the scraper does not parse transcript content.
 - **Ambiguity policy:** if more than one candidate session matches the surface filter, the strategy returns the ref with `state = .unknown`, `placeholder` cleared but `id` left at the most plausible candidate, and a `diagnosticReason` like `"ambiguous: 3 candidates; chose newest"`. `resume()` returns `.skip(reason: "ambiguous")` for `state = .unknown`. A sidebar advisory surfaces the situation; operators clear via `c11 conversation clear --surface <id>` to force a fresh launch.
-- **State transitions:** No hook to detect end. Absent-on-restore session-file transitions to `unknown` (NOT `tombstoned`) — a transient unreadable mount, a cwd path change, or an out-of-band file move would otherwise silently kill resumability. Operators tombstone explicitly.
+- **State transitions:** Trusted Codex hooks can report active/idle/needs-input lifecycle, but absent-on-restore session-file transitions still go to `unknown` (NOT `tombstoned`) — a transient unreadable mount, a cwd path change, or an out-of-band file move would otherwise silently kill resumability. Operators tombstone explicitly.
 - **Id grammar:** UUID v4 (codex session filenames are `<uuid>.jsonl`). Ids that fail validation cause `resume()` to return `.skip(reason: "invalid id")`.
 - **Resume:** `typeCommand("codex resume <session-id>", submitWithReturn: true)` — id is shell-quoted via the strategy's quoting helper before interpolation. The *specific* id, not `--last`.
 

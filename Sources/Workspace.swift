@@ -345,14 +345,14 @@ extension Workspace {
     }
 
     /// C11-24: collect resume commands for terminal panels that have a
-    /// captured `terminal_type` + `claude.session_id` in their snapshot
+    /// captured `terminal_type` + agent session id in their snapshot
     /// metadata, consulting the supplied registry. Reads directly from
     /// the panel snapshot rather than the live `SurfaceMetadataStore`
     /// because the store is rehydrated as part of the same restore pass
     /// and may not have the values populated at the moment this is called.
     /// Internal (not private) so unit tests can exercise it without going
     /// through the full live workspace restore path.
-    func pendingRestartCommands(
+    static func pendingRestartCommands(
         from snapshot: SessionWorkspaceSnapshot,
         registry: AgentRestartRegistry
     ) -> [(panelId: UUID, command: String)] {
@@ -362,7 +362,13 @@ extension Workspace {
             guard panelSnapshot.type == .terminal else { continue }
             let meta = Workspace.stringValues(from: panelSnapshot.metadata)
             let terminalType = meta[SurfaceMetadataKeyName.terminalType]
-            let sessionId = meta[SurfaceMetadataKeyName.claudeSessionId]
+            let sessionId: String?
+            switch terminalType {
+            case SurfaceMetadataKeyName.terminalTypeCodex:
+                sessionId = meta[SurfaceMetadataKeyName.codexSessionId]
+            default:
+                sessionId = meta[SurfaceMetadataKeyName.claudeSessionId]
+            }
             guard let command = registry.resolveCommand(
                 terminalType: terminalType,
                 sessionId: sessionId,
@@ -376,10 +382,10 @@ extension Workspace {
     /// Flatten persisted metadata to `[String: String]`, keeping only
     /// `.string(...)` entries. Mirrors the existing
     /// `WorkspaceLayoutExecutor.stringMetadata` helper: the registry
-    /// contract is string-valued (`terminal_type`, `claude.session_id`)
-    /// and the metadata store rejects non-string writes for these
-    /// reserved keys at the boundary, so silently dropping any non-string
-    /// value here is consistent with the executor's restore path.
+    /// contract is string-valued (`terminal_type`, `*.session_id`) and the
+    /// metadata store rejects non-string writes for these reserved keys at
+    /// the boundary, so silently dropping any non-string value here is
+    /// consistent with the executor's restore path.
     static func stringValues(from metadata: [String: PersistedJSONValue]?) -> [String: String] {
         guard let metadata else { return [:] }
         var out: [String: String] = [:]
@@ -420,7 +426,7 @@ extension Workspace {
         registry: AgentRestartRegistry,
         oldToNewPanelIds: [UUID: UUID]
     ) {
-        let commands = pendingRestartCommands(from: snapshot, registry: registry)
+        let commands = Self.pendingRestartCommands(from: snapshot, registry: registry)
         guard !commands.isEmpty else { return }
         DispatchQueue.main.asyncAfter(
             deadline: .now() + SessionPersistencePolicy.agentRestartDelay

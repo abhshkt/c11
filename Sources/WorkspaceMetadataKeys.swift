@@ -23,10 +23,17 @@ public enum SurfaceMetadataKeyName {
     /// Surface-scoped session id written by the `c11 claude-hook
     /// session-start` handler when Claude Code emits `SessionStart`.
     /// Consumed by `AgentRestartRegistry` at restore time to synthesise
-    /// `cc --resume <id>`. The `claude.*` prefix is reserved per
+    /// `claude --dangerously-skip-permissions --resume <id>`. The
+    /// `claude.*` prefix is reserved per
     /// `docs/c11-13-cmux-37-alignment.md:34` and does not collide with
     /// the C11-13 `mailbox.*` (pane-scoped) namespace.
     public static let claudeSessionId = "claude.session_id"
+    /// Surface-scoped Codex session id written by the `c11 codex-hook`
+    /// bridge from trusted hook payloads, explicit `codex resume <id>`
+    /// invocations, or an unambiguous local-state lookup. Consumed by
+    /// `AgentRestartRegistry` at restore time to synthesize
+    /// `codex resume <id>`.
+    public static let codexSessionId = "codex.session_id"
 
     /// Surface-scoped project directory the Claude session was created in
     /// (its current-working-directory at `SessionStart`). Written alongside
@@ -37,6 +44,12 @@ public enum SurfaceMetadataKeyName {
     /// from its parent directory. The registry uses this value to `cd`
     /// into the recorded directory before issuing `claude --resume`.
     public static let claudeSessionProjectDir = "claude.session_project_dir"
+    /// Surface-scoped project directory the Codex session was created in
+    /// (its current-working-directory at capture time). Written alongside
+    /// `codex.session_id` by the Codex hook bridge so restore can resume the
+    /// same session from the same cwd instead of falling back to
+    /// `codex resume --last`.
+    public static let codexSessionProjectDir = "codex.session_project_dir"
 
     /// Canonical `terminal_type` key (same literal as
     /// `SurfaceMetadataStore.reservedKeys`). Named here for executor
@@ -48,6 +61,49 @@ public enum SurfaceMetadataKeyName {
     /// what `c11 set-agent --type claude-code` writes and what the
     /// Phase 1 restart registry keys against.
     public static let terminalTypeClaudeCode = "claude-code"
+    /// Canonical `terminal_type` value for a Codex surface.
+    public static let terminalTypeCodex = "codex"
+}
+
+/// UUID-shaped agent session id grammar. Anchored so any non-matching suffix
+/// or prefix — shell metacharacters, embedded newlines, extra tokens — is
+/// rejected before a restore command can interpolate the value.
+private let agentSessionIdUUIDPattern: NSRegularExpression = {
+    // swiftlint:disable:next force_try
+    try! NSRegularExpression(
+        pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+        options: []
+    )
+}()
+
+/// Returns true iff `candidate` matches the UUID 8-4-4-4-12 hex shape
+/// exactly. Trims nothing; callers normalise whitespace at their boundary.
+nonisolated public func isValidClaudeSessionId(_ candidate: String) -> Bool {
+    let range = NSRange(location: 0, length: (candidate as NSString).length)
+    return agentSessionIdUUIDPattern.firstMatch(in: candidate, options: [], range: range) != nil
+}
+
+/// Codex hook `session_id` values are resumed by `codex resume <id>`. Keep
+/// the same UUID grammar and re-validation boundary as Claude so metadata
+/// cannot become shell syntax.
+nonisolated public func isValidCodexSessionId(_ candidate: String) -> Bool {
+    isValidClaudeSessionId(candidate)
+}
+
+/// Model ids are user-visible sidebar metadata, not shell-interpolated
+/// values. Keep them ASCII and token-shaped, but allow real provider ids such
+/// as `gpt-5.5`, `gpt-5.4-pro`, and `openai/gpt-oss-120b`.
+private let surfaceModelIdPattern: NSRegularExpression = {
+    // swiftlint:disable:next force_try
+    try! NSRegularExpression(
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._:/+\\-]{0,63}$",
+        options: []
+    )
+}()
+
+nonisolated public func isValidSurfaceModelId(_ candidate: String) -> Bool {
+    let range = NSRange(location: 0, length: (candidate as NSString).length)
+    return surfaceModelIdPattern.firstMatch(in: candidate, options: [], range: range) != nil
 }
 
 /// Project-dir grammar for `claude.session_project_dir`. Must be an
@@ -73,6 +129,12 @@ nonisolated public func isValidClaudeSessionProjectDir(_ candidate: String) -> B
         }
     }
     return true
+}
+
+/// Codex session project directories follow the same restore-shell safety
+/// grammar as Claude: absolute POSIX path, no shell-breaking control bytes.
+nonisolated public func isValidCodexSessionProjectDir(_ candidate: String) -> Bool {
+    isValidClaudeSessionProjectDir(candidate)
 }
 
 /// Validation for workspace metadata writes.
