@@ -133,16 +133,32 @@ struct MarkdownPanelView: View {
                 .padding(.vertical, 8)
         case .fencedCode(_, let language, let code, let image):
             if let image {
+                // Rendered Mermaid / fenced-code diagrams are pre-rasterized PNGs.
+                // Bind the displayed frame to the panel's font scale so a zoomed
+                // doc grows its diagrams alongside the text. .aspectRatio(.fit)
+                // preserves the ratio; the renderer's -s 2 sample stays sharp
+                // up to ~2x without re-rendering.
+                let imageScale = renderedDiagramScale
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity)
+                    .frame(
+                        maxWidth: image.size.width * imageScale,
+                        maxHeight: image.size.height * imageScale,
+                        alignment: .leading
+                    )
                     .padding(.horizontal, 24)
                     .padding(.vertical, 8)
             } else {
                 fencedCodeFallbackView(language: language, code: code)
             }
         }
+    }
+
+    /// Scale factor for rendered diagram images, relative to default zoom.
+    /// Pinned at >= 0 so a degenerate panel font size can't invert the frame.
+    private var renderedDiagramScale: CGFloat {
+        max(0.1, panel.markdownFontSize / MarkdownPanel.defaultMarkdownFontSize)
     }
 
     private func fencedCodeFallbackView(language: String, code: String) -> some View {
@@ -353,23 +369,39 @@ struct MarkdownPanelView: View {
             : Color(nsColor: NSColor(white: 0.98, alpha: 1.0))
     }
 
-    // The MarkdownUI `Theme` is built from ~25 closure modifiers. Keep the
-    // default-size themes cached for ordinary renders, and build scaled themes
-    // only while a panel is zoomed.
-    private static let lightMarkdownTheme: Theme = makeCmuxMarkdownTheme(
-        colorScheme: .light,
-        baseFontSize: MarkdownPanel.defaultMarkdownFontSize
-    )
-    private static let darkMarkdownTheme: Theme = makeCmuxMarkdownTheme(
-        colorScheme: .dark,
-        baseFontSize: MarkdownPanel.defaultMarkdownFontSize
-    )
+    // The MarkdownUI `Theme` is built from ~25 closure modifiers. Cache scaled
+    // themes keyed by (isDark, rounded-tenths font size). Zoom steps are
+    // integer points clamped to [minimumMarkdownFontSize, maximumMarkdownFontSize],
+    // so the cache stays bounded at <= 2 * (max - min + 1) entries (~48). Cached
+    // across panels: theme content depends only on colorScheme + baseFontSize.
+    private struct MarkdownThemeCacheKey: Hashable {
+        let isDark: Bool
+        let fontSizeTenths: Int
+    }
+    private static let markdownThemeCacheQueue = DispatchQueue(label: "com.stage11.c11.markdown.themeCache")
+    nonisolated(unsafe) private static var markdownThemeCache: [MarkdownThemeCacheKey: Theme] = [:]
+
+    private static func cachedCmuxMarkdownTheme(isDark: Bool, baseFontSize: CGFloat) -> Theme {
+        let key = MarkdownThemeCacheKey(
+            isDark: isDark,
+            fontSizeTenths: Int((baseFontSize * 10).rounded())
+        )
+        return markdownThemeCacheQueue.sync {
+            if let cached = markdownThemeCache[key] { return cached }
+            let theme = makeCmuxMarkdownTheme(
+                colorScheme: isDark ? .dark : .light,
+                baseFontSize: baseFontSize
+            )
+            markdownThemeCache[key] = theme
+            return theme
+        }
+    }
 
     private var cmuxMarkdownTheme: Theme {
-        guard abs(panel.markdownFontSize - MarkdownPanel.defaultMarkdownFontSize) > 0.001 else {
-            return colorScheme == .dark ? Self.darkMarkdownTheme : Self.lightMarkdownTheme
-        }
-        return Self.makeCmuxMarkdownTheme(colorScheme: colorScheme, baseFontSize: panel.markdownFontSize)
+        Self.cachedCmuxMarkdownTheme(
+            isDark: colorScheme == .dark,
+            baseFontSize: panel.markdownFontSize
+        )
     }
 
     private static func makeCmuxMarkdownTheme(colorScheme: ColorScheme, baseFontSize: CGFloat) -> Theme {

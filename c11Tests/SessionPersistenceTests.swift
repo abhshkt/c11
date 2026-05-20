@@ -41,6 +41,26 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(restored.panelTitle(panelId: restoredPanelId), "Readme")
     }
 
+    func testSessionMarkdownPanelSnapshotToleratesMalformedFontSize() throws {
+        // A wrong-typed markdownFontSize (string instead of number) must not
+        // throw — otherwise one bad field fails the whole session decode in
+        // SessionPersistenceStore.load and every surface is dropped.
+        let json = Data(#"{"filePath":"/tmp/x.md","editMode":true,"markdownFontSize":"oops"}"#.utf8)
+        let decoded = try JSONDecoder().decode(SessionMarkdownPanelSnapshot.self, from: json)
+        XCTAssertEqual(decoded.filePath, "/tmp/x.md")
+        XCTAssertEqual(decoded.editMode, true)
+        XCTAssertNil(decoded.markdownFontSize, "Malformed font size should resolve to nil, not throw")
+    }
+
+    func testSessionMarkdownPanelSnapshotRoundTripsValidFontSize() throws {
+        let source = SessionMarkdownPanelSnapshot(filePath: "/tmp/x.md", editMode: false, markdownFontSize: 18.5)
+        let data = try JSONEncoder().encode(source)
+        let decoded = try JSONDecoder().decode(SessionMarkdownPanelSnapshot.self, from: data)
+        XCTAssertEqual(decoded.markdownFontSize, 18.5)
+        XCTAssertEqual(decoded.filePath, "/tmp/x.md")
+        XCTAssertEqual(decoded.editMode, false)
+    }
+
     func testSaveAndLoadRoundTripWithCustomSnapshotPath() throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("cmux-session-tests-\(UUID().uuidString)", isDirectory: true)

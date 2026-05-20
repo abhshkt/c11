@@ -100,6 +100,14 @@ struct MarkdownEditorView: NSViewRepresentable {
         private var cancellables: [AnyCancellable] = []
         private var colors = MarkdownEditorColors.fallback(isDark: false)
         private var fontSize = MarkdownPanel.defaultMarkdownFontSize
+        /// Precomputed per-kind attribute dictionaries for the current
+        /// (colors, fontSize) tuple. Rebuilt by `applyTheme` on change so the
+        /// per-keystroke `applyTokens` path is O(tokens) lookup with no NSFont
+        /// construction per token. nil only between init and the first
+        /// `applyTheme`, which always runs before highlighting.
+        private var attributeBundle: MarkdownEditorAttributeBundle?
+        private var attributeBundleIsDark: Bool?
+        private var attributeBundleFontSize: CGFloat = -1
 
         private static let autoSaveDebounceNanos: UInt64 = 600_000_000      // 600 ms
 
@@ -112,14 +120,26 @@ struct MarkdownEditorView: NSViewRepresentable {
 
         func applyTheme(colorScheme: ColorScheme, themeManager: ThemeManager, fontSize: CGFloat) {
             let resolved = MarkdownEditorColors.resolve(colorScheme: colorScheme, themeManager: themeManager)
+            let isDark = colorScheme == .dark
             colors = resolved
             self.fontSize = fontSize
+            // SwiftUI's updateNSView fires this on every body re-render. Only
+            // pay the NSFont construction cost when (isDark, fontSize) actually
+            // changes; the rest of the time the cached bundle is reused.
+            if attributeBundle == nil
+                || attributeBundleIsDark != isDark
+                || abs(attributeBundleFontSize - fontSize) > 0.001 {
+                attributeBundle = MarkdownEditorAttributeBundle(colors: resolved, fontSize: fontSize)
+                attributeBundleIsDark = isDark
+                attributeBundleFontSize = fontSize
+            }
             guard let tv = textView else { return }
             tv.backgroundColor = resolved.background
             tv.insertionPointColor = resolved.text
             tv.textColor = resolved.text
             tv.font = MarkdownEditorStyling.baseFont(fontSize: fontSize)
-            tv.typingAttributes = MarkdownEditorStyling.baseAttributes(colors: resolved, fontSize: fontSize)
+            tv.typingAttributes = attributeBundle?.baseAttributes
+                ?? MarkdownEditorStyling.baseAttributes(colors: resolved, fontSize: fontSize)
             // Re-highlight so existing token attributes pick up the new palette.
             applyHighlight()
         }
@@ -271,17 +291,22 @@ struct MarkdownEditorView: NSViewRepresentable {
             guard let storage = tv.textStorage else { return }
             // If the storage has changed since we tokenized, ranges may be invalid.
             guard storage.length == snapshotLength else { return }
+            // Bundle is populated by applyTheme before any keystroke can reach
+            // here; fall back to the dynamic helpers only on the unreachable
+            // initial-tokenize path so we never crash.
+            let bundle = attributeBundle
             isApplyingAttributes = true
             storage.beginEditing()
             let fullRange = NSRange(location: 0, length: storage.length)
-            storage.setAttributes(MarkdownEditorStyling.baseAttributes(colors: colors, fontSize: fontSize), range: fullRange)
+            let baseAttrs = bundle?.baseAttributes
+                ?? MarkdownEditorStyling.baseAttributes(colors: colors, fontSize: fontSize)
+            storage.setAttributes(baseAttrs, range: fullRange)
             for token in tokens {
                 let bounded = NSIntersectionRange(token.range, fullRange)
                 guard bounded.length > 0 else { continue }
-                storage.addAttributes(
-                    MarkdownEditorStyling.attributes(for: token.kind, colors: colors, fontSize: fontSize),
-                    range: bounded
-                )
+                let attrs = bundle?.attributes(for: token.kind)
+                    ?? MarkdownEditorStyling.attributes(for: token.kind, colors: colors, fontSize: fontSize)
+                storage.addAttributes(attrs, range: bounded)
             }
             storage.endEditing()
             isApplyingAttributes = false
@@ -503,6 +528,12 @@ enum MarkdownEditorStyling {
         ]
     }
 
+    /// Heading point size for a given level, matching the legacy formula.
+    /// Levels outside 1...6 fall back to the base size.
+    static func headingFontSize(level: Int, fontSize: CGFloat) -> CGFloat {
+        max(0.0, CGFloat(7 - level)) * 1.5 + fontSize
+    }
+
     static func attributes(
         for kind: MarkdownTokenKind,
         colors: MarkdownEditorColors,
@@ -512,9 +543,8 @@ enum MarkdownEditorStyling {
         case .headingMarker:
             return [.foregroundColor: colors.syntaxFaded]
         case .headingText(let level):
-            let scale = max(0.0, CGFloat(7 - level)) * 1.5 + fontSize
             return [
-                .font: NSFont.boldSystemFont(ofSize: scale),
+                .font: NSFont.boldSystemFont(ofSize: headingFontSize(level: level, fontSize: fontSize)),
                 .foregroundColor: colors.heading,
             ]
         case .listMarker, .blockquoteMarker, .codeFence, .codeFenceLang, .escape, .thematicBreak:
@@ -544,6 +574,82 @@ enum MarkdownEditorStyling {
                 .foregroundColor: colors.link,
                 .underlineStyle: NSUnderlineStyle.single.rawValue,
             ]
+        }
+    }
+}
+
+/// Per-(colors, fontSize) snapshot of every editor attribute dictionary. Built
+/// once when the theme or font size changes (see `Coordinator.applyTheme`) so
+/// the per-keystroke highlight path does only dictionary lookups — no NSFont
+/// allocation per token. Headings precompute levels 1...6; out-of-range levels
+/// fall back to the base attributes.
+struct MarkdownEditorAttributeBundle {
+    let baseAttributes: [NSAttributedString.Key: Any]
+    private let faded: [NSAttributedString.Key: Any]
+    private let codeBody: [NSAttributedString.Key: Any]
+    private let inlineCode: [NSAttributedString.Key: Any]
+    private let bold: [NSAttributedString.Key: Any]
+    private let italic: [NSAttributedString.Key: Any]
+    private let strikethrough: [NSAttributedString.Key: Any]
+    private let link: [NSAttributedString.Key: Any]
+    /// Index 1...6 hold heading attributes; index 0 is unused.
+    private let headingByLevel: [[NSAttributedString.Key: Any]]
+
+    init(colors: MarkdownEditorColors, fontSize: CGFloat) {
+        let monoFont = MarkdownEditorStyling.monoFont(fontSize: fontSize)
+        self.baseAttributes = [
+            .font: MarkdownEditorStyling.baseFont(fontSize: fontSize),
+            .foregroundColor: colors.text,
+        ]
+        self.faded = [.foregroundColor: colors.syntaxFaded]
+        self.codeBody = [
+            .font: monoFont,
+            .backgroundColor: colors.codeBlockBackground,
+        ]
+        self.inlineCode = [
+            .font: monoFont,
+            .foregroundColor: colors.inlineCode,
+            .backgroundColor: colors.codeBlockBackground,
+        ]
+        self.bold = [.font: MarkdownEditorStyling.boldFont(fontSize: fontSize)]
+        self.italic = [.font: MarkdownEditorStyling.italicFont(fontSize: fontSize)]
+        self.strikethrough = [
+            .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+            .strikethroughColor: colors.text,
+        ]
+        self.link = [
+            .foregroundColor: colors.link,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ]
+        self.headingByLevel = (0...6).map { level in
+            guard level >= 1 else { return [:] }
+            return [
+                .font: NSFont.boldSystemFont(
+                    ofSize: MarkdownEditorStyling.headingFontSize(level: level, fontSize: fontSize)
+                ),
+                .foregroundColor: colors.heading,
+            ]
+        }
+    }
+
+    func attributes(for kind: MarkdownTokenKind) -> [NSAttributedString.Key: Any] {
+        switch kind {
+        case .headingMarker, .listMarker, .blockquoteMarker, .codeFence, .codeFenceLang, .escape, .thematicBreak:
+            return faded
+        case .headingText(let level):
+            return (1...6).contains(level) ? headingByLevel[level] : baseAttributes
+        case .codeBody:
+            return codeBody
+        case .bold:
+            return bold
+        case .italic:
+            return italic
+        case .strikethrough:
+            return strikethrough
+        case .inlineCode:
+            return inlineCode
+        case .link:
+            return link
         }
     }
 }

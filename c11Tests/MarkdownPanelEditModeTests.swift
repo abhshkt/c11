@@ -213,6 +213,63 @@ final class MarkdownPanelEditModeTests: XCTestCase {
     }
 
     @MainActor
+    func testSessionRoundTripPreservesMarkdownFontSize() throws {
+        let url = temporaryRoot.appendingPathComponent("zoom-persist.md")
+        try "# zoom me\n".write(to: url, atomically: true, encoding: .utf8)
+
+        let workspace = Workspace()
+        let paneId = try XCTUnwrap(workspace.bonsplitController.allPaneIds.first)
+        let panel = try XCTUnwrap(
+            workspace.newMarkdownSurface(inPane: paneId, filePath: url.path, focus: true)
+        )
+
+        // Zoom up three steps, staying inside the supported range.
+        XCTAssertTrue(panel.zoomIn())
+        XCTAssertTrue(panel.zoomIn())
+        XCTAssertTrue(panel.zoomIn())
+        let zoomedSize = panel.markdownFontSize
+        XCTAssertEqual(zoomedSize, MarkdownPanel.defaultMarkdownFontSize + 3)
+
+        let snapshot = workspace.sessionSnapshot(includeScrollback: false)
+
+        let restored = Workspace()
+        restored.restoreSessionSnapshot(snapshot)
+        let restoredPanelId = try XCTUnwrap(restored.focusedPanelId)
+        let restoredPanel = try XCTUnwrap(restored.markdownPanel(for: restoredPanelId))
+        XCTAssertEqual(
+            restoredPanel.markdownFontSize, zoomedSize,
+            "Panel-local markdown zoom should survive snapshot/restore"
+        )
+    }
+
+    @MainActor
+    func testSessionRestoreClampsOutOfRangeMarkdownFontSize() throws {
+        let url = temporaryRoot.appendingPathComponent("zoom-clamp-restore.md")
+        try "# clamp me\n".write(to: url, atomically: true, encoding: .utf8)
+
+        let workspace = Workspace()
+        let paneId = try XCTUnwrap(workspace.bonsplitController.allPaneIds.first)
+        _ = try XCTUnwrap(
+            workspace.newMarkdownSurface(inPane: paneId, filePath: url.path, focus: true)
+        )
+
+        // Poison the persisted font size with a value far outside the supported
+        // range; the restore path must clamp via MarkdownPanel.setMarkdownFontSize.
+        var snapshot = workspace.sessionSnapshot(includeScrollback: false)
+        let markdownIndex = try XCTUnwrap(snapshot.panels.firstIndex { $0.markdown != nil })
+        snapshot.panels[markdownIndex].markdown?.markdownFontSize = 9999
+
+        let restored = Workspace()
+        restored.restoreSessionSnapshot(snapshot)
+        let restoredPanelId = try XCTUnwrap(restored.focusedPanelId)
+        let restoredPanel = try XCTUnwrap(restored.markdownPanel(for: restoredPanelId))
+        XCTAssertEqual(
+            restoredPanel.markdownFontSize, MarkdownPanel.maximumMarkdownFontSize,
+            "An out-of-range persisted font size must clamp to the max on restore"
+        )
+    }
+
+    @MainActor
     func testQuitFlushWritesPendingMarkdownEdits() throws {
         let url = temporaryRoot.appendingPathComponent("quit-flush.md")
         try "before\n".write(to: url, atomically: true, encoding: .utf8)

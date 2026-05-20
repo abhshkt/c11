@@ -343,6 +343,29 @@ struct SessionMarkdownPanelSnapshot: Codable, Sendable {
     /// pre-zoom snapshots; nil resolves to MarkdownPanel.defaultMarkdownFontSize.
     /// MarkdownPanel.setMarkdownFontSize clamps to the valid range on restore.
     var markdownFontSize: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case filePath
+        case editMode
+        case markdownFontSize
+    }
+
+    init(filePath: String?, editMode: Bool?, markdownFontSize: Double?) {
+        self.filePath = filePath
+        self.editMode = editMode
+        self.markdownFontSize = markdownFontSize
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.filePath = try container.decodeIfPresent(String.self, forKey: .filePath)
+        self.editMode = try container.decodeIfPresent(Bool.self, forKey: .editMode)
+        // Tolerate a malformed font size (e.g. a stringified number or object)
+        // so one bad field can't fail the whole session decode in
+        // SessionPersistenceStore.load — a wrong type resolves to nil and the
+        // panel restores at the default size instead of dropping every surface.
+        self.markdownFontSize = try? container.decodeIfPresent(Double.self, forKey: .markdownFontSize)
+    }
 }
 
 struct SessionPanelSnapshot: Codable, Sendable {
