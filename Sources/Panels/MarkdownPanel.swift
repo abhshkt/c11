@@ -282,8 +282,10 @@ final class MarkdownPanel: Panel, ObservableObject {
         setMarkdownFontSize(Self.defaultMarkdownFontSize)
     }
 
+    /// Apply a persisted font size on session restore. Clamped to the valid
+    /// range so out-of-range stored values can't escape the zoom bounds.
     @discardableResult
-    private func setMarkdownFontSize(_ candidate: CGFloat) -> Bool {
+    func setMarkdownFontSize(_ candidate: CGFloat) -> Bool {
         let clamped = min(Self.maximumMarkdownFontSize, max(Self.minimumMarkdownFontSize, candidate))
         guard abs(markdownFontSize - clamped) > 0.001 else { return false }
         markdownFontSize = clamped

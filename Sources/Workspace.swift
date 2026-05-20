@@ -601,7 +601,8 @@ extension Workspace {
             browserSnapshot = nil
             markdownSnapshot = SessionMarkdownPanelSnapshot(
                 filePath: markdownPanel.filePath,
-                editMode: markdownPanel.editMode
+                editMode: markdownPanel.editMode,
+                markdownFontSize: Double(markdownPanel.markdownFontSize)
             )
         }
 
@@ -843,6 +844,10 @@ extension Workspace {
                 editMode: snapshot.markdown?.editMode ?? false
             ) else {
                 return nil
+            }
+            if let persistedFontSize = snapshot.markdown?.markdownFontSize,
+               persistedFontSize.isFinite {
+                _ = markdownPanel.setMarkdownFontSize(CGFloat(persistedFontSize))
             }
             applySessionPanelMetadata(snapshot, toPanelId: markdownPanel.id)
             return markdownPanel.id

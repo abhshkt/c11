@@ -338,6 +338,11 @@ struct SessionMarkdownPanelSnapshot: Codable, Sendable {
     /// Whether the panel was last shown in edit mode. Optional with default
     /// nil so older snapshots decode cleanly; nil resolves to false at use.
     var editMode: Bool?
+
+    /// Panel-local content font size (points). Optional for backcompat with
+    /// pre-zoom snapshots; nil resolves to MarkdownPanel.defaultMarkdownFontSize.
+    /// MarkdownPanel.setMarkdownFontSize clamps to the valid range on restore.
+    var markdownFontSize: Double?
 }
 
 struct SessionPanelSnapshot: Codable, Sendable {
