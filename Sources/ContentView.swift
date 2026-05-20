@@ -1796,6 +1796,7 @@ struct ContentView: View {
         static let panelName = "panel.name"
         static let panelIsBrowser = "panel.isBrowser"
         static let panelIsTerminal = "panel.isTerminal"
+        static let panelIsMarkdown = "panel.isMarkdown"
         static let panelHasCustomName = "panel.hasCustomName"
         static let panelShouldPin = "panel.shouldPin"
         static let panelHasUnread = "panel.hasUnread"
@@ -5405,6 +5406,7 @@ struct ContentView: View {
             )
             snapshot.setBool(CommandPaletteContextKeys.panelIsBrowser, panelContext.panel.panelType == .browser)
             snapshot.setBool(CommandPaletteContextKeys.panelIsTerminal, panelIsTerminal)
+            snapshot.setBool(CommandPaletteContextKeys.panelIsMarkdown, panelContext.panel.panelType == .markdown)
             snapshot.setBool(CommandPaletteContextKeys.panelHasCustomName, workspace.panelCustomTitles[panelId] != nil)
             snapshot.setBool(CommandPaletteContextKeys.panelShouldPin, !workspace.isPanelPinned(panelId))
             let hasUnread = workspace.manualUnreadPanelIds.contains(panelId)
@@ -5452,6 +5454,18 @@ struct ContentView: View {
         func terminalPanelSubtitle(_ context: CommandPaletteContextSnapshot) -> String {
             let name = context.string(CommandPaletteContextKeys.panelName) ?? String(localized: "commandPalette.subtitle.tabFallback", defaultValue: "Tab")
             return String(localized: "commandPalette.subtitle.terminalWithName", defaultValue: "Terminal • \(name)")
+        }
+
+        func markdownPanelSubtitle(_ context: CommandPaletteContextSnapshot) -> String {
+            let name = context.string(CommandPaletteContextKeys.panelName) ?? String(localized: "commandPalette.subtitle.tabFallback", defaultValue: "Tab")
+            return String(localized: "commandPalette.subtitle.markdownWithName", defaultValue: "Markdown • \(name)")
+        }
+
+        func contentZoomPanelSubtitle(_ context: CommandPaletteContextSnapshot) -> String {
+            if context.bool(CommandPaletteContextKeys.panelIsMarkdown) {
+                return markdownPanelSubtitle(context)
+            }
+            return browserPanelSubtitle(context)
         }
 
         var contributions: [CommandPaletteCommandContribution] = []
@@ -5930,27 +5944,36 @@ struct ContentView: View {
             CommandPaletteCommandContribution(
                 commandId: "palette.browserZoomIn",
                 title: constant(String(localized: "command.browserZoomIn.title", defaultValue: "Zoom In")),
-                subtitle: browserPanelSubtitle,
-                keywords: ["browser", "zoom", "in"],
-                when: { $0.bool(CommandPaletteContextKeys.panelIsBrowser) }
+                subtitle: contentZoomPanelSubtitle,
+                keywords: ["browser", "markdown", "zoom", "in"],
+                when: {
+                    $0.bool(CommandPaletteContextKeys.panelIsBrowser)
+                        || $0.bool(CommandPaletteContextKeys.panelIsMarkdown)
+                }
             )
         )
         contributions.append(
             CommandPaletteCommandContribution(
                 commandId: "palette.browserZoomOut",
                 title: constant(String(localized: "command.browserZoomOut.title", defaultValue: "Zoom Out")),
-                subtitle: browserPanelSubtitle,
-                keywords: ["browser", "zoom", "out"],
-                when: { $0.bool(CommandPaletteContextKeys.panelIsBrowser) }
+                subtitle: contentZoomPanelSubtitle,
+                keywords: ["browser", "markdown", "zoom", "out"],
+                when: {
+                    $0.bool(CommandPaletteContextKeys.panelIsBrowser)
+                        || $0.bool(CommandPaletteContextKeys.panelIsMarkdown)
+                }
             )
         )
         contributions.append(
             CommandPaletteCommandContribution(
                 commandId: "palette.browserZoomReset",
                 title: constant(String(localized: "command.browserZoomReset.title", defaultValue: "Actual Size")),
-                subtitle: browserPanelSubtitle,
-                keywords: ["browser", "zoom", "reset", "actual size"],
-                when: { $0.bool(CommandPaletteContextKeys.panelIsBrowser) }
+                subtitle: contentZoomPanelSubtitle,
+                keywords: ["browser", "markdown", "zoom", "reset", "actual size"],
+                when: {
+                    $0.bool(CommandPaletteContextKeys.panelIsBrowser)
+                        || $0.bool(CommandPaletteContextKeys.panelIsMarkdown)
+                }
             )
         )
         contributions.append(
@@ -6383,17 +6406,17 @@ struct ContentView: View {
             }
         }
         registry.register(commandId: "palette.browserZoomIn") {
-            if !tabManager.zoomInFocusedBrowser() {
+            if !tabManager.zoomInFocusedContent() {
                 NSSound.beep()
             }
         }
         registry.register(commandId: "palette.browserZoomOut") {
-            if !tabManager.zoomOutFocusedBrowser() {
+            if !tabManager.zoomOutFocusedContent() {
                 NSSound.beep()
             }
         }
         registry.register(commandId: "palette.browserZoomReset") {
-            if !tabManager.resetZoomFocusedBrowser() {
+            if !tabManager.resetZoomFocusedContent() {
                 NSSound.beep()
             }
         }
