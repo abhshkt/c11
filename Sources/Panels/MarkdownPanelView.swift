@@ -119,6 +119,7 @@ struct MarkdownPanelView: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -133,26 +134,33 @@ struct MarkdownPanelView: View {
                 .padding(.vertical, 8)
         case .fencedCode(_, let language, let code, let image):
             if let image {
-                // Rendered Mermaid / fenced-code diagrams are pre-rasterized PNGs.
-                // Bind the displayed frame to the panel's font scale so a zoomed
-                // doc grows its diagrams alongside the text. .aspectRatio(.fit)
-                // preserves the ratio; the renderer's -s 2 sample stays sharp
-                // up to ~2x without re-rendering.
-                let imageScale = renderedDiagramScale
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(
-                        maxWidth: image.size.width * imageScale,
-                        maxHeight: image.size.height * imageScale,
-                        alignment: .leading
-                    )
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 8)
+                renderedDiagramView(image: image)
             } else {
                 fencedCodeFallbackView(language: language, code: code)
             }
         }
+    }
+
+    /// Rendered Mermaid / fenced-code diagrams are pre-rasterized PNGs. To make
+    /// them zoom with the rest of the surface, keep the image at its rendered
+    /// size and apply markdown zoom as an explicit frame scale. Fitting very
+    /// wide diagrams to the pane first makes LR flowcharts collapse into thin,
+    /// unreadable strips; the horizontal ScrollView is the overflow boundary.
+    @ViewBuilder
+    private func renderedDiagramView(image: NSImage) -> some View {
+        let scale = renderedDiagramScale
+        let naturalWidth = max(image.size.width, 1)
+        let naturalHeight = max(image.size.height, 1)
+        let targetWidth = naturalWidth * scale
+        let targetHeight = naturalHeight * scale
+        ScrollView(.horizontal, showsIndicators: true) {
+            Image(nsImage: image)
+                .resizable()
+                .frame(width: targetWidth, height: targetHeight)
+        }
+        .frame(height: targetHeight, alignment: .leading)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 8)
     }
 
     /// Scale factor for rendered diagram images, relative to default zoom.
