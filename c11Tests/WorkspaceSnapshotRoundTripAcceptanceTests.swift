@@ -157,12 +157,16 @@ final class WorkspaceSnapshotRoundTripAcceptanceTests: XCTestCase {
                 "fixture surface[\(surfaceSpec.id)] missing claude.session_id"
             )
             if let sessionId {
-                // B2 acceptance: the registry returns the submit form — the
-                // trailing newline is load-bearing. `==` not `.contains`:
-                // `.contains("...")` would happily pass on a typed-but-never-
-                // submitted command, which was exactly the shipped regression
-                // this test now guards.
-                let expected = "claude --dangerously-skip-permissions --resume \(sessionId)\n"
+                // B2 acceptance: the executor routes registry-synthesised
+                // commands through `TerminalSurface.sendSubmitFormText`,
+                // which trims the registry's trailing newline before
+                // queueing the bytes — the synthetic Return it dispatches
+                // separately is what actually submits the line. So the
+                // bytes that land in the pending queue are the trimmed
+                // command, not the registry's literal `<cmd>\n` output.
+                // `==` not `.contains`: substring assertions would pass
+                // on a no-op send.
+                let expected = "claude --dangerously-skip-permissions --resume \(sessionId)"
                 let sent = terminalPendingInput(terminal) ?? ""
                 XCTAssertEqual(
                     sent,
@@ -378,7 +382,9 @@ final class WorkspaceSnapshotRoundTripAcceptanceTests: XCTestCase {
         let panelId = try XCTUnwrap(parseUUIDSuffix(restoreResult.surfaceRefs[terminalSpec.id]))
         let terminal = try XCTUnwrap(restoredWorkspace.panels[panelId] as? TerminalPanel)
         let sessionId = try XCTUnwrap(stringMetadataValue(terminalSpec.metadata, key: "claude.session_id"))
-        let expected = "claude --dangerously-skip-permissions --resume \(sessionId)\n"
+        // `sendSubmitFormText` trims the registry's trailing newline
+        // before queueing — see the mixed-claude-mailbox acceptance above.
+        let expected = "claude --dangerously-skip-permissions --resume \(sessionId)"
         let sent = terminalPendingInput(terminal) ?? ""
         XCTAssertEqual(sent, expected)
     }

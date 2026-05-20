@@ -37,7 +37,7 @@ enum AgentType: String, Codable, CaseIterable, Identifiable {
         case .claudeCode: return "claude --dangerously-skip-permissions"
         case .codex:      return "codex --yolo"
         case .kimi:       return "kimi"
-        case .opencode:   return "opencode"
+        case .opencode:   return "opencode run --dangerously-skip-permissions"
         case .custom:     return ""
         }
     }

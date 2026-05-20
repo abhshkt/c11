@@ -2608,6 +2608,12 @@ final class TerminalSurface: Identifiable, ObservableObject {
     private var pendingTextQueue: [Data] = []
     private var pendingTextBytes: Int = 0
     private let maxPendingTextBytes = 1_048_576
+    /// Set by `sendSubmitFormText` when the surface is not yet attached.
+    /// `flushPendingTextIfNeeded` consumes the flag after writing the
+    /// queued bytes, scheduling a synthetic Return outside the
+    /// bracketed-paste sequence so the receiving shell or TUI actually
+    /// submits the typed line on cold start.
+    private var pendingSubmitOnFlush: Bool = false
     private var backgroundSurfaceStartQueued = false
     private var surfaceCallbackContext: Unmanaged<GhosttySurfaceCallbackContext>?
     /// Tracks the last focus state to avoid sending redundant focus events.
@@ -3590,6 +3596,51 @@ final class TerminalSurface: Identifiable, ObservableObject {
         writeTextData(data, to: surface)
     }
 
+    /// Type `text` and submit it by dispatching a synthetic Return key
+    /// once the bytes have actually reached the surface.
+    ///
+    /// `sendText` writes through `ghostty_surface_text`, which wraps every
+    /// call in bracketed-paste markers (`ESC[200~ … ESC[201~`). Bracketed
+    /// paste is specifically designed so embedded `\n`/`\r` do NOT
+    /// auto-execute — shell line discipline (zsh ZLE, bash readline) and
+    /// TUI raw-mode handlers (Claude CLI, codex) only submit when a real
+    /// Return arrives outside the paste sequence. So this helper types
+    /// the trimmed text and then dispatches `sendKey(.returnKey)` to
+    /// actually submit.
+    ///
+    /// Readiness matters: `sendKey` requires `view.window` to be non-nil
+    /// (see `sendSyntheticKey`). For a freshly-created surface — the
+    /// agent-restart-on-restore case — the view is not yet in a window,
+    /// so a fixed timer would silently drop the Return. This method
+    /// instead:
+    ///   * dispatches Return after a paste-processing delay when the
+    ///     surface is already up, and
+    ///   * defers the Return until the pending-text queue flushes (which
+    ///     happens on surface attach, when `view.window` is guaranteed
+    ///     non-nil) when the surface is not yet ready.
+    func sendSubmitFormText(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .newlines)
+        guard !trimmed.isEmpty else { return }
+        sendText(trimmed)
+        if surface == nil {
+            pendingSubmitOnFlush = true
+        } else {
+            scheduleSubmitReturnAfterPasteDelay()
+        }
+    }
+
+    private func scheduleSubmitReturnAfterPasteDelay() {
+        let delayMs = TextBoxBehavior.returnKeyDelayMs
+        if delayMs <= 0 {
+            sendKey(.returnKey)
+            return
+        }
+        let delay = TimeInterval(delayMs) / 1000.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.sendKey(.returnKey)
+        }
+    }
+
     // MARK: - [TextBox] TextBoxInput integration helpers
     //
     // The TextBoxInputContainer needs to move first-responder back to the
@@ -3723,6 +3774,14 @@ final class TerminalSurface: Identifiable, ObservableObject {
 
         for chunk in queued {
             writeTextData(chunk, to: surface)
+        }
+        // If `sendSubmitFormText` was called before the surface attached, it
+        // set this flag so submission is deferred until the queued bytes have
+        // actually reached the surface. `view.window` is guaranteed non-nil
+        // here because surface creation gates on it (createSurface(for:)).
+        if pendingSubmitOnFlush {
+            pendingSubmitOnFlush = false
+            scheduleSubmitReturnAfterPasteDelay()
         }
         #if DEBUG
         dlog(

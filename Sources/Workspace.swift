@@ -396,20 +396,20 @@ extension Workspace {
     /// runs on the main actor after `SessionPersistencePolicy.agentRestartDelay`
     /// so Ghostty surfaces have time to initialise.
     ///
-    /// `Ghostty's text-input path (sendText → ghostty_surface_text) wraps
-    /// input in bracketed-paste markers (`ESC[200~…ESC[201~`). Bracketed
-    /// paste mode is intentionally designed so that embedded `\n`/`\r`
-    /// inside the paste do not auto-execute — zsh ZLE / bash readline
-    /// only execute when a *real* Return keypress arrives outside the
-    /// paste. So sending `<command>\n` (or `<command>\r`) as one paste
-    /// types the command but leaves it sitting at the prompt, which is
-    /// what the operator observed.
-    ///
-    /// The fix is to use `TextBoxSubmit.send(_:via:)` — the same helper
-    /// the inline TextBox uses — which types the trimmed text via the
-    /// paste path, then dispatches a real synthetic Return key event
-    /// (`ghostty_surface_key`) so the line discipline sees an Enter
-    /// outside the bracketed paste and executes.
+    /// Submission goes through `TerminalSurface.sendSubmitFormText`.
+    /// Ghostty's text-input path (`sendText` → `ghostty_surface_text`)
+    /// wraps every call in bracketed-paste markers (`ESC[200~…ESC[201~`).
+    /// Bracketed paste is intentionally designed so embedded `\n`/`\r`
+    /// inside the paste do not auto-execute — zsh ZLE and bash readline
+    /// only execute when a *real* Return arrives outside the paste. So a
+    /// raw `sendText("<cmd>\n")` types the command but leaves it sitting
+    /// at the prompt, which is exactly the regression the operator
+    /// observed. `sendSubmitFormText` types the trimmed text via paste
+    /// and then dispatches a synthetic Return key — and, critically,
+    /// defers the Return until the pending-text queue actually flushes
+    /// on surface attach, so the boot-time race where `view.window` is
+    /// still nil at the 2.5s mark (and `sendKey` silently drops) no
+    /// longer hides the submission.
     ///
     /// `oldToNewPanelIds` lets the routine remap snapshot panel ids to
     /// the freshly minted ids when the stable-panel-id rollback flag is
@@ -431,7 +431,7 @@ extension Workspace {
                 guard let terminalPanel = self.panels[livePanelId] as? TerminalPanel else {
                     continue
                 }
-                TextBoxSubmit.send(command, via: terminalPanel.surface)
+                terminalPanel.surface.sendSubmitFormText(command)
             }
         }
     }
