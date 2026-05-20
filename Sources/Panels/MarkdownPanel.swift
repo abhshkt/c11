@@ -100,6 +100,15 @@ final class MarkdownPanel: Panel, ObservableObject {
     /// Cleared back to nil when the alert is dismissed.
     @Published var saveFailureMessage: String? = nil
 
+    /// Base content font size for preview and edit mode. This is panel-local:
+    /// zooming one markdown surface should not resize other markdown notes.
+    @Published private(set) var markdownFontSize: CGFloat = MarkdownPanel.defaultMarkdownFontSize
+
+    static let defaultMarkdownFontSize: CGFloat = 14
+    static let minimumMarkdownFontSize: CGFloat = 9
+    static let maximumMarkdownFontSize: CGFloat = 32
+    private static let markdownFontSizeStep: CGFloat = 1
+
     /// Last bytes successfully written to disk. Compared inside
     /// `loadFileContent` to suppress the watcher's own self-write reload.
     /// Byte-equality is correct; `hashValue` would not be process-stable.
@@ -254,6 +263,33 @@ final class MarkdownPanel: Panel, ObservableObject {
     func triggerFlash() {
         guard NotificationPaneFlashSettings.isEnabled() else { return }
         focusFlashToken += 1
+    }
+
+    // MARK: - Zoom
+
+    @discardableResult
+    func zoomIn() -> Bool {
+        setMarkdownFontSize(markdownFontSize + Self.markdownFontSizeStep)
+    }
+
+    @discardableResult
+    func zoomOut() -> Bool {
+        setMarkdownFontSize(markdownFontSize - Self.markdownFontSizeStep)
+    }
+
+    @discardableResult
+    func resetZoom() -> Bool {
+        setMarkdownFontSize(Self.defaultMarkdownFontSize)
+    }
+
+    /// Apply a persisted font size on session restore. Clamped to the valid
+    /// range so out-of-range stored values can't escape the zoom bounds.
+    @discardableResult
+    func setMarkdownFontSize(_ candidate: CGFloat) -> Bool {
+        let clamped = min(Self.maximumMarkdownFontSize, max(Self.minimumMarkdownFontSize, candidate))
+        guard abs(markdownFontSize - clamped) > 0.001 else { return false }
+        markdownFontSize = clamped
+        return true
     }
 
     // MARK: - File I/O

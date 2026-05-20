@@ -863,11 +863,13 @@ struct cmuxApp: App {
                 appDelegate.copyFocusLogs(nil)
             }
 
+            #if !C11_NO_TRACKING
             Divider()
 
             Button("Trigger Sentry Test Crash") {
                 appDelegate.triggerSentryTestCrash(nil)
             }
+            #endif
         }
     }
 #endif
@@ -1011,17 +1013,17 @@ struct cmuxApp: App {
                 Divider()
 
                 Button(String(localized: "menu.browser.zoomIn", defaultValue: "Zoom In")) {
-                    _ = activeTabManager.zoomInFocusedBrowser()
+                    _ = activeTabManager.zoomInFocusedContent()
                 }
                 .keyboardShortcut("=", modifiers: .command)
 
                 Button(String(localized: "menu.browser.zoomOut", defaultValue: "Zoom Out")) {
-                    _ = activeTabManager.zoomOutFocusedBrowser()
+                    _ = activeTabManager.zoomOutFocusedContent()
                 }
                 .keyboardShortcut("-", modifiers: .command)
 
                 Button(String(localized: "menu.browser.actualSize", defaultValue: "Actual Size")) {
-                    _ = activeTabManager.resetZoomFocusedBrowser()
+                    _ = activeTabManager.resetZoomFocusedContent()
                 }
                 .keyboardShortcut("0", modifiers: .command)
 
@@ -4252,6 +4254,13 @@ enum DefaultGridSettings {
 
 enum TelemetrySettings {
     static let sendAnonymousTelemetryKey = "sendAnonymousTelemetry"
+    #if C11_NO_TRACKING
+    static let defaultSendAnonymousTelemetry = false
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        false
+    }
+    #else
     static let defaultSendAnonymousTelemetry = true
 
     static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
@@ -4260,6 +4269,7 @@ enum TelemetrySettings {
         }
         return defaults.bool(forKey: sendAnonymousTelemetryKey)
     }
+    #endif
 
     // Freeze telemetry enablement once per launch. Settings changes apply on next restart.
     static let enabledForCurrentLaunch = isEnabled()
@@ -6238,6 +6248,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var dataPrivacySettingsPage: some View {
+        #if !C11_NO_TRACKING
         SettingsSectionHeader(title: String(localized: "settings.section.dataLeaving", defaultValue: "Data Leaving the Machine"))
         SettingsCard {
             SettingsCardRow(
@@ -6251,6 +6262,7 @@ struct SettingsView: View {
                     .controlSize(.small)
             }
         }
+        #endif
 
         SettingsSectionHeader(title: String(localized: "settings.section.localBrowserData", defaultValue: "Local Browser Data"))
         SettingsCard {
