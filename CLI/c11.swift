@@ -14506,8 +14506,13 @@ struct CMUXCLI {
             optionValue(hookArgs, name: "--surface") ?? (hookWsFlag == nil ? ProcessInfo.processInfo.environment["CMUX_SURFACE_ID"] : nil)
         )
         let startedAtArg = optionValue(hookArgs, name: "--started-at")
-        let stdinInput = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let rawInput = codexLifecycleRawInput(stdinInput: stdinInput, hookArgs: hookArgs)
+        let rawInput: String
+        if let argInput = codexLifecycleRawInputFromArgs(hookArgs) {
+            rawInput = argInput
+        } else {
+            let stdinInput = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            rawInput = codexLifecycleRawInput(stdinInput: stdinInput)
+        }
         if let debugPath = ProcessInfo.processInfo.environment["CMUX_HOOK_DEBUG_PATH"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !debugPath.isEmpty {
@@ -14730,12 +14735,15 @@ struct CMUXCLI {
         }
     }
 
-    private func codexLifecycleRawInput(stdinInput: String, hookArgs: [String]) -> String {
+    private func codexLifecycleRawInput(stdinInput: String) -> String {
         let trimmedStdin = stdinInput.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedStdin.isEmpty {
             return stdinInput
         }
+        return ""
+    }
 
+    private func codexLifecycleRawInputFromArgs(_ hookArgs: [String]) -> String? {
         var skipNext = false
         for arg in hookArgs {
             if skipNext {
@@ -14758,7 +14766,7 @@ struct CMUXCLI {
                 }
             }
         }
-        return ""
+        return nil
     }
 
     private func writeCodexLifecycleMetadata(
@@ -15026,14 +15034,26 @@ struct CMUXCLI {
         cwdFilter: String?,
         telemetry: CLISocketSentryTelemetry
     ) -> [CodexStateThreadCandidate]? {
-        let createdAtExpression = "coalesce(created_at_ms, CAST(created_at AS INTEGER) * 1000, 0)"
-        var whereClauses = ["coalesce(archived, 0) = 0"]
+        guard let columns = codexStateDBThreadColumns(dbPath: dbPath, telemetry: telemetry),
+              columns.contains("id") else {
+            return nil
+        }
+        let createdAtExpression = codexStateDBCreatedAtExpression(columns: columns)
+        let cwdExpression = columns.contains("cwd") ? "cwd" : "''"
+        var whereClauses: [String] = []
+        if columns.contains("archived") {
+            whereClauses.append("coalesce(archived, 0) = 0")
+        }
         if let cwdFilter {
+            guard columns.contains("cwd") else {
+                telemetry.breadcrumb("codex-hook.state-db.skip", data: ["reason": "missing-cwd-column"])
+                return []
+            }
             whereClauses.append("cwd = '\(sqliteStringLiteral(cwdFilter))'")
         }
         whereClauses.append("\(createdAtExpression) >= \(floorMs)")
         let query = """
-        SELECT id, cwd
+        SELECT id, \(cwdExpression)
         FROM threads
         WHERE \(whereClauses.joined(separator: "\n  AND "))
         ORDER BY \(createdAtExpression) DESC, id DESC
@@ -15053,6 +15073,55 @@ struct CMUXCLI {
             return nil
         }
         return uniqueValidCodexStateThreadCandidates(fromSQLiteOutput: result.stdout)
+    }
+
+    private func codexStateDBThreadColumns(
+        dbPath: String,
+        telemetry: CLISocketSentryTelemetry
+    ) -> Set<String>? {
+        let result = CLIProcessRunner.runProcess(
+            executablePath: "/usr/bin/sqlite3",
+            arguments: ["-readonly", "-separator", "\t", dbPath, "PRAGMA table_info(threads);"],
+            timeout: 1.0
+        )
+        if result.timedOut {
+            telemetry.breadcrumb("codex-hook.state-db.skip", data: ["reason": "schema-timeout"])
+            return nil
+        }
+        guard result.status == 0 else {
+            telemetry.breadcrumb("codex-hook.state-db.skip", data: ["reason": "schema-status-\(result.status)"])
+            return nil
+        }
+
+        var columns = Set<String>()
+        for rawLine in result.stdout.components(separatedBy: .newlines) {
+            let parts = rawLine.split(separator: "\t", omittingEmptySubsequences: false)
+            guard parts.count > 1 else { continue }
+            let name = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                columns.insert(name)
+            }
+        }
+        if columns.isEmpty {
+            telemetry.breadcrumb("codex-hook.state-db.skip", data: ["reason": "schema-empty"])
+            return nil
+        }
+        return columns
+    }
+
+    private func codexStateDBCreatedAtExpression(columns: Set<String>) -> String {
+        var expressions: [String] = []
+        if columns.contains("created_at_ms") {
+            expressions.append("created_at_ms")
+        }
+        if columns.contains("created_at") {
+            expressions.append("CAST(created_at AS INTEGER) * 1000")
+        }
+        expressions.append("0")
+        if expressions.count == 1 {
+            return expressions[0]
+        }
+        return "coalesce(\(expressions.joined(separator: ", ")))"
     }
 
     private func codexHookStartFloorMs(

@@ -146,6 +146,21 @@ codex_home_overlay_key() {
     printf '%s' "${key:0:80}"
 }
 
+path_mode_octal() {
+    /usr/bin/stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
+}
+
+ensure_private_c11_dir() {
+    local path="$1"
+    [[ -d "$path" && ! -L "$path" && -O "$path" ]] || return 1
+    chmod 700 "$path" 2>/dev/null || return 1
+
+    local mode
+    mode="$(path_mode_octal "$path")" || return 1
+    [[ "$mode" =~ ^[0-7]+$ ]] || return 1
+    (( (8#$mode & 077) == 0 )) || return 1
+}
+
 prepare_c11_codex_home_overlay() {
     local real_home="$1"
     local base="${CMUX_CODEX_HOME_OVERLAY_DIR:-$HOME/Library/Application Support/c11/codex-home}"
@@ -153,13 +168,17 @@ prepare_c11_codex_home_overlay() {
     key="$(codex_home_overlay_key "$real_home")" || return 1
     overlay="$base/$key"
 
+    [[ "$base" == /* ]] || return 1
+    [[ ! -L "$base" && ! -L "$overlay" ]] || return 1
+
     local old_umask
     old_umask="$(umask)"
     umask 077
     trap 'umask "$old_umask"; trap - RETURN' RETURN
 
     mkdir -p "$base" "$overlay" || return 1
-    chmod 700 "$base" "$overlay" 2>/dev/null || return 1
+    ensure_private_c11_dir "$base" || return 1
+    ensure_private_c11_dir "$overlay" || return 1
 
     local entry name target
     for entry in "$real_home"/* "$real_home"/.[!.]* "$real_home"/..?*; do
@@ -193,7 +212,8 @@ prepare_c11_codex_home_overlay() {
         chmod 600 "$overlay_config" 2>/dev/null || return 1
     fi
 
-    profile_tmp="$overlay/c11.config.toml.tmp.$$"
+    profile_tmp="$(mktemp "$overlay/c11.config.toml.tmp.XXXXXX")" || return 1
+    chmod 600 "$profile_tmp" 2>/dev/null || return 1
     cat > "$profile_tmp" <<'EOF' || return 1
 [features]
 hooks = true
@@ -284,6 +304,84 @@ codex_state_db_path() {
     local db_path="$codex_home/state_5.sqlite"
     [[ -r "$db_path" ]] || return 1
     printf '%s' "$db_path"
+}
+
+codex_state_db_has_column() {
+    local db_path="$1"
+    local column="$2"
+    /usr/bin/sqlite3 -readonly -separator $'\t' "$db_path" "PRAGMA table_info(threads);" 2>/dev/null \
+        | awk -F'\t' -v wanted="$column" '$2 == wanted { found = 1 } END { exit found ? 0 : 1 }'
+}
+
+codex_state_db_created_expr() {
+    local db_path="$1"
+    local parts=()
+    if codex_state_db_has_column "$db_path" "created_at_ms"; then
+        parts+=("created_at_ms")
+    fi
+    if codex_state_db_has_column "$db_path" "created_at"; then
+        parts+=("CAST(created_at AS INTEGER) * 1000")
+    fi
+    parts+=("0")
+
+    if (( ${#parts[@]} == 1 )); then
+        printf '%s' "${parts[0]}"
+        return 0
+    fi
+
+    local joined=""
+    local part
+    for part in "${parts[@]}"; do
+        if [[ -n "$joined" ]]; then
+            joined+=", "
+        fi
+        joined+="$part"
+    done
+    printf 'coalesce(%s)' "$joined"
+}
+
+codex_state_db_thread_query() {
+    local db_path="$1"
+    local floor_ms="$2"
+    local cwd_filter="${3:-}"
+
+    codex_state_db_has_column "$db_path" "id" || return 1
+
+    local created_expr
+    created_expr="$(codex_state_db_created_expr "$db_path")" || return 1
+
+    local cwd_select="''"
+    local where_clauses=()
+    if codex_state_db_has_column "$db_path" "cwd"; then
+        cwd_select="cwd"
+        if [[ -n "$cwd_filter" ]]; then
+            where_clauses+=("cwd = '${cwd_filter}'")
+        fi
+    elif [[ -n "$cwd_filter" ]]; then
+        return 1
+    fi
+
+    if codex_state_db_has_column "$db_path" "archived"; then
+        where_clauses+=("coalesce(archived, 0) = 0")
+    fi
+    where_clauses+=("${created_expr} >= ${floor_ms}")
+
+    local where_sql=""
+    local clause
+    for clause in "${where_clauses[@]}"; do
+        if [[ -n "$where_sql" ]]; then
+            where_sql+=$'\n  AND '
+        fi
+        where_sql+="$clause"
+    done
+
+    cat <<EOF
+SELECT id, ${cwd_select}
+FROM threads
+WHERE ${where_sql}
+ORDER BY ${created_expr} DESC, id DESC
+LIMIT 3;
+EOF
 }
 
 codex_project_dir_filter() {
@@ -582,6 +680,41 @@ set_codex_metadata_value() {
     CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC=0.75 "${args[@]}" >/dev/null 2>&1 || true
 }
 
+clear_codex_session_metadata() {
+    local c11_bin="$1"
+    local socket="$2"
+    local workspace="$3"
+    local surface="$4"
+
+    [[ -n "$socket" && -n "$surface" ]] || return 0
+
+    local args=(
+        "$c11_bin" "--socket" "$socket"
+        "clear-metadata"
+        "--key" "codex.session_id"
+        "--key" "codex.session_project_dir"
+        "--source" "declare"
+    )
+    if [[ -n "$workspace" ]]; then
+        args+=("--workspace" "$workspace")
+    fi
+    args+=("--surface" "$surface")
+
+    CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC=0.75 "${args[@]}" >/dev/null 2>&1 || true
+}
+
+clear_codex_session_metadata_bg() {
+    local c11_bin="$1"
+    local socket="$2"
+    local workspace="$3"
+    local surface="$4"
+
+    (
+        clear_codex_session_metadata "$c11_bin" "$socket" "$workspace" "$surface"
+    ) &
+    disown 2>/dev/null || true
+}
+
 set_codex_agent_pid_bg() {
     local c11_bin="$1"
     local socket="$2"
@@ -645,27 +778,11 @@ start_codex_state_watcher() {
     [[ -x /usr/bin/sqlite3 ]] || return 0
 
     (
+        clear_codex_session_metadata "$c11_bin" "$socket" "$workspace" "$surface"
+
         local floor_sec=$(( start_sec > 2 ? start_sec - 2 : 0 ))
         local floor_ms=$(( floor_sec * 1000 ))
         local global_fallback_not_before_sec=$(( start_sec + 3 ))
-        local created_expr="coalesce(created_at_ms, CAST(created_at AS INTEGER) * 1000, 0)"
-        local query="
-SELECT id, cwd
-FROM threads
-WHERE coalesce(archived, 0) = 0
-  AND cwd = '${shell_project_dir}'
-  AND ${created_expr} >= ${floor_ms}
-ORDER BY ${created_expr} DESC, id DESC
-LIMIT 3;
-"
-        local global_query="
-SELECT id, cwd
-FROM threads
-WHERE coalesce(archived, 0) = 0
-  AND ${created_expr} >= ${floor_ms}
-ORDER BY ${created_expr} DESC, id DESC
-LIMIT 3;
-"
 
         while kill -0 "$codex_pid" 2>/dev/null; do
             local db_path
@@ -674,7 +791,11 @@ LIMIT 3;
                 continue
             }
 
-            local rows
+            local query rows
+            query="$(codex_state_db_thread_query "$db_path" "$floor_ms" "$shell_project_dir" 2>/dev/null)" || {
+                sleep 1
+                continue
+            }
             rows="$(/usr/bin/sqlite3 -readonly -separator $'\t' "$db_path" "$query" 2>/dev/null)" || {
                 sleep 1
                 continue
@@ -716,6 +837,11 @@ LIMIT 3;
                 continue
             fi
 
+            local global_query
+            global_query="$(codex_state_db_thread_query "$db_path" "$floor_ms" "" 2>/dev/null)" || {
+                sleep 1
+                continue
+            }
             rows="$(/usr/bin/sqlite3 -readonly -separator $'\t' "$db_path" "$global_query" 2>/dev/null)" || {
                 sleep 1
                 continue
@@ -760,12 +886,15 @@ if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then
     IN_C11=1
 fi
 
-if [[ "$IN_C11" == "0" || "${CMUX_CODEX_HOOKS_DISABLED:-}" == "1" ]] || ! c11_socket_available; then
-    REAL_CODEX="$(find_real_codex)" || { echo "Error: codex not found in PATH" >&2; exit 127; }
-    exec "$REAL_CODEX" "$@"
+REAL_CODEX="$(find_real_codex)" || { echo "Error: codex not found in PATH" >&2; exit 127; }
+
+if [[ "$IN_C11" == "1" ]]; then
+    sanitize_codex_parent_environment
 fi
 
-REAL_CODEX="$(find_real_codex)" || { echo "Error: codex not found in PATH" >&2; exit 127; }
+if [[ "$IN_C11" == "0" || "${CMUX_CODEX_HOOKS_DISABLED:-}" == "1" ]] || ! c11_socket_available; then
+    exec "$REAL_CODEX" "$@"
+fi
 
 # Pass through subcommands that aren't interactive sessions. `exec`,
 # `review`, `login`, `logout`, `mcp`, `completion`, `apply`, `sandbox`,
@@ -785,8 +914,6 @@ c11_bin="$(find_c11_bin || true)"
 if [[ -z "$c11_bin" ]]; then
     exec "$REAL_CODEX" "$@"
 fi
-
-sanitize_codex_parent_environment
 
 # Best-effort surface-metadata write: mark this surface as a codex terminal
 # immediately, before Codex's notify path or any trusted hook has
@@ -845,6 +972,8 @@ if [[ -n "${CMUX_CODEX_RESUME_SESSION_ID:-}" ]]; then
 else
     if [[ "${CMUX_CODEX_DISABLE_STATE_WATCHER:-}" != "1" && -n "$CODEX_PROJECT_DIR" ]]; then
         start_codex_state_watcher "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_SURFACE_ID:-}" "${CMUX_CODEX_START_SEC}" "$$" "$CODEX_PROJECT_DIR"
+    else
+        clear_codex_session_metadata_bg "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_SURFACE_ID:-}"
     fi
 fi
 
@@ -870,9 +999,15 @@ if [[ -n "$CODEX_PROJECT_DIR" ]] && ! codex_args_include_cd "$@"; then
 fi
 real_codex_args+=("$@")
 
-exec "$REAL_CODEX" \
-    -c "$CODEX_NOTIFY_CONFIG" \
-    -c "$CODEX_TUI_NOTIFICATIONS_CONFIG" \
-    -c "$CODEX_TUI_NOTIFICATION_CONDITION_CONFIG" \
-    "${codex_profile_args[@]}" \
-    "${real_codex_args[@]}"
+exec_args=(
+    "$REAL_CODEX"
+    "-c" "$CODEX_NOTIFY_CONFIG"
+    "-c" "$CODEX_TUI_NOTIFICATIONS_CONFIG"
+    "-c" "$CODEX_TUI_NOTIFICATION_CONDITION_CONFIG"
+)
+if (( ${#codex_profile_args[@]} > 0 )); then
+    exec_args+=("${codex_profile_args[@]}")
+fi
+exec_args+=("${real_codex_args[@]}")
+
+exec "${exec_args[@]}"

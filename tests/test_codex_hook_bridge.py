@@ -79,6 +79,49 @@ def run_cli(
     return proc.stdout.strip()
 
 
+def run_cli_with_open_stdin(
+    cli_path: str,
+    socket_path: str,
+    args: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    timeout: float = 2.0,
+) -> str:
+    command_env = os.environ.copy()
+    command_env["CMUX_CLI_SENTRY_DISABLED"] = "1"
+    command_env["C11_QUIET_DISCOVERY"] = "1"
+    if env:
+        command_env.update(env)
+
+    master_fd, slave_fd = os.openpty()
+    proc = subprocess.Popen(
+        [cli_path, "--socket", socket_path, *args],
+        stdin=slave_fd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=command_env,
+    )
+    os.close(slave_fd)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        raise RuntimeError(
+            f"c11 {' '.join(args)} hung with inherited open stdin:\n"
+            f"stdout={stdout}\nstderr={stderr}"
+        )
+    finally:
+        os.close(master_fd)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"c11 {' '.join(args)} failed:\n"
+            f"exit={proc.returncode}\nstdout={stdout}\nstderr={stderr}"
+        )
+    return stdout.strip()
+
+
 def parse_ok_id(output: str) -> str:
     if output.startswith("OK "):
         return output[3:].strip()
@@ -145,6 +188,42 @@ def wait_for_notifications(cli_path: str, socket_path: str, workspace_uuid: str,
             return latest
         time.sleep(0.05)
     return latest
+
+
+def make_codex_state_db(
+    codex_home: Path,
+    *,
+    session_id: str,
+    cwd: str,
+    created_at_ms: bool,
+    created_at: bool,
+) -> None:
+    codex_home.mkdir(parents=True, exist_ok=True)
+    db_path = codex_home / "state_5.sqlite"
+    created_columns = []
+    insert_columns = []
+    insert_values = []
+    if created_at:
+        created_columns.append("created_at INTEGER")
+        insert_columns.append("created_at")
+        insert_values.append("4102444800")
+    if created_at_ms:
+        created_columns.append("created_at_ms INTEGER")
+        insert_columns.append("created_at_ms")
+        insert_values.append("4102444800000")
+    created_columns_sql = ",\n  " + ",\n  ".join(created_columns) if created_columns else ""
+    insert_columns_sql = ", " + ", ".join(insert_columns) if insert_columns else ""
+    insert_values_sql = ", " + ", ".join(insert_values) if insert_values else ""
+    sql = f"""
+CREATE TABLE threads (
+  id TEXT,
+  cwd TEXT,
+  archived INTEGER{created_columns_sql}
+);
+INSERT INTO threads (id, cwd, archived{insert_columns_sql})
+VALUES ('{session_id}', '{cwd}', 0{insert_values_sql});
+"""
+    subprocess.run(["/usr/bin/sqlite3", str(db_path), sql], check=True)
 
 
 def expect(condition: bool, message: str) -> None:
@@ -376,6 +455,55 @@ def main() -> int:
         expect(f"codex.session_project_dir = {project_dir}" in metadata, f"Missing project-dir metadata: {metadata!r}")
         expect("model = gpt-5.5" in metadata, f"Missing Codex model metadata: {metadata!r}")
 
+        state_db_cases = [
+            ("created-at-ms-only", True, False, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", True),
+            ("created-at-only", False, True, "bbbbbbbb-cccc-dddd-eeee-ffffffffffff", True),
+            ("missing-created-time", False, False, "cccccccc-dddd-eeee-ffff-000000000000", False),
+        ]
+        for label, has_created_at_ms, has_created_at, state_session_id, should_capture in state_db_cases:
+            state_home = test_root / f"state-home-{label}"
+            make_codex_state_db(
+                state_home,
+                session_id=state_session_id,
+                cwd=str(project_dir),
+                created_at_ms=has_created_at_ms,
+                created_at=has_created_at,
+            )
+            run_cli(
+                cli_path,
+                socket_path,
+                ["codex-hook", "session-start", "--started-at", "4102444799"],
+                payload={
+                    "hook_event_name": "SessionStart",
+                    "cwd": str(project_dir),
+                    "model": "gpt-5.5",
+                },
+                env={**hook_env, "CODEX_HOME": str(state_home)},
+            )
+            state_metadata = run_cli(
+                cli_path,
+                socket_path,
+                [
+                    "get-metadata",
+                    "--workspace",
+                    workspace_id,
+                    "--surface",
+                    surface_id,
+                    "--key",
+                    "codex.session_id",
+                ],
+            )
+            if should_capture:
+                expect(
+                    f"codex.session_id = {state_session_id}" in state_metadata,
+                    f"{label}: state DB schema should capture session id: {state_metadata!r}",
+                )
+            else:
+                expect(
+                    f"codex.session_id = {state_session_id}" not in state_metadata,
+                    f"{label}: state DB schema without created time must not capture session id: {state_metadata!r}",
+                )
+
         operator_model = "operator/model"
         guarded_session_id = "33333333-4444-5555-6666-777777777777"
         run_cli(
@@ -494,6 +622,35 @@ def main() -> int:
             f"Payload-derived status must not be interpreted as a --tab option: {other_status!r}",
         )
 
+        argv_notify_session_id = "55555555-6666-7777-8888-999999999999"
+        argv_notify_output = run_cli_with_open_stdin(
+            cli_path,
+            socket_path,
+            [
+                "codex-hook",
+                "notify",
+                json.dumps(
+                    {
+                        "hook_event_name": "Stop",
+                        "session_id": argv_notify_session_id,
+                        "cwd": str(project_dir),
+                        "last_assistant_message": "Argv JSON done",
+                    }
+                ),
+            ],
+            env=hook_env,
+            timeout=2,
+        )
+        expect(argv_notify_output == "", f"Argv JSON notify should exit quietly, got {argv_notify_output!r}")
+        argv_completion_items = wait_for_notifications(cli_path, socket_path, workspace_uuid, minimum=1)
+        expect(
+            any(item["title"] == "Codex" and item["subtitle"].startswith("Completed") and "Argv JSON done" in item["body"] for item in argv_completion_items),
+            f"Expected argv JSON Codex completion notification without stdin EOF, got {argv_completion_items!r}",
+        )
+        status = run_cli(cli_path, socket_path, ["list-status", "--workspace", workspace_id])
+        expect("codex=Idle" in status, f"Expected Idle status after argv JSON notify, got {status!r}")
+
+        before_stdin_notify_count = len(list_notifications(cli_path, socket_path, workspace_uuid))
         run_cli(
             cli_path,
             socket_path,
@@ -506,7 +663,7 @@ def main() -> int:
             },
             env=hook_env,
         )
-        completion_items = wait_for_notifications(cli_path, socket_path, workspace_uuid, minimum=1)
+        completion_items = wait_for_notifications(cli_path, socket_path, workspace_uuid, minimum=before_stdin_notify_count + 1)
         expect(
             any(item["title"] == "Codex" and item["subtitle"].startswith("Completed") and "Bridge done" in item["body"] for item in completion_items),
             f"Expected Codex completion notification, got {completion_items!r}",

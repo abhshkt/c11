@@ -5,6 +5,7 @@ Regression tests for Resources/bin/codex wrapper lifecycle bridge.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import socket
@@ -153,22 +154,40 @@ def hook_configs(argv: list[str]) -> list[str]:
     return configs
 
 
-def make_codex_state_db(codex_home: Path, *, session_id: str, cwd: str, extra_rows: list[tuple[str, str]] | None = None) -> None:
+def make_codex_state_db(
+    codex_home: Path,
+    *,
+    session_id: str,
+    cwd: str,
+    extra_rows: list[tuple[str, str]] | None = None,
+    created_at_ms: bool = True,
+    created_at: bool = True,
+) -> None:
     codex_home.mkdir(parents=True, exist_ok=True)
     db_path = codex_home / "state_5.sqlite"
     rows = [(session_id, cwd), *(extra_rows or [])]
+    created_columns = []
+    created_values = []
+    if created_at:
+        created_columns.append("created_at INTEGER")
+        created_values.append("4102444800")
+    if created_at_ms:
+        created_columns.append("created_at_ms INTEGER")
+        created_values.append("4102444800000")
+    created_columns_sql = ",\n  ".join(created_columns)
+    if created_columns_sql:
+        created_columns_sql = ",\n  " + created_columns_sql
+    created_values_sql = (", " + ", ".join(created_values)) if created_values else ""
     inserts = "\n".join(
-        "INSERT INTO threads (id, cwd, archived, created_at, created_at_ms) "
-        f"VALUES ('{row_session}', '{row_cwd}', 0, 4102444800, 4102444800000);"
+        f"INSERT INTO threads (id, cwd, archived{', created_at' if created_at else ''}{', created_at_ms' if created_at_ms else ''}) "
+        f"VALUES ('{row_session}', '{row_cwd}', 0{created_values_sql});"
         for row_session, row_cwd in rows
     )
     sql = f"""
 CREATE TABLE threads (
   id TEXT,
   cwd TEXT,
-  archived INTEGER,
-  created_at INTEGER,
-  created_at_ms INTEGER
+  archived INTEGER{created_columns_sql}
 );
 {inserts}
 """
@@ -182,6 +201,7 @@ def run_wrapper(
     extra_env: dict[str, str] | None = None,
     real_codex_script: str = DEFAULT_FAKE_CODEX,
     wrapper_cwd: Path | None = None,
+    overlay_setup: str = "dir",
 ) -> tuple[int, list[str], list[str], str, str, str, str]:
     with tempfile.TemporaryDirectory(prefix="c11-codex-wrapper-test-") as td:
         tmp = Path(td)
@@ -204,7 +224,20 @@ def run_wrapper(
         real_codex_home.mkdir(parents=True, exist_ok=True)
         (real_codex_home / "config.toml").write_text("# real Codex config\n", encoding="utf-8")
         overlay_dir = tmp / "c11-codex-home-overlays"
-        overlay_dir.mkdir(parents=True, exist_ok=True)
+        if overlay_setup == "dir":
+            overlay_dir.mkdir(parents=True, exist_ok=True)
+        elif overlay_setup == "symlink-base":
+            overlay_target = tmp / "overlay-target"
+            overlay_target.mkdir(parents=True, exist_ok=True)
+            overlay_dir.symlink_to(overlay_target, target_is_directory=True)
+        elif overlay_setup == "symlink-overlay":
+            overlay_dir.mkdir(parents=True, exist_ok=True)
+            overlay_target = tmp / "overlay-leaf-target"
+            overlay_target.mkdir(parents=True, exist_ok=True)
+            overlay_key = hashlib.md5(str(real_codex_home).encode("utf-8")).hexdigest()
+            (overlay_dir / overlay_key).symlink_to(overlay_target, target_is_directory=True)
+        else:
+            raise ValueError(f"unknown overlay setup {overlay_setup!r}")
 
         make_executable(
             real_dir / "codex",
@@ -362,6 +395,21 @@ def test_live_socket_uses_c11_owned_profile_layer(failures: list[str]) -> None:
     )
 
 
+def test_profile_layer_rejects_symlinked_overlay_paths(failures: list[str]) -> None:
+    for setup in ("symlink-base", "symlink-overlay"):
+        code, real_argv, _, stderr, _, _, _ = run_wrapper(
+            socket_state="live",
+            argv=["hello"],
+            overlay_setup=setup,
+        )
+        expect(code == 0, f"{setup}: wrapper should fall through without profile overlay, exited {code}: {stderr}", failures)
+        expect(
+            "--profile-v2" not in real_argv,
+            f"{setup}: symlinked c11 overlay path must not receive a managed profile layer: {real_argv}",
+            failures,
+        )
+
+
 def test_plain_interactive_codex_does_not_mark_running(failures: list[str]) -> None:
     code, real_argv, c11_log, stderr, _, _, _ = run_wrapper(socket_state="live", argv=[])
     expect(code == 0, f"plain interactive: wrapper exited {code}: {stderr}", failures)
@@ -371,6 +419,32 @@ def test_plain_interactive_codex_does_not_mark_running(failures: list[str]) -> N
     expect(
         all("set-status codex Running" not in line for line in c11_log),
         f"plain interactive: must not mark Running before a user prompt: {c11_log}",
+        failures,
+    )
+
+
+def test_fresh_launch_clears_declare_session_metadata(failures: list[str]) -> None:
+    code, _, c11_log, stderr, _, _, _ = run_wrapper(
+        socket_state="live",
+        argv=[],
+        real_codex_script=DEFAULT_FAKE_CODEX + "sleep 1\n",
+    )
+    expect(code == 0, f"fresh metadata clear: wrapper exited {code}: {stderr}", failures)
+    clear_lines = [line for line in c11_log if "clear-metadata" in line]
+    expect(clear_lines, f"fresh metadata clear: missing clear-metadata call: {c11_log}", failures)
+    expect(
+        any("--key codex.session_id --key codex.session_project_dir" in line for line in clear_lines),
+        f"fresh metadata clear: expected both Codex session keys to be cleared together: {clear_lines}",
+        failures,
+    )
+    expect(
+        any("--source declare" in line for line in clear_lines),
+        f"fresh metadata clear: must clear only declare-level metadata: {clear_lines}",
+        failures,
+    )
+    expect(
+        all("--source explicit" not in line for line in clear_lines),
+        f"fresh metadata clear: must not use explicit source: {clear_lines}",
         failures,
     )
 
@@ -408,6 +482,41 @@ def test_state_watcher_writes_unambiguous_session_metadata(failures: list[str]) 
         f"state watcher: missing codex.session_project_dir metadata write: {c11_log}",
         failures,
     )
+
+
+def test_state_watcher_handles_created_time_schema_variants(failures: list[str]) -> None:
+    cases = [
+        ("created-at-ms-only", True, False, "11111111-2222-3333-4444-555555555555", True),
+        ("created-at-only", False, True, "66666666-7777-8888-9999-aaaaaaaaaaaa", True),
+        ("missing-created-time", False, False, "bbbbbbbb-cccc-dddd-eeee-ffffffffffff", False),
+    ]
+    for label, has_created_at_ms, has_created_at, session_id, should_capture in cases:
+        with tempfile.TemporaryDirectory(prefix=f"c11-codex-state-{label}-") as td:
+            codex_home = Path(td) / "codex-home"
+            project_dir = Path(td).resolve() / "project"
+            project_dir.mkdir()
+            make_codex_state_db(
+                codex_home,
+                session_id=session_id,
+                cwd=str(project_dir),
+                created_at_ms=has_created_at_ms,
+                created_at=has_created_at,
+            )
+
+            code, _, c11_log, stderr, _, _, _ = run_wrapper(
+                socket_state="live",
+                argv=["hello"],
+                extra_env={"CODEX_HOME": str(codex_home), "CMUX_CODEX_DISABLE_STATE_WATCHER": "0"},
+                real_codex_script=DEFAULT_FAKE_CODEX + "sleep 2\n",
+                wrapper_cwd=project_dir,
+            )
+
+        expect(code == 0, f"{label}: wrapper exited {code}: {stderr}", failures)
+        captured = any(f"set-metadata --key codex.session_id --value {session_id}" in line for line in c11_log)
+        if should_capture:
+            expect(captured, f"{label}: expected session capture with available created-time column: {c11_log}", failures)
+        else:
+            expect(not captured, f"{label}: must not capture without a created-time column: {c11_log}", failures)
 
 
 def test_state_watcher_rejects_same_cwd_ambiguity(failures: list[str]) -> None:
@@ -551,6 +660,29 @@ def test_parent_codex_session_env_is_sanitized(failures: list[str]) -> None:
     expect(code == 0, f"parent Codex env sanitize: wrapper exited {code}: {stderr}", failures)
 
 
+def test_parent_codex_session_env_is_sanitized_on_passthrough_paths(failures: list[str]) -> None:
+    parent_env = {
+        "CODEX_THREAD_ID": "aaaaaaaa-1111-2222-3333-444455556666",
+        "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex Desktop",
+        "CODEX_SHELL": "1",
+        "CODEX_CI": "1",
+        "CODEX_SANDBOX_NETWORK_DISABLED": "1",
+    }
+    cases = [
+        ("stale socket", "stale", ["hello"], {}),
+        ("disabled integration", "live", ["hello"], {"CMUX_CODEX_HOOKS_DISABLED": "1"}),
+        ("auxiliary command", "live", ["exec", "hello"], {}),
+    ]
+    for label, socket_state, argv, env_extra in cases:
+        code, _, _, stderr, _, _, _ = run_wrapper(
+            socket_state=socket_state,
+            argv=argv,
+            extra_env={**parent_env, **env_extra},
+            real_codex_script=SANITIZING_FAKE_CODEX,
+        )
+        expect(code == 0, f"{label}: parent Codex env sanitize exited {code}: {stderr}", failures)
+
+
 def test_live_socket_injects_pane_cwd_when_absent(failures: list[str]) -> None:
     with tempfile.TemporaryDirectory(prefix="c11-codex-cwd-") as td:
         project_dir = Path(td).resolve() / "project"
@@ -669,6 +801,7 @@ def test_resume_session_id_exported_for_metadata_capture(failures: list[str]) ->
     expect(any("set-agent --type codex" in line for line in c11_log), f"resume: missing set-agent call: {c11_log}", failures)
     expect(any("set-agent-pid codex" in line for line in c11_log), f"resume: missing PID registration call: {c11_log}", failures)
     expect(all("set-status codex Running" not in line for line in c11_log), f"resume: must not mark Running without a prompt: {c11_log}", failures)
+    expect(all("clear-metadata" not in line for line in c11_log), f"resume: must not clear captured resume metadata: {c11_log}", failures)
     expect(any("set-metadata --key codex.session_project_dir" in line for line in c11_log), f"resume: missing project-dir metadata write: {c11_log}", failures)
     expect(resume_value == session_id, f"resume: expected CMUX_CODEX_RESUME_SESSION_ID, got {resume_value!r}", failures)
 
@@ -688,8 +821,11 @@ def main() -> int:
     failures: list[str] = []
     test_live_socket_injects_notify_bridge(failures)
     test_live_socket_uses_c11_owned_profile_layer(failures)
+    test_profile_layer_rejects_symlinked_overlay_paths(failures)
     test_plain_interactive_codex_does_not_mark_running(failures)
+    test_fresh_launch_clears_declare_session_metadata(failures)
     test_state_watcher_writes_unambiguous_session_metadata(failures)
+    test_state_watcher_handles_created_time_schema_variants(failures)
     test_state_watcher_rejects_same_cwd_ambiguity(failures)
     test_state_watcher_allows_single_global_fallback(failures)
     test_state_watcher_waits_for_cwd_candidate_before_global_fallback(failures)
@@ -697,6 +833,7 @@ def main() -> int:
     test_stale_socket_skips_hook_injection(failures)
     test_disabled_env_skips_socket_probe_and_hook_injection(failures)
     test_parent_codex_session_env_is_sanitized(failures)
+    test_parent_codex_session_env_is_sanitized_on_passthrough_paths(failures)
     test_live_socket_injects_pane_cwd_when_absent(failures)
     test_existing_cd_arg_is_preserved(failures)
     test_target_project_env_tracks_effective_cd(failures)
