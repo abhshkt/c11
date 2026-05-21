@@ -635,8 +635,8 @@ def main() -> int:
             ],
         )
         expect(
-            f"codex.session_id = {no_cwd_state_id}" in no_cwd_metadata,
-            f"No-cwd legacy schema should capture the one fresh global session id: {no_cwd_metadata!r}",
+            f"codex.session_id = {no_cwd_state_id}" not in no_cwd_metadata,
+            f"No-cwd legacy schema must not persist an unproven global session id from a shared store: {no_cwd_metadata!r}",
         )
         expect(
             "codex.session_project_dir" not in no_cwd_metadata,

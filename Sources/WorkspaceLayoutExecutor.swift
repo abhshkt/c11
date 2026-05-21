@@ -246,8 +246,19 @@ enum WorkspaceLayoutExecutor {
                     surfaceSpec.metadata,
                     key: SurfaceMetadataKeyName.codexSessionStore
                 )
+                let codexRestartBlockedState = persistedStringValue(
+                    surfaceSpec.metadata,
+                    key: SurfaceMetadataKeyName.codexRestartBlocked
+                )
+                let codexRestartBlockedPresent: Bool
+                switch codexRestartBlockedState {
+                case .absent:
+                    codexRestartBlockedPresent = false
+                case .string, .invalid:
+                    codexRestartBlockedPresent = true
+                }
                 if terminalType == SurfaceMetadataKeyName.terminalTypeCodex,
-                   surfaceMeta[SurfaceMetadataKeyName.codexRestartBlocked] != nil {
+                   codexRestartBlockedPresent {
                     let message = "restart registry declined for terminal_type=codex codex.restart_blocked"
                     walkState.warnings.append(message)
                     walkState.failures.append(ApplyFailure(

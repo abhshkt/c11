@@ -474,6 +474,58 @@ final class WorkspaceSnapshotRoundTripAcceptanceTests: XCTestCase {
         XCTAssertFalse(sent.contains(staleClaudeSessionId), "Codex restore must not consume claude.session_id")
     }
 
+    func testRestoreCodexWithMalformedRestartBlockedMarkerFailsClosed() throws {
+        try skipIfReleaseBuild()
+
+        for (label, markerValue) in [
+            ("non-string", PersistedJSONValue.number(42)),
+            ("invalid-string", .string("bogus"))
+        ] {
+            let plan = WorkspaceApplyPlan(
+                version: 1,
+                workspace: WorkspaceSpec(
+                    title: "Codex malformed blocker \(label)",
+                    workingDirectory: "/Users/test/codex-malformed-blocker"
+                ),
+                layout: .pane(.init(surfaceIds: ["codex-blocked-\(label)"])),
+                surfaces: [
+                    SurfaceSpec(
+                        id: "codex-blocked-\(label)",
+                        kind: .terminal,
+                        title: "codex blocked \(label)",
+                        command: nil,
+                        metadata: [
+                            SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeCodex),
+                            SurfaceMetadataKeyName.codexRestartBlocked: markerValue
+                        ]
+                    )
+                ]
+            )
+
+            let result = WorkspaceLayoutExecutor.apply(
+                plan,
+                options: ApplyOptions(select: false, restartRegistry: .phase1),
+                dependencies: makeDependencies()
+            )
+
+            XCTAssertFalse(result.workspaceRef.isEmpty)
+            XCTAssertTrue(
+                result.failures.contains { failure in
+                    failure.code == "restart_registry_declined" &&
+                    failure.message.contains("codex.restart_blocked")
+                },
+                "malformed codex.restart_blocked should fail closed visibly: \(result.failures)"
+            )
+
+            let restoredWorkspace = try XCTUnwrap(resolveWorkspace(from: result.workspaceRef))
+            let panelId = try XCTUnwrap(parseUUIDSuffix(result.surfaceRefs["codex-blocked-\(label)"]))
+            let terminal = try XCTUnwrap(restoredWorkspace.panels[panelId] as? TerminalPanel)
+            let sent = terminalPendingInput(terminal) ?? ""
+            XCTAssertEqual(sent, "")
+            XCTAssertFalse(sent.contains("resume --last"), "blocked Codex restart must not degrade to resume --last")
+        }
+    }
+
     // MARK: - P7: browser-first and markdown-first layouts
 
     /// Phase 1 acceptance puts a terminal first. Phase 3 will exercise

@@ -182,7 +182,8 @@ final class SurfaceMetadataStore: @unchecked Sendable {
     private static let codexSessionAtomicKeys: Set<String> = [
         "codex.session_id",
         "codex.session_project_dir",
-        "codex.session_store"
+        "codex.session_store",
+        "codex.restart_blocked"
     ]
 
     static func validateReservedKey(_ key: String, _ value: Any) -> WriteError? {
@@ -346,10 +347,11 @@ final class SurfaceMetadataStore: @unchecked Sendable {
                 return .reservedKeyInvalidType(key, "expected string")
             }
             if s != SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionId &&
-                s != SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionStore {
+                s != SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionStore &&
+                s != SurfaceMetadataKeyName.codexRestartBlockedInvalidMarker {
                 return .reservedKeyInvalidType(
                     key,
-                    "must be invalid_session_id or invalid_session_store"
+                    "must be invalid_session_id, invalid_session_store, or invalid_restart_blocked"
                 )
             }
             return nil
@@ -567,6 +569,9 @@ final class SurfaceMetadataStore: @unchecked Sendable {
                     } else if key == SurfaceMetadataKeyName.codexSessionStore,
                               codexRestartBlockReason == nil {
                         codexRestartBlockReason = SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionStore
+                    } else if key == SurfaceMetadataKeyName.codexRestartBlocked,
+                              codexRestartBlockReason == nil {
+                        codexRestartBlockReason = SurfaceMetadataKeyName.codexRestartBlockedInvalidMarker
                     }
                 }
             }

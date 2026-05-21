@@ -979,7 +979,7 @@ def test_state_watcher_rejects_present_cwd_schema_with_unusable_global_cwd(failu
         )
 
 
-def test_state_watcher_allows_single_global_fallback_without_cwd_schema(failures: list[str]) -> None:
+def test_state_watcher_rejects_single_global_fallback_without_cwd_schema(failures: list[str]) -> None:
     session_id = "11111111-2222-3333-4444-555555555555"
     with tempfile.TemporaryDirectory(prefix="c11-codex-state-global-nocwd-") as td:
         codex_home = Path(td) / "codex-home"
@@ -1005,20 +1005,15 @@ def test_state_watcher_allows_single_global_fallback_without_cwd_schema(failures
             wrapper_cwd=shell_dir,
         )
 
-    expect(code == 0, f"state watcher no-cwd fallback: wrapper exited {code}: {stderr}", failures)
+    expect(code == 0, f"state watcher no-cwd reject: wrapper exited {code}: {stderr}", failures)
     expect(
-        metadata_log_has(c11_log, "codex.session_id", session_id),
-        f"state watcher no-cwd fallback: missing codex.session_id metadata write: {c11_log}",
+        not metadata_log_has(c11_log, "codex.session_id", session_id),
+        f"state watcher no-cwd reject: must not write unproven session id from shared global DB: {c11_log}",
         failures,
     )
     expect(
         not metadata_log_has(c11_log, "codex.session_project_dir"),
-        f"state watcher no-cwd fallback: must not invent a project dir without DB cwd: {c11_log}",
-        failures,
-    )
-    expect(
-        metadata_log_has(c11_log, "codex.session_store", "real_home"),
-        f"state watcher no-cwd fallback: missing real-home session store provenance: {c11_log}",
+        f"state watcher no-cwd reject: must not invent a project dir without DB cwd: {c11_log}",
         failures,
     )
 
@@ -1337,7 +1332,7 @@ def main() -> int:
     test_state_watcher_settles_before_writing_single_same_cwd_candidate(failures)
     test_state_watcher_rejects_single_global_cross_cwd_fallback(failures)
     test_state_watcher_rejects_present_cwd_schema_with_unusable_global_cwd(failures)
-    test_state_watcher_allows_single_global_fallback_without_cwd_schema(failures)
+    test_state_watcher_rejects_single_global_fallback_without_cwd_schema(failures)
     test_state_watcher_waits_for_cwd_candidate_before_global_fallback(failures)
     test_missing_socket_skips_hook_injection(failures)
     test_stale_socket_skips_hook_injection(failures)

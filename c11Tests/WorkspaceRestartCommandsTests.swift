@@ -479,6 +479,80 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
         )
     }
 
+    func testValidCodexSessionWriteClearsRestartBlockedMarkerAndResumesDeterministically() throws {
+        let panelId = UUID()
+        let workspaceId = UUID()
+        let surfaceId = UUID()
+        let sessionId = "11111111-2222-4333-8444-555555555555"
+        let projectDir = "/Users/test/recovered-codex"
+        defer { SurfaceMetadataStore.shared.removeSurface(workspaceId: workspaceId, surfaceId: surfaceId) }
+
+        SurfaceMetadataStore.shared.restoreFromSnapshot(
+            workspaceId: workspaceId,
+            surfaceId: surfaceId,
+            values: [
+                SurfaceMetadataKeyName.terminalType: SurfaceMetadataKeyName.terminalTypeCodex,
+                SurfaceMetadataKeyName.codexSessionId: 42,
+                SurfaceMetadataKeyName.codexSessionProjectDir: projectDir
+            ],
+            sources: [:]
+        )
+        XCTAssertEqual(
+            SurfaceMetadataStore.shared
+                .getMetadata(workspaceId: workspaceId, surfaceId: surfaceId)
+                .metadata[SurfaceMetadataKeyName.codexRestartBlocked] as? String,
+            SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionId
+        )
+
+        _ = try SurfaceMetadataStore.shared.setMetadata(
+            workspaceId: workspaceId,
+            surfaceId: surfaceId,
+            partial: [
+                SurfaceMetadataKeyName.codexSessionId: sessionId,
+                SurfaceMetadataKeyName.codexSessionProjectDir: projectDir,
+                SurfaceMetadataKeyName.codexSessionStore: SurfaceMetadataKeyName.codexSessionStoreManagedOverlay
+            ],
+            mode: .merge,
+            source: .declare
+        )
+
+        let recovered = SurfaceMetadataStore.shared.getMetadata(workspaceId: workspaceId, surfaceId: surfaceId)
+        XCTAssertNil(recovered.metadata[SurfaceMetadataKeyName.codexRestartBlocked])
+        let autosaveLikeMetadata = PersistedMetadataBridge.encodeValues(
+            recovered.metadata,
+            surfaceIdForLog: surfaceId,
+            sources: recovered.sources
+        )
+        let snapshot = makeSnapshot(panels: [
+            makePanelSnapshot(id: panelId, type: .terminal, metadata: autosaveLikeMetadata)
+        ])
+
+        XCTAssertEqual(
+            Workspace.pendingRestartCommands(from: snapshot, registry: .phase1).first?.command,
+            "cd '\(projectDir)' 2>/dev/null || true; env CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionId)\n"
+        )
+    }
+
+    func testMalformedCodexRestartBlockedMarkerFailsClosed() {
+        for value in [PersistedJSONValue.number(42), .string("bogus")] {
+            let snapshot = makeSnapshot(panels: [
+                makePanelSnapshot(
+                    id: UUID(),
+                    type: .terminal,
+                    metadata: [
+                        SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeCodex),
+                        SurfaceMetadataKeyName.codexRestartBlocked: value
+                    ]
+                )
+            ])
+
+            XCTAssertTrue(
+                Workspace.pendingRestartCommands(from: snapshot, registry: .phase1).isEmpty,
+                "present malformed codex.restart_blocked must fail closed instead of reopening resume --last"
+            )
+        }
+    }
+
     func testCodexWithEmptySessionIdFailsClosed() {
         for value in ["", "   \t "] {
             let snapshot = makeSnapshot(panels: [

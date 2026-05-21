@@ -56,6 +56,7 @@ public enum SurfaceMetadataKeyName {
     public static let codexRestartBlocked = "codex.restart_blocked"
     public static let codexRestartBlockedInvalidSessionId = "invalid_session_id"
     public static let codexRestartBlockedInvalidSessionStore = "invalid_session_store"
+    public static let codexRestartBlockedInvalidMarker = "invalid_restart_blocked"
     /// Surface-scoped provenance for the Codex session store that owns
     /// `codex.session_id`. Managed c11 profile sessions live under the
     /// c11-owned CODEX_HOME overlay; manual/legacy real-home resumes must

@@ -332,6 +332,30 @@ final class SurfaceMetadataStoreValidationTests: XCTestCase {
         )
     }
 
+    func testSnapshotSanitizeMarksMalformedCodexRestartBlockerFailClosed() {
+        for malformedValue in [42, "bogus"] as [Any] {
+            let workspace = UUID()
+            let surface = UUID()
+            defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+            store.restoreFromSnapshot(
+                workspaceId: workspace,
+                surfaceId: surface,
+                values: [
+                    SurfaceMetadataKeyName.terminalType: SurfaceMetadataKeyName.terminalTypeCodex,
+                    SurfaceMetadataKeyName.codexRestartBlocked: malformedValue
+                ],
+                sources: [:]
+            )
+
+            let current = store.getMetadata(workspaceId: workspace, surfaceId: surface)
+            XCTAssertEqual(
+                current.metadata[SurfaceMetadataKeyName.codexRestartBlocked] as? String,
+                SurfaceMetadataKeyName.codexRestartBlockedInvalidMarker
+            )
+        }
+    }
+
     func testCodexSessionPairRejectsBothKeysWhenSessionIdLosesPrecedence() throws {
         let workspace = UUID()
         let surface = UUID()

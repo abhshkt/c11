@@ -529,13 +529,13 @@ codex_state_global_fallback_matches_shell_project() {
     local candidate_project_dir="$2"
     local has_cwd_column="${3:-0}"
 
-    # Older Codex state DB schemas did not expose cwd. In that degraded case
-    # the watcher can only capture the one fresh global thread id, so allow the
-    # fallback but do not write a project dir. If the schema *does* expose cwd,
-    # an empty/NULL/relative/uncanonicalizable cwd is not proof that the row
-    # belongs to this pane and must fail closed.
+    # Older Codex state DB schemas did not expose cwd. Because c11's managed
+    # CODEX_HOME overlay is shared by panes using the same real Codex home,
+    # "one fresh global row" is not pane proof. Fail closed for those schemas
+    # and leave restore on the legacy resume --last rail rather than persisting
+    # a possibly wrong deterministic id.
     if [[ "$has_cwd_column" != "1" ]]; then
-        return 0
+        return 1
     fi
     [[ -n "$candidate_project_dir" ]] || return 1
 
@@ -916,6 +916,7 @@ clear_codex_session_metadata() {
         "--key" "codex.session_id"
         "--key" "codex.session_project_dir"
         "--key" "codex.session_store"
+        "--key" "codex.restart_blocked"
         "--source" "declare"
     )
     if [[ -n "$workspace" ]]; then

@@ -368,8 +368,14 @@ extension Workspace {
             let sessionId: String?
             switch terminalType {
             case SurfaceMetadataKeyName.terminalTypeCodex:
-                if meta[SurfaceMetadataKeyName.codexRestartBlocked] != nil {
+                switch Workspace.persistedStringValue(
+                    from: panelSnapshot.metadata,
+                    key: SurfaceMetadataKeyName.codexRestartBlocked
+                ) {
+                case .string, .invalid:
                     continue
+                case .absent:
+                    break
                 }
                 switch Workspace.persistedStringValue(
                     from: panelSnapshot.metadata,
