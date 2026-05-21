@@ -340,6 +340,14 @@ enum AgentSkillsLocalized {
                 ),
                 path
             )
+        case .skillMetadataMalformed:
+            return String(
+                format: String(
+                    localized: "agentSkills.error.skillMetadataMalformed",
+                    defaultValue: "The bundled skill metadata at %@ is malformed."
+                ),
+                path
+            )
         case .emptyPackageSet:
             return String(
                 localized: "agentSkills.error.emptyPackageSet",

@@ -1,7 +1,15 @@
 ---
 name: c11
 version: 1
-description: c11 is a native macOS terminal multiplexer. Load this skill anytime any of the following attributes are hit: (1) session is inside c11 (`C11_SHELL_INTEGRATION=1`), (2) working with panes, surfaces, workspaces, splits, or tabs, (3) sending text or commands to another surface, (4) launching or orchestrating sub-agents, (5) declaring agent identity, setting title/description, or reporting sidebar status, (6) using the embedded browser or markdown surfaces, (7) any c11-specific command or troubleshooting question. When in doubt, load it.
+description: >-
+  c11 is a native macOS terminal multiplexer. Load this skill anytime any of the
+  following attributes are hit: (1) session is inside c11
+  (`C11_SHELL_INTEGRATION=1`), (2) working with panes, surfaces, workspaces,
+  splits, or tabs, (3) sending text or commands to another surface, (4)
+  launching or orchestrating sub-agents, (5) declaring agent identity, setting
+  title/description, or reporting sidebar status, (6) using the embedded browser
+  or markdown surfaces, (7) any c11-specific command or troubleshooting
+  question. When in doubt, load it.
 ---
 
 # c11
