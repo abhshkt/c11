@@ -109,6 +109,7 @@ struct SkillInstallerError: Error, CustomStringConvertible {
         case destNotManaged
         case copyFailed
         case manifestMalformed
+        case skillMetadataMalformed
         case emptyPackageSet
     }
     let code: Code
@@ -205,7 +206,7 @@ enum SkillInstaller {
 
         let allowlist: Set<String>? = try readInstallableAllowlist(sourceDir: sourceDir, fileManager: fileManager)
 
-        let packages: [SkillInstallerPackage] = children.compactMap { url in
+        let packages: [SkillInstallerPackage] = try children.compactMap { url in
             var childIsDir: ObjCBool = false
             guard fileManager.fileExists(atPath: url.path, isDirectory: &childIsDir), childIsDir.boolValue else {
                 return nil
@@ -216,14 +217,14 @@ enum SkillInstaller {
             if let allowlist, !allowlist.contains(name) { return nil }
             return SkillInstallerPackage(
                 name: name,
-                version: readSkillVersion(from: skillMd, fileManager: fileManager) ?? "0",
+                version: try readSkillVersion(from: skillMd, fileManager: fileManager) ?? "0",
                 sourceDir: url.standardizedFileURL
             )
         }
         return packages.sorted { $0.name < $1.name }
     }
 
-    private static func readSkillVersion(from skillFile: URL, fileManager: FileManager) -> String? {
+    private static func readSkillVersion(from skillFile: URL, fileManager: FileManager) throws -> String? {
         guard let data = fileManager.contents(atPath: skillFile.path),
               let text = String(data: data, encoding: .utf8) else {
             return nil
@@ -233,17 +234,71 @@ enum SkillInstaller {
             return nil
         }
         lines.removeFirst()
-        for line in lines {
+        var inBlockScalar = false
+        var discoveredVersion: String?
+        for (index, line) in lines.enumerated() {
+            let lineNumber = index + 2
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed == "---" { break }
-            guard trimmed.hasPrefix("version:") else { continue }
-            let rawValue = String(trimmed.dropFirst("version:".count))
-            let value = rawValue
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-            return value.isEmpty ? nil : value
+            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
+            if inBlockScalar {
+                if line.first?.isWhitespace == true { continue }
+                inBlockScalar = false
+            }
+
+            guard let colon = line.firstIndex(of: ":") else {
+                throw skillMetadataError(skillFile: skillFile, line: lineNumber, reason: "expected a key/value pair")
+            }
+            let key = String(line[..<colon]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty, key.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
+                throw skillMetadataError(skillFile: skillFile, line: lineNumber, reason: "invalid key")
+            }
+            let rawValue = String(line[line.index(after: colon)...])
+            let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if value.first == ">" || value.first == "|" {
+                inBlockScalar = true
+                continue
+            }
+            if !isQuotedYAMLScalar(value), containsYAMLMappingSeparator(in: value) {
+                throw skillMetadataError(
+                    skillFile: skillFile,
+                    line: lineNumber,
+                    reason: "plain scalar contains ': '; quote it or use a block scalar"
+                )
+            }
+            guard key == "version" else { continue }
+            let cleanValue = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            if !cleanValue.isEmpty {
+                discoveredVersion = cleanValue
+            }
         }
-        return nil
+        return discoveredVersion
+    }
+
+    private static func isQuotedYAMLScalar(_ value: String) -> Bool {
+        value.hasPrefix("\"") || value.hasPrefix("'")
+    }
+
+    private static func containsYAMLMappingSeparator(in value: String) -> Bool {
+        var index = value.startIndex
+        while index < value.endIndex {
+            if value[index] == ":" {
+                let next = value.index(after: index)
+                if next == value.endIndex || value[next].isWhitespace {
+                    return true
+                }
+            }
+            index = value.index(after: index)
+        }
+        return false
+    }
+
+    private static func skillMetadataError(skillFile: URL, line: Int, reason: String) -> SkillInstallerError {
+        SkillInstallerError(
+            code: .skillMetadataMalformed,
+            message: "\(skillFile.path) has malformed skill front matter at line \(line): \(reason).",
+            path: skillFile.path
+        )
     }
 
     /// Returns the `installable` allowlist from `MANIFEST.json`, or nil if the

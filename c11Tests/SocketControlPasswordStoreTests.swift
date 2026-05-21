@@ -680,6 +680,75 @@ final class SkillInstallerPackageVersionTests: XCTestCase {
         XCTAssertEqual(packages.map(\.name), ["c11"])
         XCTAssertEqual(packages.first?.version, "7")
     }
+
+    func testDiscoverPackagesAcceptsFoldedSkillDescription() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("c11-skill-folded-description-tests-\(UUID().uuidString)", isDirectory: true)
+        let packageDir = root.appendingPathComponent("c11", isDirectory: true)
+        try FileManager.default.createDirectory(at: packageDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try """
+        {"installable":["c11"]}
+        """.write(
+            to: root.appendingPathComponent("MANIFEST.json", isDirectory: false),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        ---
+        name: c11
+        version: 7
+        description: >-
+          This folded description is allowed to contain labels: and other prose.
+        ---
+        """.write(
+            to: packageDir.appendingPathComponent("SKILL.md", isDirectory: false),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let packages = try SkillInstaller.discoverPackages(sourceDir: root)
+
+        XCTAssertEqual(packages.map(\.name), ["c11"])
+        XCTAssertEqual(packages.first?.version, "7")
+    }
+
+    func testDiscoverPackagesRejectsPlainScalarMappingSeparator() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("c11-skill-malformed-description-tests-\(UUID().uuidString)", isDirectory: true)
+        let packageDir = root.appendingPathComponent("c11", isDirectory: true)
+        try FileManager.default.createDirectory(at: packageDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try """
+        {"installable":["c11"]}
+        """.write(
+            to: root.appendingPathComponent("MANIFEST.json", isDirectory: false),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        ---
+        name: c11
+        version: 7
+        description: This breaks YAML because the prose has a label: value.
+        ---
+        """.write(
+            to: packageDir.appendingPathComponent("SKILL.md", isDirectory: false),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertThrowsError(try SkillInstaller.discoverPackages(sourceDir: root)) { error in
+            guard let installerError = error as? SkillInstallerError else {
+                XCTFail("expected SkillInstallerError, got \(error)")
+                return
+            }
+            XCTAssertEqual(installerError.code, .skillMetadataMalformed)
+            XCTAssertTrue(installerError.message.contains("line 4"))
+        }
+    }
 }
 
 // MARK: - C11-99 Area B: XCTest socket-path isolation
