@@ -9218,6 +9218,7 @@ struct CMUXCLI {
             Flags:
               --workspace <id|ref>   Target workspace (default: $CMUX_WORKSPACE_ID)
               --surface <id|ref>     Target surface (default: $CMUX_SURFACE_ID)
+              --context-json <json>   c11 wrapper fallback context; payload JSON wins
               --status-only          For stop: mark idle without notifying
 
             Example:
@@ -14506,12 +14507,18 @@ struct CMUXCLI {
             optionValue(hookArgs, name: "--surface") ?? (hookWsFlag == nil ? ProcessInfo.processInfo.environment["CMUX_SURFACE_ID"] : nil)
         )
         let startedAtArg = optionValue(hookArgs, name: "--started-at")
+        let argInputs = codexLifecycleRawInputsFromArgs(hookArgs)
         let rawInput: String
-        if let argInput = codexLifecycleRawInputFromArgs(hookArgs) {
-            rawInput = argInput
+        if let argInput = argInputs.payload {
+            rawInput = codexLifecycleRawInput(payloadInput: argInput, contextInput: argInputs.context)
+        } else if let contextInput = argInputs.context {
+            // Wrapper-provided c11 context is trusted only as fallback
+            // context. Use it directly when Codex did not append a payload
+            // argv so notify hooks cannot hang on an inherited open stdin.
+            rawInput = codexLifecycleRawInput(payloadInput: "", contextInput: contextInput)
         } else {
             let stdinInput = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            rawInput = codexLifecycleRawInput(stdinInput: stdinInput)
+            rawInput = codexLifecycleRawInput(payloadInput: stdinInput, contextInput: nil)
         }
         if let debugPath = ProcessInfo.processInfo.environment["CMUX_HOOK_DEBUG_PATH"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -14735,38 +14742,84 @@ struct CMUXCLI {
         }
     }
 
-    private func codexLifecycleRawInput(stdinInput: String) -> String {
-        let trimmedStdin = stdinInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedStdin.isEmpty {
-            return stdinInput
-        }
-        return ""
+    private struct CodexLifecycleArgInputs {
+        let payload: String?
+        let context: String?
     }
 
-    private func codexLifecycleRawInputFromArgs(_ hookArgs: [String]) -> String? {
+    private func codexLifecycleRawInput(payloadInput: String, contextInput: String?) -> String {
+        let trimmedPayload = payloadInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedContext = contextInput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmedPayload.isEmpty else {
+            return trimmedContext.isEmpty ? "" : contextInput ?? ""
+        }
+        guard !trimmedContext.isEmpty else {
+            return payloadInput
+        }
+        guard var contextObject = codexLifecycleJSONObject(trimmedContext),
+              let payloadObject = codexLifecycleJSONObject(trimmedPayload) else {
+            return payloadInput
+        }
+        for (key, value) in payloadObject {
+            contextObject[key] = value
+        }
+        guard JSONSerialization.isValidJSONObject(contextObject),
+              let data = try? JSONSerialization.data(withJSONObject: contextObject, options: []),
+              let merged = String(data: data, encoding: .utf8) else {
+            return payloadInput
+        }
+        return merged
+    }
+
+    private func codexLifecycleJSONObject(_ rawInput: String) -> [String: Any]? {
+        guard let data = rawInput.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data, options: []),
+              let object = json as? [String: Any] else {
+            return nil
+        }
+        return object
+    }
+
+    private func codexLifecycleRawInputsFromArgs(_ hookArgs: [String]) -> CodexLifecycleArgInputs {
+        var payload: String?
+        var context: String?
         var skipNext = false
+        var nextIsContext = false
         for arg in hookArgs {
+            if nextIsContext {
+                context = arg
+                nextIsContext = false
+                continue
+            }
             if skipNext {
                 skipNext = false
                 continue
             }
             switch arg {
+            case "--context-json":
+                nextIsContext = true
+                continue
             case "--workspace", "--surface", "--started-at":
                 skipNext = true
                 continue
             case "--":
                 continue
             default:
+                if arg.hasPrefix("--context-json=") {
+                    context = String(arg.dropFirst("--context-json=".count))
+                    continue
+                }
                 if arg.hasPrefix("--workspace=") || arg.hasPrefix("--surface=") || arg.hasPrefix("--started-at=") {
                     continue
                 }
                 let trimmed = arg.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") {
-                    return arg
+                if payload == nil,
+                   trimmed.hasPrefix("{") || trimmed.hasPrefix("[") {
+                    payload = arg
                 }
             }
         }
-        return nil
+        return CodexLifecycleArgInputs(payload: payload, context: context)
     }
 
     private func writeCodexLifecycleMetadata(

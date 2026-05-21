@@ -290,7 +290,7 @@ final class AgentRestartRegistryTests: XCTestCase {
                 sessionId: sessionId,
                 metadata: [:]
             ),
-            "codex resume \(sessionId)\n",
+            "CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionId)\n",
             "captured codex session ids should resume deterministically"
         )
         XCTAssertEqual(
@@ -299,7 +299,7 @@ final class AgentRestartRegistryTests: XCTestCase {
                 sessionId: nil,
                 metadata: [SurfaceMetadataKeyName.codexSessionId: sessionId]
             ),
-            "codex resume \(sessionId)\n",
+            "CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionId)\n",
             "codex.session_id metadata is the canonical restore source"
         )
     }
@@ -317,7 +317,20 @@ final class AgentRestartRegistryTests: XCTestCase {
                     SurfaceMetadataKeyName.codexSessionProjectDir: projectDir
                 ]
             ),
-            "cd '\(projectDir)' 2>/dev/null || true; codex resume \(sessionId)\n"
+            "cd '\(projectDir)' 2>/dev/null || true; CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionId)\n"
+        )
+    }
+
+    func testCodexRowPrependsProjectDirForLegacyResumeLastWhenRecorded() {
+        let registry = AgentRestartRegistry.phase1
+        let projectDir = "/Users/test/My Projects/c11"
+        XCTAssertEqual(
+            registry.resolveCommand(
+                terminalType: "codex",
+                sessionId: nil,
+                metadata: [SurfaceMetadataKeyName.codexSessionProjectDir: projectDir]
+            ),
+            "cd '\(projectDir)' 2>/dev/null || true; CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last\n"
         )
     }
 
@@ -381,7 +394,7 @@ final class AgentRestartRegistryTests: XCTestCase {
                     SurfaceMetadataKeyName.codexSessionProjectDir: "relative/path"
                 ]
             ),
-            "codex resume \(sessionId)\n",
+            "CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionId)\n",
             "malformed codex project_dir must be ignored when the session id is valid, matching Claude's restore behavior"
         )
     }

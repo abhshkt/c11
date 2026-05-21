@@ -744,6 +744,60 @@ def main() -> int:
             f"Payload-derived status must not be interpreted as a --tab option: {other_status!r}",
         )
 
+        context_shadow_session_id = "12121212-3434-5656-7878-909090909090"
+        context_shadow_output = run_cli_with_open_stdin(
+            cli_path,
+            socket_path,
+            [
+                "codex-hook",
+                "notify",
+                "--context-json",
+                json.dumps(
+                    {
+                        "cwd": str(other_project_dir),
+                        "model": "context/model",
+                        "last_assistant_message": "Context should not win",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "hook_event_name": "Stop",
+                        "session_id": context_shadow_session_id,
+                        "cwd": str(project_dir),
+                        "model": "gpt-5.5",
+                        "last_assistant_message": "Payload wins",
+                    }
+                ),
+            ],
+            env=hook_env,
+            timeout=2,
+        )
+        expect(context_shadow_output == "", f"Context-shadow notify should exit quietly, got {context_shadow_output!r}")
+        context_shadow_items = wait_for_notifications(cli_path, socket_path, workspace_uuid, minimum=1)
+        expect(
+            any(item["title"] == "Codex" and item["subtitle"].startswith("Completed") and "Payload wins" in item["body"] for item in context_shadow_items),
+            f"Expected Codex payload JSON to win over wrapper context, got {context_shadow_items!r}",
+        )
+        context_shadow_metadata = run_cli(
+            cli_path,
+            socket_path,
+            [
+                "get-metadata",
+                "--workspace",
+                workspace_id,
+                "--surface",
+                surface_id,
+                "--key",
+                "codex.session_id",
+                "--key",
+                "codex.session_project_dir",
+            ],
+        )
+        expect(
+            context_shadow_session_id in context_shadow_metadata and str(project_dir) in context_shadow_metadata,
+            f"Payload metadata should win over wrapper context metadata: {context_shadow_metadata!r}",
+        )
+
         argv_notify_session_id = "55555555-6666-7777-8888-999999999999"
         argv_notify_output = run_cli_with_open_stdin(
             cli_path,

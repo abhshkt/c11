@@ -165,6 +165,7 @@ copy_codex_home_seed_file() {
     local real_home="$1"
     local overlay="$2"
     local name="$3"
+    local refresh="${4:-0}"
     local source="$real_home/$name"
     local target="$overlay/$name"
 
@@ -172,8 +173,30 @@ copy_codex_home_seed_file() {
     if [[ -L "$target" ]]; then
         rm -f "$target" || return 1
     fi
-    if [[ ! -e "$target" ]]; then
-        cp -p "$source" "$target" 2>/dev/null || cp "$source" "$target" || return 1
+    if [[ -f "$target" ]]; then
+        local link_count
+        link_count="$(/usr/bin/stat -f '%l' "$target" 2>/dev/null || stat -c '%h' "$target" 2>/dev/null || printf '1')"
+        if [[ "$link_count" != "1" ]]; then
+            rm -f "$target" || return 1
+        fi
+    elif [[ -e "$target" ]]; then
+        return 1
+    fi
+    if [[ ! -e "$target" || "$refresh" == "1" ]]; then
+        local tmp
+        tmp="$(mktemp "$overlay/$name.tmp.XXXXXX")" || return 1
+        cp -p "$source" "$tmp" 2>/dev/null || cp "$source" "$tmp" || {
+            rm -f "$tmp" 2>/dev/null || true
+            return 1
+        }
+        chmod 600 "$tmp" 2>/dev/null || {
+            rm -f "$tmp" 2>/dev/null || true
+            return 1
+        }
+        mv -f "$tmp" "$target" || {
+            rm -f "$tmp" 2>/dev/null || true
+            return 1
+        }
     fi
     chmod 600 "$target" 2>/dev/null || return 1
 }
@@ -200,8 +223,11 @@ prune_legacy_codex_home_overlay_symlinks() {
 
 prepare_c11_codex_home_overlay() {
     local real_home="$1"
-    local base="${CMUX_CODEX_HOME_OVERLAY_DIR:-$HOME/Library/Application Support/c11/codex-home}"
+    local base="$HOME/Library/Application Support/c11/codex-home"
     local key overlay profile_tmp
+    if [[ "${CMUX_CODEX_ALLOW_TEST_HOME_OVERLAY_DIR:-}" == "1" && -n "${CMUX_CODEX_HOME_OVERLAY_DIR:-}" ]]; then
+        base="$CMUX_CODEX_HOME_OVERLAY_DIR"
+    fi
     key="$(codex_home_overlay_key "$real_home")" || return 1
     overlay="$base/$key"
 
@@ -220,9 +246,10 @@ prepare_c11_codex_home_overlay() {
 
     # Explicit seed allowlist, copied into c11-owned storage rather than
     # symlinked:
-    #   config.toml     - baseline operator Codex settings; c11 hook trust
-    #                     writes must stay inside the overlay copy.
-    #   auth.json       - account credentials needed for Codex to start.
+    #   config.toml     - one-time baseline operator Codex settings; c11 hook
+    #                     trust writes must stay inside the overlay copy.
+    #   auth.json       - account credentials needed for Codex to start;
+    #                     refreshed from the real home on each launch.
     #   AGENTS.md       - optional global operator instructions.
     #   instructions.md - legacy/global instruction file if present.
     #
@@ -230,10 +257,10 @@ prepare_c11_codex_home_overlay() {
     # logs, plugin/profile state, caches, and generated profile files is not
     # mirrored from the tenant home. Codex may create those paths in the
     # c11-owned overlay, preserving c11's no-writes-outside-runtime boundary.
-    copy_codex_home_seed_file "$real_home" "$overlay" "config.toml" || return 1
-    copy_codex_home_seed_file "$real_home" "$overlay" "auth.json" || return 1
-    copy_codex_home_seed_file "$real_home" "$overlay" "AGENTS.md" || return 1
-    copy_codex_home_seed_file "$real_home" "$overlay" "instructions.md" || return 1
+    copy_codex_home_seed_file "$real_home" "$overlay" "config.toml" "0" || return 1
+    copy_codex_home_seed_file "$real_home" "$overlay" "auth.json" "1" || return 1
+    copy_codex_home_seed_file "$real_home" "$overlay" "AGENTS.md" "0" || return 1
+    copy_codex_home_seed_file "$real_home" "$overlay" "instructions.md" "0" || return 1
 
     profile_tmp="$(mktemp "$overlay/c11.config.toml.tmp.XXXXXX")" || return 1
     chmod 600 "$profile_tmp" 2>/dev/null || return 1
@@ -1064,8 +1091,18 @@ if [[ "${CMUX_CODEX_LEGACY_RESUME_LAST:-}" == "1" ]] || codex_resume_last_arg "$
     CODEX_LEGACY_RESUME_LAST=1
     export CMUX_CODEX_LEGACY_RESUME_LAST=1
 fi
+resume_session_id="$(codex_resume_session_id_arg "$@" 2>/dev/null || true)"
+CODEX_REAL_HOME_RESUME=0
+if [[ -n "$resume_session_id" && "${CMUX_CODEX_MANAGED_RESUME:-}" != "1" ]]; then
+    # A bare/manual `codex resume <id>` inside c11 should keep Codex's normal
+    # home lookup so pre-overlay sessions remain reachable. c11 restore
+    # commands set CMUX_CODEX_MANAGED_RESUME=1 for sessions captured under the
+    # managed overlay.
+    CODEX_REAL_HOME_RESUME=1
+    export CMUX_CODEX_REAL_HOME_RESUME=1
+fi
 codex_profile_args=()
-if [[ "${CMUX_CODEX_DISABLE_PROFILE_HOOKS:-}" != "1" && "$CODEX_LEGACY_RESUME_LAST" != "1" ]] && ! codex_args_include_profile_v2 "$@"; then
+if [[ "${CMUX_CODEX_DISABLE_PROFILE_HOOKS:-}" != "1" && "$CODEX_LEGACY_RESUME_LAST" != "1" && "$CODEX_REAL_HOME_RESUME" != "1" ]] && ! codex_args_include_profile_v2 "$@"; then
     CODEX_ORIGINAL_HOME="$(codex_real_home_dir || true)"
     if [[ -n "$CODEX_ORIGINAL_HOME" ]]; then
         C11_CODEX_HOME="$(prepare_c11_codex_home_overlay "$CODEX_ORIGINAL_HOME" || true)"
@@ -1077,12 +1114,13 @@ if [[ "${CMUX_CODEX_DISABLE_PROFILE_HOOKS:-}" != "1" && "$CODEX_LEGACY_RESUME_LA
         fi
     fi
 fi
+unset CMUX_CODEX_HOME_OVERLAY_DIR
+unset CMUX_CODEX_ALLOW_TEST_HOME_OVERLAY_DIR
 set_codex_agent_pid_bg "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_CODEX_PID}"
 if codex_args_have_initial_prompt "$@"; then
     set_codex_running_for_initial_prompt_bg "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_CODEX_PID}"
 fi
 
-resume_session_id="$(codex_resume_session_id_arg "$@" 2>/dev/null || true)"
 if [[ -n "$resume_session_id" ]]; then
     export CMUX_CODEX_RESUME_SESSION_ID="$resume_session_id"
 fi
@@ -1111,7 +1149,7 @@ if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then
 fi
 notify_args+=("--started-at" "${CMUX_CODEX_START_SEC}")
 if [[ -n "$CODEX_PROJECT_DIR" ]]; then
-    notify_args+=("$(codex_hook_context_json "$CODEX_PROJECT_DIR")")
+    notify_args+=("--context-json" "$(codex_hook_context_json "$CODEX_PROJECT_DIR")")
 fi
 
 CODEX_NOTIFY_CONFIG="notify=$(toml_array "${notify_args[@]}")"

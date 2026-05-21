@@ -301,7 +301,7 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
         XCTAssertEqual(pending.first?.panelId, panelId)
         XCTAssertEqual(
             pending.first?.command,
-            "cd '\(projectDir)' 2>/dev/null || true; codex resume \(codexSessionId)\n"
+            "cd '\(projectDir)' 2>/dev/null || true; CMUX_CODEX_MANAGED_RESUME=1 codex resume \(codexSessionId)\n"
         )
     }
 
@@ -322,6 +322,30 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
         XCTAssertEqual(pending.count, 1)
         XCTAssertEqual(pending.first?.panelId, panelId)
         XCTAssertEqual(pending.first?.command, "CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last\n")
+    }
+
+    func testCodexWithoutSessionIdUsesRecordedProjectDirForLastFallback() {
+        let panelId = UUID()
+        let projectDir = "/Users/test/c11"
+        let snapshot = makeSnapshot(panels: [
+            makePanelSnapshot(
+                id: panelId,
+                type: .terminal,
+                metadata: [
+                    SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeCodex),
+                    SurfaceMetadataKeyName.codexSessionProjectDir: .string(projectDir)
+                ]
+            )
+        ])
+
+        let pending = Workspace.pendingRestartCommands(from: snapshot, registry: .phase1)
+
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertEqual(pending.first?.panelId, panelId)
+        XCTAssertEqual(
+            pending.first?.command,
+            "cd '\(projectDir)' 2>/dev/null || true; CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last\n"
+        )
     }
 
     func testCodexWithNonStringSessionIdFailsClosed() {
@@ -395,11 +419,11 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
         let byPanel = Dictionary(uniqueKeysWithValues: pending.map { ($0.panelId, $0.command) })
         XCTAssertEqual(
             byPanel[panelA],
-            "cd '\(projectDir)' 2>/dev/null || true; codex resume \(sessionA)\n"
+            "cd '\(projectDir)' 2>/dev/null || true; CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionA)\n"
         )
         XCTAssertEqual(
             byPanel[panelB],
-            "cd '\(projectDir)' 2>/dev/null || true; codex resume \(sessionB)\n"
+            "cd '\(projectDir)' 2>/dev/null || true; CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionB)\n"
         )
     }
 

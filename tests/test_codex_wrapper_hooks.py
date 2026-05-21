@@ -156,6 +156,32 @@ for expected in \
 done
 """
 
+DEFAULT_OVERLAY_CHECKING_FAKE_CODEX = DEFAULT_FAKE_CODEX + """
+if [[ -z "${CODEX_HOME-}" || "${CODEX_HOME}" != "${EXPECTED_DEFAULT_CODEX_HOME_OVERLAY_DIR}/"* ]]; then
+  echo "expected CODEX_HOME inside default c11 app-support overlay $EXPECTED_DEFAULT_CODEX_HOME_OVERLAY_DIR, got ${CODEX_HOME-__UNSET__}" >&2
+  exit 65
+fi
+if [[ "${CODEX_HOME}" == "${EXPECTED_CODEX_HOME_OVERLAY_DIR}/"* ]]; then
+  echo "unmanaged CMUX_CODEX_HOME_OVERLAY_DIR redirected CODEX_HOME to ${CODEX_HOME}" >&2
+  exit 66
+fi
+if [[ -n "${CMUX_CODEX_HOME_OVERLAY_DIR-}" || -n "${CMUX_CODEX_ALLOW_TEST_HOME_OVERLAY_DIR-}" ]]; then
+  echo "test-only overlay override env leaked into child Codex" >&2
+  exit 67
+fi
+"""
+
+AUTH_REFRESH_CHECKING_FAKE_CODEX = DEFAULT_FAKE_CODEX + """
+if [[ "$(cat "$CODEX_HOME/auth.json")" != *"real-auth-token"* ]]; then
+  echo "overlay auth.json was not refreshed from the real Codex home" >&2
+  exit 72
+fi
+if [[ "$(cat "$CODEX_HOME/config.toml")" != *"overlay-local config with trust"* ]]; then
+  echo "overlay config.toml should preserve c11-local trust/config state" >&2
+  exit 73
+fi
+"""
+
 REAL_HOME_CHECKING_FAKE_CODEX = DEFAULT_FAKE_CODEX + """
 if [[ "${CODEX_HOME-}" != "${EXPECTED_CODEX_REAL_HOME}" ]]; then
   echo "legacy resume --last must use real Codex home, got CODEX_HOME=${CODEX_HOME-__UNSET__}" >&2
@@ -169,6 +195,27 @@ if [[ "${CMUX_CODEX_LEGACY_RESUME_LAST-}" != "1" ]]; then
   echo "legacy resume --last marker should be visible to child Codex" >&2
   exit 64
 fi
+"""
+
+MANUAL_RESUME_REAL_HOME_FAKE_CODEX = DEFAULT_FAKE_CODEX + """
+if [[ "${CODEX_HOME-}" != "${EXPECTED_CODEX_REAL_HOME}" ]]; then
+  echo "manual resume must use real Codex home, got CODEX_HOME=${CODEX_HOME-__UNSET__}" >&2
+  exit 68
+fi
+if [[ -n "${CMUX_CODEX_HOME_OVERLAY-}" ]]; then
+  echo "manual resume must not export c11 overlay home: ${CMUX_CODEX_HOME_OVERLAY}" >&2
+  exit 69
+fi
+if [[ -n "${CMUX_CODEX_MANAGED_RESUME-}" ]]; then
+  echo "manual resume must not masquerade as a c11-managed restore" >&2
+  exit 70
+fi
+for arg in "$@"; do
+  if [[ "$arg" == "--profile-v2" ]]; then
+    echo "manual resume must not inject c11 profile args" >&2
+    exit 71
+  fi
+done
 """
 
 
@@ -243,6 +290,7 @@ def run_wrapper(
     real_codex_script: str = DEFAULT_FAKE_CODEX,
     wrapper_cwd: Path | None = None,
     overlay_setup: str = "dir",
+    allow_overlay_override: bool = True,
 ) -> tuple[int, list[str], list[str], str, str, str, str]:
     with tempfile.TemporaryDirectory(prefix="c11-codex-wrapper-test-") as td:
         tmp = Path(td)
@@ -273,15 +321,27 @@ def run_wrapper(
         (real_codex_home / "skills").mkdir()
         (real_codex_home / "skills" / "tenant-skill.md").write_text("tenant skill\n", encoding="utf-8")
         overlay_dir = tmp / "c11-codex-home-overlays"
+        overlay_key = hashlib.md5(str(real_codex_home).encode("utf-8")).hexdigest()
         if overlay_setup == "dir":
             overlay_dir.mkdir(parents=True, exist_ok=True)
         elif overlay_setup == "legacy-mirror":
             overlay_dir.mkdir(parents=True, exist_ok=True)
-            overlay_key = hashlib.md5(str(real_codex_home).encode("utf-8")).hexdigest()
             overlay = overlay_dir / overlay_key
             overlay.mkdir(parents=True, exist_ok=True)
             for name in ("config.toml", "auth.json", "history.jsonl", "state_5.sqlite", "logs_2.sqlite", "sessions", "skills"):
                 (overlay / name).symlink_to(real_codex_home / name, target_is_directory=(real_codex_home / name).is_dir())
+        elif overlay_setup == "stale-auth":
+            overlay_dir.mkdir(parents=True, exist_ok=True)
+            overlay = overlay_dir / overlay_key
+            overlay.mkdir(parents=True, exist_ok=True)
+            (overlay / "config.toml").write_text("# overlay-local config with trust\n", encoding="utf-8")
+            (overlay / "auth.json").write_text('{"token":"stale-auth-token"}\n', encoding="utf-8")
+        elif overlay_setup == "hardlinked-seed":
+            overlay_dir.mkdir(parents=True, exist_ok=True)
+            overlay = overlay_dir / overlay_key
+            overlay.mkdir(parents=True, exist_ok=True)
+            os.link(real_codex_home / "config.toml", overlay / "config.toml")
+            os.link(real_codex_home / "auth.json", overlay / "auth.json")
         elif overlay_setup == "symlink-base":
             overlay_target = tmp / "overlay-target"
             overlay_target.mkdir(parents=True, exist_ok=True)
@@ -290,7 +350,6 @@ def run_wrapper(
             overlay_dir.mkdir(parents=True, exist_ok=True)
             overlay_target = tmp / "overlay-leaf-target"
             overlay_target.mkdir(parents=True, exist_ok=True)
-            overlay_key = hashlib.md5(str(real_codex_home).encode("utf-8")).hexdigest()
             (overlay_dir / overlay_key).symlink_to(overlay_target, target_is_directory=True)
         else:
             raise ValueError(f"unknown overlay setup {overlay_setup!r}")
@@ -337,6 +396,13 @@ exit 0
         env["CMUX_CODEX_DISABLE_STATE_WATCHER"] = "1"
         env["CODEX_HOME"] = str(real_codex_home)
         env["CMUX_CODEX_HOME_OVERLAY_DIR"] = str(overlay_dir)
+        if allow_overlay_override:
+            env["CMUX_CODEX_ALLOW_TEST_HOME_OVERLAY_DIR"] = "1"
+        else:
+            fake_home = tmp / "fake-home"
+            fake_home.mkdir()
+            env["HOME"] = str(fake_home)
+            env["EXPECTED_DEFAULT_CODEX_HOME_OVERLAY_DIR"] = str(fake_home / "Library" / "Application Support" / "c11" / "codex-home")
         env["EXPECTED_CODEX_HOME_OVERLAY_DIR"] = str(overlay_dir)
         env["EXPECTED_CODEX_REAL_HOME"] = str(real_codex_home)
         if extra_env:
@@ -412,6 +478,7 @@ def test_live_socket_injects_notify_bridge(failures: list[str]) -> None:
     expect('tui.notification_condition="always"' in combined, f"live socket: missing TUI always-notify config: {configs}", failures)
     for token in ["codex-hook", "notify", "--workspace", "workspace:test", "--surface", "surface:test", "--started-at"]:
         expect(token in combined, f"live socket: notify config missing {token!r}: {configs}", failures)
+    expect("--context-json" in combined, f"live socket: notify context must be named, not positional JSON: {configs}", failures)
     hook_commands = [config for config in configs if config.startswith("hooks.")]
     expect(
         hook_commands == [],
@@ -475,6 +542,39 @@ def test_profile_layer_prunes_legacy_mirror_symlinks(failures: list[str]) -> Non
     )
     expect(code == 0, f"legacy profile mirror: wrapper exited {code}: {stderr}", failures)
     expect("--profile-v2" in real_argv, f"legacy profile mirror: expected managed c11 profile, got {real_argv}", failures)
+
+
+def test_profile_layer_refreshes_auth_without_replacing_config(failures: list[str]) -> None:
+    code, real_argv, _, stderr, _, _, _ = run_wrapper(
+        socket_state="live",
+        argv=["hello"],
+        real_codex_script=AUTH_REFRESH_CHECKING_FAKE_CODEX,
+        overlay_setup="stale-auth",
+    )
+    expect(code == 0, f"stale auth seed: wrapper exited {code}: {stderr}", failures)
+    expect("--profile-v2" in real_argv, f"stale auth seed: expected managed c11 profile, got {real_argv}", failures)
+
+
+def test_profile_layer_replaces_hardlinked_seed_files(failures: list[str]) -> None:
+    code, real_argv, _, stderr, _, _, _ = run_wrapper(
+        socket_state="live",
+        argv=["hello"],
+        real_codex_script=PROFILE_CHECKING_FAKE_CODEX,
+        overlay_setup="hardlinked-seed",
+    )
+    expect(code == 0, f"hardlinked seed: wrapper exited {code}: {stderr}", failures)
+    expect("--profile-v2" in real_argv, f"hardlinked seed: expected managed c11 profile, got {real_argv}", failures)
+
+
+def test_profile_layer_ignores_unmanaged_overlay_override(failures: list[str]) -> None:
+    code, real_argv, _, stderr, _, _, _ = run_wrapper(
+        socket_state="live",
+        argv=["hello"],
+        real_codex_script=DEFAULT_OVERLAY_CHECKING_FAKE_CODEX,
+        allow_overlay_override=False,
+    )
+    expect(code == 0, f"unmanaged overlay override: wrapper exited {code}: {stderr}", failures)
+    expect("--profile-v2" in real_argv, f"unmanaged overlay override: expected managed c11 profile, got {real_argv}", failures)
 
 
 def test_legacy_resume_last_uses_real_codex_home(failures: list[str]) -> None:
@@ -953,6 +1053,7 @@ def test_resume_session_id_exported_for_metadata_capture(failures: list[str]) ->
     code, real_argv, c11_log, stderr, _, _, resume_value = run_wrapper(
         socket_state="live",
         argv=["resume", session_id],
+        real_codex_script=MANUAL_RESUME_REAL_HOME_FAKE_CODEX,
     )
     expect(code == 0, f"resume: wrapper exited {code}: {stderr}", failures)
     expect(real_argv[-2:] == ["resume", session_id], f"resume: expected original args last, got {real_argv}", failures)
@@ -963,10 +1064,23 @@ def test_resume_session_id_exported_for_metadata_capture(failures: list[str]) ->
     expect(any("set-metadata --key codex.session_project_dir" in line for line in c11_log), f"resume: missing project-dir metadata write: {c11_log}", failures)
     expect(resume_value == session_id, f"resume: expected CMUX_CODEX_RESUME_SESSION_ID, got {resume_value!r}", failures)
 
+    code, real_argv, c11_log, stderr, _, _, resume_value = run_wrapper(
+        socket_state="live",
+        argv=["resume", session_id],
+        extra_env={"CMUX_CODEX_MANAGED_RESUME": "1"},
+        real_codex_script=PROFILE_CHECKING_FAKE_CODEX,
+    )
+    expect(code == 0, f"managed resume: wrapper exited {code}: {stderr}", failures)
+    expect(real_argv[-2:] == ["resume", session_id], f"managed resume: expected original args last, got {real_argv}", failures)
+    expect("--profile-v2" in real_argv, f"managed resume: expected c11 overlay profile args, got {real_argv}", failures)
+    expect(any("set-metadata --key codex.session_project_dir" in line for line in c11_log), f"managed resume: missing project-dir metadata write: {c11_log}", failures)
+    expect(resume_value == session_id, f"managed resume: expected CMUX_CODEX_RESUME_SESSION_ID, got {resume_value!r}", failures)
+
     with tempfile.TemporaryDirectory(prefix="c11-codex-resume-cwd-") as td:
         code, real_argv, c11_log, stderr, _, _, resume_value = run_wrapper(
             socket_state="live",
             argv=["--cd", td, "resume", "-m", "gpt-5.5", session_id],
+            real_codex_script=MANUAL_RESUME_REAL_HOME_FAKE_CODEX,
         )
     expect(code == 0, f"resume with options: wrapper exited {code}: {stderr}", failures)
     expect(real_argv[-6:] == ["--cd", td, "resume", "-m", "gpt-5.5", session_id], f"resume with options: expected original args last, got {real_argv}", failures)
@@ -981,6 +1095,9 @@ def main() -> int:
     test_live_socket_uses_c11_owned_profile_layer(failures)
     test_profile_layer_rejects_symlinked_overlay_paths(failures)
     test_profile_layer_prunes_legacy_mirror_symlinks(failures)
+    test_profile_layer_refreshes_auth_without_replacing_config(failures)
+    test_profile_layer_replaces_hardlinked_seed_files(failures)
+    test_profile_layer_ignores_unmanaged_overlay_override(failures)
     test_legacy_resume_last_uses_real_codex_home(failures)
     test_plain_interactive_codex_does_not_mark_running(failures)
     test_fresh_launch_clears_declare_session_metadata(failures)

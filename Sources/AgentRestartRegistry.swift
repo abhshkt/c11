@@ -147,6 +147,16 @@ struct AgentRestartRegistry: Sendable {
             return "\(resume)\n"
         },
         Row(terminalType: SurfaceMetadataKeyName.terminalTypeCodex) { sessionId, metadata in
+            func recordedProjectDir() -> String? {
+                guard let rawDir = metadata[SurfaceMetadataKeyName.codexSessionProjectDir]?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                      !rawDir.isEmpty,
+                      isValidCodexSessionProjectDir(rawDir) else {
+                    return nil
+                }
+                return rawDir
+            }
+
             let raw: String
             if metadata.keys.contains(SurfaceMetadataKeyName.codexSessionId) {
                 guard let candidate = metadata[SurfaceMetadataKeyName.codexSessionId]?
@@ -165,14 +175,15 @@ struct AgentRestartRegistry: Sendable {
                 // overlay intentionally does not mirror sessions/state DBs.
                 // The wrapper also detects this argv shape for manual runs,
                 // but the env marker keeps restored legacy snapshots explicit.
-                return "CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last\n"
+                let resumeLast = "CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last"
+                if let rawDir = recordedProjectDir() {
+                    return "cd \(shellSingleQuote(rawDir)) 2>/dev/null || true; \(resumeLast)\n"
+                }
+                return "\(resumeLast)\n"
             }
             guard isValidCodexSessionId(raw) else { return nil }
-            let resume = "codex resume \(raw)"
-            if let rawDir = metadata[SurfaceMetadataKeyName.codexSessionProjectDir]?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-               !rawDir.isEmpty,
-               isValidCodexSessionProjectDir(rawDir) {
+            let resume = "CMUX_CODEX_MANAGED_RESUME=1 codex resume \(raw)"
+            if let rawDir = recordedProjectDir() {
                 return "cd \(shellSingleQuote(rawDir)) 2>/dev/null || true; \(resume)\n"
             }
             return "\(resume)\n"
