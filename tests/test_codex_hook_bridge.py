@@ -165,6 +165,7 @@ def main() -> int:
         return 1
 
     workspace_id = ""
+    extra_workspace_ids: list[str] = []
     try:
         workspace_id = parse_ok_id(run_cli(cli_path, socket_path, ["new-workspace"]))
         surfaces_output = run_cli(cli_path, socket_path, ["list-panels", "--workspace", workspace_id])
@@ -199,10 +200,45 @@ def main() -> int:
             any(item["title"] == "Guard" for item in post_no_target_items),
             "No-target codex-hook must not clear notifications from the focused workspace",
         )
+        stale_workspace_output = run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "prompt-submit"],
+            payload={"hook_event_name": "UserPromptSubmit", "cwd": str(Path.cwd())},
+            env={"CMUX_WORKSPACE_ID": "workspace:does-not-exist", "CMUX_SURFACE_ID": surface_id},
+        )
+        expect(stale_workspace_output == "", f"Stale-workspace codex-hook should exit quietly, got {stale_workspace_output!r}")
+        post_stale_workspace_items = list_notifications(cli_path, socket_path, workspace_uuid)
+        expect(
+            any(item["title"] == "Guard" for item in post_stale_workspace_items),
+            "Stale-workspace codex-hook must not fall back to the focused workspace",
+        )
+        stale_surface_output = run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "permission-request"],
+            payload={
+                "hook_event_name": "PermissionRequest",
+                "session_id": "99999999-aaaa-bbbb-cccc-dddddddddddd",
+                "cwd": str(Path.cwd()),
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo should-not-route"},
+            },
+            env={"CMUX_WORKSPACE_ID": workspace_id, "CMUX_SURFACE_ID": "surface:does-not-exist"},
+        )
+        expect(stale_surface_output == "", f"Stale-surface codex-hook should exit quietly, got {stale_surface_output!r}")
+        post_stale_surface_items = list_notifications(cli_path, socket_path, workspace_uuid)
+        expect(
+            all(not (item["title"] == "Codex" and item["subtitle"] == "Permission") for item in post_stale_surface_items),
+            f"Stale-surface codex-hook must not notify the focused surface: {post_stale_surface_items!r}",
+        )
+        status_after_stale_surface = run_cli(cli_path, socket_path, ["list-status", "--workspace", workspace_id])
+        expect("codex=Needs input" not in status_after_stale_surface, f"Stale-surface hook must not set status: {status_after_stale_surface!r}")
         help_output = run_cli(
             cli_path,
             socket_path,
             ["codex-hook", "help"],
+            payload={"hook_event_name": "Stop", "last_assistant_message": "not a hook invocation"},
             clean_c11_env=True,
         )
         expect("c11 codex-hook" in help_output, f"codex-hook help should not require a target workspace: {help_output!r}")
@@ -432,6 +468,32 @@ def main() -> int:
         status = run_cli(cli_path, socket_path, ["list-status", "--workspace", workspace_id])
         expect("codex=Running" in status, f"Expected Running status after PostToolUse, got {status!r}")
 
+        other_workspace_id = parse_ok_id(run_cli(cli_path, socket_path, ["new-workspace"]))
+        extra_workspace_ids.append(other_workspace_id)
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "pre-tool-use"],
+            payload={
+                "hook_event_name": "PreToolUse",
+                "session_id": session_id,
+                "cwd": str(project_dir),
+                "tool_name": "Bash",
+                "tool_input": {"command": f"--tab={other_workspace_id}\n--color=#ff0000"},
+            },
+            env=hook_env,
+        )
+        status = run_cli(cli_path, socket_path, ["list-status", "--workspace", workspace_id])
+        expect(
+            f"codex=Running --tab={other_workspace_id}" in status,
+            f"Payload-derived status should be single-line data on the target workspace: {status!r}",
+        )
+        other_status = run_cli(cli_path, socket_path, ["list-status", "--workspace", other_workspace_id])
+        expect(
+            f"codex=Running --tab={other_workspace_id}" not in other_status,
+            f"Payload-derived status must not be interpreted as a --tab option: {other_status!r}",
+        )
+
         run_cli(
             cli_path,
             socket_path,
@@ -496,6 +558,11 @@ def main() -> int:
         print(f"FAIL: {exc}")
         return 1
     finally:
+        for extra_workspace_id in reversed(extra_workspace_ids):
+            try:
+                run_cli(cli_path, socket_path, ["close-workspace", "--workspace", extra_workspace_id])
+            except Exception:
+                pass
         if workspace_id:
             try:
                 run_cli(cli_path, socket_path, ["close-workspace", "--workspace", workspace_id])

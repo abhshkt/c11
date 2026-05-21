@@ -14491,11 +14491,20 @@ struct CMUXCLI {
         client: SocketClient,
         telemetry: CLISocketSentryTelemetry
     ) throws {
+        if let explicitSubcommand = commandArgs.first?.lowercased(),
+           ["help", "--help", "-h"].contains(explicitSubcommand) {
+            telemetry.breadcrumb("codex-hook.help")
+            printCodexHookUsage()
+            return
+        }
+
         let requestedSubcommand = commandArgs.first?.lowercased() ?? "help"
         let hookArgs = Array(commandArgs.dropFirst())
         let hookWsFlag = optionValue(hookArgs, name: "--workspace")
-        let workspaceArg = hookWsFlag ?? ProcessInfo.processInfo.environment["CMUX_WORKSPACE_ID"]
-        let surfaceArg = optionValue(hookArgs, name: "--surface") ?? (hookWsFlag == nil ? ProcessInfo.processInfo.environment["CMUX_SURFACE_ID"] : nil)
+        let workspaceArg = Self.normalizedEnvValue(hookWsFlag ?? ProcessInfo.processInfo.environment["CMUX_WORKSPACE_ID"])
+        let surfaceArg = Self.normalizedEnvValue(
+            optionValue(hookArgs, name: "--surface") ?? (hookWsFlag == nil ? ProcessInfo.processInfo.environment["CMUX_SURFACE_ID"] : nil)
+        )
         let startedAtArg = optionValue(hookArgs, name: "--started-at")
         let stdinInput = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let rawInput = codexLifecycleRawInput(stdinInput: stdinInput, hookArgs: hookArgs)
@@ -14507,7 +14516,6 @@ struct CMUXCLI {
         let parsedInput = parseCodexHookInput(rawInput: rawInput)
         let subcommand = normalizedCodexHookSubcommand(requestedSubcommand, parsedInput: parsedInput)
         let statusOnly = hasFlag(hookArgs, name: "--status-only")
-        let hasCodexHookWorkspaceTarget = workspaceArg != nil
         telemetry.breadcrumb(
             "codex-hook.input",
             data: [
@@ -14516,7 +14524,7 @@ struct CMUXCLI {
                 "has_session_id": parsedInput.sessionId != nil,
                 "has_workspace_flag": hookWsFlag != nil,
                 "has_surface_flag": optionValue(hookArgs, name: "--surface") != nil,
-                "has_workspace_target": hasCodexHookWorkspaceTarget,
+                "has_workspace_target": workspaceArg != nil,
                 "has_surface_target": surfaceArg != nil,
                 "status_only": statusOnly
             ]
@@ -14524,15 +14532,11 @@ struct CMUXCLI {
 
         if ["help", "--help", "-h"].contains(subcommand) {
             telemetry.breadcrumb("codex-hook.help")
-            print(
-                """
-                c11 codex-hook <session-start|stop|notify|permission-request|prompt-submit|pre-tool-use|post-tool-use> [--workspace <id|index>] [--surface <id|index>] [--status-only]
-                """
-            )
+            printCodexHookUsage()
             return
         }
 
-        if !hasCodexHookWorkspaceTarget {
+        guard let fallbackWorkspaceId = resolveWorkspaceIdForCodexHook(workspaceArg, client: client, telemetry: telemetry) else {
             // Codex hooks can be configured globally in ~/.codex. When they
             // fire outside a c11-managed terminal they have no pane target.
             // Do not fall back to the currently focused c11 workspace; that
@@ -14554,17 +14558,16 @@ struct CMUXCLI {
             return
         }
 
-        let fallbackWorkspaceId = try resolveWorkspaceIdForClaudeHook(workspaceArg, client: client)
-
         switch subcommand {
         case "session-start", "active":
             telemetry.breadcrumb("codex-hook.session-start")
             let workspaceId = fallbackWorkspaceId
-            let surfaceId = try resolveSurfaceIdForClaudeHook(
+            guard let surfaceId = resolveSurfaceIdForCodexHook(
                 surfaceArg,
                 workspaceId: workspaceId,
-                client: client
-            )
+                client: client,
+                telemetry: telemetry
+            ) else { return }
             writeCodexLifecycleMetadata(
                 client: client,
                 workspaceId: workspaceId,
@@ -14584,11 +14587,12 @@ struct CMUXCLI {
         case "stop", "idle":
             telemetry.breadcrumb("codex-hook.stop")
             let workspaceId = fallbackWorkspaceId
-            let surfaceId = try resolveSurfaceIdForClaudeHook(
+            guard let surfaceId = resolveSurfaceIdForCodexHook(
                 surfaceArg,
                 workspaceId: workspaceId,
-                client: client
-            )
+                client: client,
+                telemetry: telemetry
+            ) else { return }
             let cwdFallback = codexRuntimeCwdFallback()
             writeCodexLifecycleMetadata(
                 client: client,
@@ -14619,11 +14623,12 @@ struct CMUXCLI {
         case "notify", "notification":
             telemetry.breadcrumb("codex-hook.notify")
             let workspaceId = fallbackWorkspaceId
-            let surfaceId = try resolveSurfaceIdForClaudeHook(
+            guard let surfaceId = resolveSurfaceIdForCodexHook(
                 surfaceArg,
                 workspaceId: workspaceId,
-                client: client
-            )
+                client: client,
+                telemetry: telemetry
+            ) else { return }
             let cwdFallback = codexRuntimeCwdFallback()
             writeCodexLifecycleMetadata(
                 client: client,
@@ -14668,11 +14673,12 @@ struct CMUXCLI {
         case "permission-request", "permission":
             telemetry.breadcrumb("codex-hook.permission-request")
             let workspaceId = fallbackWorkspaceId
-            let surfaceId = try resolveSurfaceIdForClaudeHook(
+            guard let surfaceId = resolveSurfaceIdForCodexHook(
                 surfaceArg,
                 workspaceId: workspaceId,
-                client: client
-            )
+                client: client,
+                telemetry: telemetry
+            ) else { return }
             let body = describeCodexPermissionRequest(parsedInput.object)
             let payload = [
                 "Codex",
@@ -15181,6 +15187,106 @@ struct CMUXCLI {
         }
     }
 
+    private func printCodexHookUsage() {
+        print(
+            """
+            c11 codex-hook <session-start|stop|notify|permission-request|prompt-submit|pre-tool-use|post-tool-use> [--workspace <id|index>] [--surface <id|index>] [--status-only]
+            """
+        )
+    }
+
+    private func resolveWorkspaceIdForCodexHook(
+        _ raw: String?,
+        client: SocketClient,
+        telemetry: CLISocketSentryTelemetry
+    ) -> String? {
+        guard let raw = Self.normalizedEnvValue(raw) else {
+            telemetry.breadcrumb("codex-hook.workspace-target.missing")
+            return nil
+        }
+
+        let candidate: String
+        do {
+            if isUUID(raw) {
+                candidate = raw
+            } else if isHandleRef(raw) || Int(raw) != nil {
+                candidate = try resolveWorkspaceId(raw, client: client)
+            } else {
+                telemetry.breadcrumb("codex-hook.workspace-target.malformed")
+                return nil
+            }
+
+            let probe = try client.sendV2(method: "surface.list", params: ["workspace_id": candidate])
+            guard probe["surfaces"] is [[String: Any]] else {
+                telemetry.breadcrumb("codex-hook.workspace-target.unresolvable")
+                return nil
+            }
+            return candidate
+        } catch {
+            telemetry.breadcrumb("codex-hook.workspace-target.unresolvable")
+            return nil
+        }
+    }
+
+    private func resolveSurfaceIdForCodexHook(
+        _ raw: String?,
+        workspaceId: String,
+        client: SocketClient,
+        telemetry: CLISocketSentryTelemetry
+    ) -> String? {
+        guard let raw = Self.normalizedEnvValue(raw) else {
+            telemetry.breadcrumb("codex-hook.surface-target.missing")
+            return nil
+        }
+
+        do {
+            let listed = try client.sendV2(method: "surface.list", params: ["workspace_id": workspaceId])
+            let surfaces = listed["surfaces"] as? [[String: Any]] ?? []
+            if isUUID(raw) {
+                guard surfaces.contains(where: { ($0["id"] as? String) == raw }) else {
+                    telemetry.breadcrumb("codex-hook.surface-target.unresolvable")
+                    return nil
+                }
+                return raw
+            }
+
+            if isHandleRef(raw) || Int(raw) != nil {
+                let candidate = try resolveSurfaceId(raw, workspaceId: workspaceId, client: client)
+                guard surfaces.contains(where: { ($0["id"] as? String) == candidate }) else {
+                    telemetry.breadcrumb("codex-hook.surface-target.unresolvable")
+                    return nil
+                }
+                return candidate
+            }
+
+            telemetry.breadcrumb("codex-hook.surface-target.malformed")
+            return nil
+        } catch {
+            telemetry.breadcrumb("codex-hook.surface-target.unresolvable")
+            return nil
+        }
+    }
+
+    private func sanitizeCodexStatusValue(_ raw: String) -> String {
+        let singleLineScalars = raw.unicodeScalars.map { scalar -> Character in
+            switch scalar {
+            case "\n", "\r", "\t":
+                return " "
+            default:
+                return (scalar.value < 32 || scalar.value == 127) ? " " : Character(scalar)
+            }
+        }
+        let collapsed = String(singleLineScalars)
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !collapsed.isEmpty else { return "Running" }
+        if collapsed.count <= 80 {
+            return collapsed
+        }
+        return String(collapsed.prefix(77)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
+    }
+
     private func setCodexStatus(
         client: SocketClient,
         workspaceId: String,
@@ -15189,7 +15295,8 @@ struct CMUXCLI {
         color: String,
         pid: Int? = nil
     ) throws {
-        var cmd = "set_status codex \(value) --icon=\(icon) --color=\(color) --tab=\(workspaceId)"
+        let safeValue = socketQuote(sanitizeCodexStatusValue(value))
+        var cmd = "set_status codex \(safeValue) --icon=\(icon) --color=\(color) --tab=\(workspaceId)"
         if let pid {
             cmd += " --pid=\(pid)"
         }

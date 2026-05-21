@@ -67,6 +67,9 @@ fi
 """
 
 PROFILE_CHECKING_FAKE_CODEX = DEFAULT_FAKE_CODEX + """
+stat_mode() {
+  /usr/bin/stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
+}
 if [[ -z "${CODEX_HOME-}" || "${CODEX_HOME}" != "${EXPECTED_CODEX_HOME_OVERLAY_DIR}/"* ]]; then
   echo "expected CODEX_HOME inside $EXPECTED_CODEX_HOME_OVERLAY_DIR, got ${CODEX_HOME-__UNSET__}" >&2
   exit 48
@@ -87,6 +90,20 @@ if [[ -L "$CODEX_HOME/config.toml" ]]; then
   echo "overlay config.toml must be c11-owned, not a symlink" >&2
   exit 52
 fi
+for private_dir in "$EXPECTED_CODEX_HOME_OVERLAY_DIR" "$CODEX_HOME"; do
+  mode="$(stat_mode "$private_dir")"
+  if [[ "$mode" != "700" ]]; then
+    echo "$private_dir must be owner-only (700), got $mode" >&2
+    exit 56
+  fi
+done
+for private_file in "$CODEX_HOME/config.toml" "$CODEX_HOME/c11.config.toml"; do
+  mode="$(stat_mode "$private_file")"
+  if [[ "$mode" != "600" ]]; then
+    echo "$private_file must be owner-only (600), got $mode" >&2
+    exit 57
+  fi
+done
 if [[ "$(cat "$CODEX_HOME/config.toml")" != *"# real Codex config"* ]]; then
   echo "overlay config.toml did not preserve the real Codex config contents" >&2
   exit 53

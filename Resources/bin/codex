@@ -153,7 +153,13 @@ prepare_c11_codex_home_overlay() {
     key="$(codex_home_overlay_key "$real_home")" || return 1
     overlay="$base/$key"
 
-    mkdir -p "$overlay" || return 1
+    local old_umask
+    old_umask="$(umask)"
+    umask 077
+    trap 'umask "$old_umask"; trap - RETURN' RETURN
+
+    mkdir -p "$base" "$overlay" || return 1
+    chmod 700 "$base" "$overlay" 2>/dev/null || return 1
 
     local entry name target
     for entry in "$real_home"/* "$real_home"/.[!.]* "$real_home"/..?*; do
@@ -182,6 +188,9 @@ prepare_c11_codex_home_overlay() {
     fi
     if [[ ! -e "$overlay_config" && -f "$real_config" ]]; then
         cp -p "$real_config" "$overlay_config" 2>/dev/null || cp "$real_config" "$overlay_config" || return 1
+    fi
+    if [[ -f "$overlay_config" ]]; then
+        chmod 600 "$overlay_config" 2>/dev/null || return 1
     fi
 
     profile_tmp="$overlay/c11.config.toml.tmp.$$"
@@ -241,7 +250,9 @@ command = "command -v c11 >/dev/null && c11 codex-hook stop --status-only || tru
 timeout = 10
 statusMessage = "Updating c11 status"
 EOF
+    chmod 600 "$profile_tmp" 2>/dev/null || return 1
     mv "$profile_tmp" "$overlay/c11.config.toml" || return 1
+    chmod 600 "$overlay/c11.config.toml" 2>/dev/null || return 1
     printf '%s' "$overlay"
 }
 
