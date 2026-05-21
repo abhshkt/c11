@@ -2763,6 +2763,20 @@ final class TerminalSurface: Identifiable, ObservableObject {
         return merged
     }
 
+    static func agentIntegrationHookEnvironment(
+        claudeHooksEnabled: Bool,
+        codexHooksEnabled: Bool
+    ) -> [String: String] {
+        var env: [String: String] = [:]
+        if !claudeHooksEnabled {
+            env["CMUX_CLAUDE_HOOKS_DISABLED"] = "1"
+        }
+        if !codexHooksEnabled {
+            env["CMUX_CODEX_HOOKS_DISABLED"] = "1"
+        }
+        return env
+    }
+
     func isAttached(to view: GhosttyNSView) -> Bool {
         attachedView === view && surface != nil
     }
@@ -3228,9 +3242,12 @@ final class TerminalSurface: Identifiable, ObservableObject {
             setManagedEnvironmentValue("CMUX_PORT_RANGE", String(Self.sessionPortRangeSize))
         }
 
-        let claudeHooksEnabled = ClaudeCodeIntegrationSettings.hooksEnabled()
-        if !claudeHooksEnabled {
-            setManagedEnvironmentValue("CMUX_CLAUDE_HOOKS_DISABLED", "1")
+        let hookEnvironment = Self.agentIntegrationHookEnvironment(
+            claudeHooksEnabled: ClaudeCodeIntegrationSettings.hooksEnabled(),
+            codexHooksEnabled: CodexIntegrationSettings.hooksEnabled()
+        )
+        for (key, value) in hookEnvironment {
+            setManagedEnvironmentValue(key, value)
         }
 
         if let cliBinPath = Bundle.main.resourceURL?.appendingPathComponent("bin").path {

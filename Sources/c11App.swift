@@ -4079,6 +4079,18 @@ enum ClaudeCodeIntegrationSettings {
     }
 }
 
+enum CodexIntegrationSettings {
+    static let hooksEnabledKey = "codexHooksEnabled"
+    static let defaultHooksEnabled = true
+
+    static func hooksEnabled(defaults: UserDefaults = .standard) -> Bool {
+        if defaults.object(forKey: hooksEnabledKey) == nil {
+            return defaultHooksEnabled
+        }
+        return defaults.bool(forKey: hooksEnabledKey)
+    }
+}
+
 enum WelcomeSettings {
     static let shownKey = "cmuxWelcomeShown"
     static let spikeURL = "https://stage11.ai"
@@ -4394,6 +4406,8 @@ struct SettingsView: View {
     @AppStorage(SocketControlSettings.appStorageKey) private var socketControlMode = SocketControlSettings.defaultMode.rawValue
     @AppStorage(ClaudeCodeIntegrationSettings.hooksEnabledKey)
     private var claudeCodeHooksEnabled = ClaudeCodeIntegrationSettings.defaultHooksEnabled
+    @AppStorage(CodexIntegrationSettings.hooksEnabledKey)
+    private var codexHooksEnabled = CodexIntegrationSettings.defaultHooksEnabled
     @AppStorage(TelemetrySettings.sendAnonymousTelemetryKey)
     private var sendAnonymousTelemetry = TelemetrySettings.defaultSendAnonymousTelemetry
     @AppStorage("cmuxPortBase") private var cmuxPortBase = 9100
@@ -6242,7 +6256,21 @@ struct SettingsView: View {
 
             SettingsCardDivider()
 
-            SettingsCardNote(String(localized: "settings.automation.claudeCode.note", defaultValue: "When enabled, c11 wraps the claude command to inject session tracking and notification hooks. Disable if you prefer to manage Claude Code hooks yourself."))
+            SettingsCardRow(
+                String(localized: "settings.automation.codex", defaultValue: "Codex Integration"),
+                subtitle: codexHooksEnabled
+                    ? String(localized: "settings.automation.codex.subtitleOn", defaultValue: "Sidebar shows Codex session status and notifications.")
+                    : String(localized: "settings.automation.codex.subtitleOff", defaultValue: "Codex runs without c11 integration.")
+            ) {
+                Toggle("", isOn: $codexHooksEnabled)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .accessibilityIdentifier("SettingsCodexHooksToggle")
+            }
+
+            SettingsCardDivider()
+
+            SettingsCardNote(String(localized: "settings.automation.agentIntegrations.note", defaultValue: "When enabled, c11 wraps the corresponding agent command to inject session tracking and notification hooks. Disable an integration if you prefer to manage that agent's hooks yourself."))
         }
     }
 
@@ -6398,6 +6426,7 @@ struct SettingsView: View {
         }
         socketControlMode = SocketControlSettings.defaultMode.rawValue
         claudeCodeHooksEnabled = ClaudeCodeIntegrationSettings.defaultHooksEnabled
+        codexHooksEnabled = CodexIntegrationSettings.defaultHooksEnabled
         sendAnonymousTelemetry = TelemetrySettings.defaultSendAnonymousTelemetry
         browserSearchEngine = BrowserSearchSettings.defaultSearchEngine.rawValue
         browserSearchSuggestionsEnabled = BrowserSearchSettings.defaultSearchSuggestionsEnabled
