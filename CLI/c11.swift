@@ -14860,20 +14860,15 @@ struct CMUXCLI {
             switch sessionCapture.source {
             case "heuristic":
                 heuristicSessionMetadata[SurfaceMetadataKeyName.codexSessionId] = sessionCapture.sessionId
+                if let projectDir = sessionCapture.projectDir {
+                    heuristicSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
+                }
             default:
                 declareSessionMetadata[SurfaceMetadataKeyName.codexSessionId] = sessionCapture.sessionId
+                if let projectDir = cwd ?? sessionCapture.projectDir {
+                    declareSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
+                }
             }
-        }
-        if let capture = sessionCapture,
-           capture.source == "heuristic" {
-            if let projectDir = capture.projectDir {
-                heuristicSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
-            }
-        } else if let cwd {
-            declareSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = cwd
-        } else if let capture = sessionCapture,
-                  let projectDir = capture.projectDir {
-            declareSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
         }
         if !heuristicSessionMetadata.isEmpty {
             writeCodexLifecycleMetadataChunk(
@@ -14959,7 +14954,9 @@ struct CMUXCLI {
             let inferredProjectDir = codexValidatedProjectDir(inferredSession.cwd)
             if let cwd {
                 guard let inferredProjectDir,
-                      inferredProjectDir == cwd else {
+                      let inferredCanonical = codexCanonicalProjectDir(inferredProjectDir),
+                      let cwdCanonical = codexCanonicalProjectDir(cwd),
+                      inferredCanonical == cwdCanonical else {
                     telemetry.breadcrumb(
                         "codex-hook.state-db.skip",
                         data: ["reason": "project-mismatch"]

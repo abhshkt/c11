@@ -584,6 +584,77 @@ def main() -> int:
             f"Global state DB fallback must not pair another cwd with target cwd metadata: {mismatch_metadata!r}",
         )
 
+        stale_session_id = "13131313-2424-3535-4646-575757575757"
+        for source in ("declare", "heuristic"):
+            run_cli(
+                cli_path,
+                socket_path,
+                [
+                    "clear-metadata",
+                    "--workspace",
+                    workspace_id,
+                    "--surface",
+                    surface_id,
+                    "--key",
+                    "codex.session_id",
+                    "--key",
+                    "codex.session_project_dir",
+                    "--source",
+                    source,
+                ],
+            )
+        run_cli(
+            cli_path,
+            socket_path,
+            [
+                "set-metadata",
+                "--key",
+                "codex.session_id",
+                "--value",
+                stale_session_id,
+                "--workspace",
+                workspace_id,
+                "--surface",
+                surface_id,
+                "--source",
+                "declare",
+            ],
+        )
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "session-start"],
+            payload={
+                "hook_event_name": "SessionStart",
+                "cwd": str(other_project_dir),
+                "model": "gpt-5.5",
+            },
+            env=hook_env,
+        )
+        stale_pair_metadata = run_cli(
+            cli_path,
+            socket_path,
+            [
+                "get-metadata",
+                "--workspace",
+                workspace_id,
+                "--surface",
+                surface_id,
+                "--key",
+                "codex.session_id",
+                "--key",
+                "codex.session_project_dir",
+            ],
+        )
+        expect(
+            f"codex.session_id = {stale_session_id}" in stale_pair_metadata,
+            f"Existing session id should remain present when no replacement is captured: {stale_pair_metadata!r}",
+        )
+        expect(
+            str(other_project_dir) not in stale_pair_metadata,
+            f"Hook without a captured session id must not re-pair stale id with new cwd: {stale_pair_metadata!r}",
+        )
+
         operator_model = "operator/model"
         guarded_session_id = "33333333-4444-5555-6666-777777777777"
         run_cli(
