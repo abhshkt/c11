@@ -235,6 +235,7 @@ enum SkillInstaller {
         }
         lines.removeFirst()
         var inBlockScalar = false
+        var discoveredVersion: String?
         for (index, line) in lines.enumerated() {
             let lineNumber = index + 2
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -267,9 +268,11 @@ enum SkillInstaller {
             }
             guard key == "version" else { continue }
             let cleanValue = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-            return cleanValue.isEmpty ? nil : cleanValue
+            if !cleanValue.isEmpty {
+                discoveredVersion = cleanValue
+            }
         }
-        return nil
+        return discoveredVersion
     }
 
     private static func isQuotedYAMLScalar(_ value: String) -> Bool {
