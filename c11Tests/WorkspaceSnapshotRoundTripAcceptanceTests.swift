@@ -311,8 +311,8 @@ final class WorkspaceSnapshotRoundTripAcceptanceTests: XCTestCase {
         let restoredWorkspace = try XCTUnwrap(resolveWorkspace(from: result.workspaceRef))
 
         let expected: [String: String] = [
-            "codex-a": "cd '\(projectDir)' 2>/dev/null || true; codex resume \(sessionA)",
-            "codex-b": "cd '\(projectDir)' 2>/dev/null || true; codex resume \(sessionB)"
+            "codex-a": "cd '\(projectDir)' 2>/dev/null || true; env CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionA)",
+            "codex-b": "cd '\(projectDir)' 2>/dev/null || true; env CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionB)"
         ]
 
         for surfaceSpec in plan.surfaces {
@@ -329,6 +329,149 @@ final class WorkspaceSnapshotRoundTripAcceptanceTests: XCTestCase {
                 "captured same-cwd Codex sessions must not use ambiguous resume --last"
             )
         }
+    }
+
+    func testRestoreCodexWithNonStringSessionIdFailsClosedInsteadOfResumeLast() throws {
+        try skipIfReleaseBuild()
+
+        let projectDir = "/Users/test/non-string-codex"
+        let plan = WorkspaceApplyPlan(
+            version: 1,
+            workspace: WorkspaceSpec(
+                title: "Codex invalid id restore",
+                workingDirectory: projectDir
+            ),
+            layout: .pane(.init(surfaceIds: ["codex-invalid"])),
+            surfaces: [
+                SurfaceSpec(
+                    id: "codex-invalid",
+                    kind: .terminal,
+                    title: "codex invalid",
+                    command: nil,
+                    metadata: [
+                        SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeCodex),
+                        SurfaceMetadataKeyName.codexSessionId: .number(42),
+                        SurfaceMetadataKeyName.codexSessionProjectDir: .string(projectDir)
+                    ]
+                )
+            ]
+        )
+
+        let result = WorkspaceLayoutExecutor.apply(
+            plan,
+            options: ApplyOptions(select: false, restartRegistry: .phase1),
+            dependencies: makeDependencies()
+        )
+
+        XCTAssertFalse(result.workspaceRef.isEmpty)
+        XCTAssertTrue(
+            result.failures.contains { failure in
+                failure.code == "restart_registry_declined" &&
+                failure.message.contains("codex.session_id=non_string")
+            },
+            "non-string codex.session_id should fail closed visibly: \(result.failures)"
+        )
+
+        let restoredWorkspace = try XCTUnwrap(resolveWorkspace(from: result.workspaceRef))
+        let panelId = try XCTUnwrap(parseUUIDSuffix(result.surfaceRefs["codex-invalid"]))
+        let terminal = try XCTUnwrap(restoredWorkspace.panels[panelId] as? TerminalPanel)
+        let sent = terminalPendingInput(terminal) ?? ""
+        XCTAssertEqual(sent, "")
+        XCTAssertFalse(sent.contains("resume --last"), "invalid captured Codex ids must not degrade to resume --last")
+    }
+
+    func testRestoreCodexWithNonStringSessionStoreFailsClosedInsteadOfOverlayResume() throws {
+        try skipIfReleaseBuild()
+
+        let projectDir = "/Users/test/non-string-codex-store"
+        let sessionId = "abc12345-ef67-890a-bcde-f0123456789a"
+        let plan = WorkspaceApplyPlan(
+            version: 1,
+            workspace: WorkspaceSpec(
+                title: "Codex invalid store restore",
+                workingDirectory: projectDir
+            ),
+            layout: .pane(.init(surfaceIds: ["codex-invalid-store"])),
+            surfaces: [
+                SurfaceSpec(
+                    id: "codex-invalid-store",
+                    kind: .terminal,
+                    title: "codex invalid store",
+                    command: nil,
+                    metadata: [
+                        SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeCodex),
+                        SurfaceMetadataKeyName.codexSessionId: .string(sessionId),
+                        SurfaceMetadataKeyName.codexSessionStore: .number(42)
+                    ]
+                )
+            ]
+        )
+
+        let result = WorkspaceLayoutExecutor.apply(
+            plan,
+            options: ApplyOptions(select: false, restartRegistry: .phase1),
+            dependencies: makeDependencies()
+        )
+
+        XCTAssertFalse(result.workspaceRef.isEmpty)
+        XCTAssertTrue(
+            result.failures.contains { failure in
+                failure.code == "restart_registry_declined" &&
+                failure.message.contains("codex.session_store=non_string")
+            },
+            "non-string codex.session_store should fail closed visibly: \(result.failures)"
+        )
+
+        let restoredWorkspace = try XCTUnwrap(resolveWorkspace(from: result.workspaceRef))
+        let panelId = try XCTUnwrap(parseUUIDSuffix(result.surfaceRefs["codex-invalid-store"]))
+        let terminal = try XCTUnwrap(restoredWorkspace.panels[panelId] as? TerminalPanel)
+        let sent = terminalPendingInput(terminal) ?? ""
+        XCTAssertEqual(sent, "")
+        XCTAssertFalse(sent.contains("CMUX_CODEX_MANAGED_RESUME"), "invalid provenance must not default to managed overlay")
+    }
+
+    func testRestoreCodexWithoutCodexSessionIdIgnoresStaleClaudeSessionId() throws {
+        try skipIfReleaseBuild()
+
+        let staleClaudeSessionId = "abc12345-ef67-890a-bcde-f0123456789a"
+        let plan = WorkspaceApplyPlan(
+            version: 1,
+            workspace: WorkspaceSpec(
+                title: "Codex stale claude id",
+                workingDirectory: "/Users/test/stale-claude"
+            ),
+            layout: .pane(.init(surfaceIds: ["codex-stale-claude"])),
+            surfaces: [
+                SurfaceSpec(
+                    id: "codex-stale-claude",
+                    kind: .terminal,
+                    title: "codex stale claude",
+                    command: nil,
+                    metadata: [
+                        SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeCodex),
+                        SurfaceMetadataKeyName.claudeSessionId: .string(staleClaudeSessionId)
+                    ]
+                )
+            ]
+        )
+
+        let result = WorkspaceLayoutExecutor.apply(
+            plan,
+            options: ApplyOptions(select: false, restartRegistry: .phase1),
+            dependencies: makeDependencies()
+        )
+
+        XCTAssertFalse(result.workspaceRef.isEmpty)
+        XCTAssertTrue(
+            result.failures.allSatisfy { $0.code != "restart_registry_declined" },
+            "stale claude.session_id should not be treated as a malformed Codex id: \(result.failures)"
+        )
+        let restoredWorkspace = try XCTUnwrap(resolveWorkspace(from: result.workspaceRef))
+        let panelId = try XCTUnwrap(parseUUIDSuffix(result.surfaceRefs["codex-stale-claude"]))
+        let terminal = try XCTUnwrap(restoredWorkspace.panels[panelId] as? TerminalPanel)
+        let sent = terminalPendingInput(terminal) ?? ""
+        XCTAssertEqual(sent, "env CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last")
+        XCTAssertFalse(sent.contains(staleClaudeSessionId), "Codex restore must not consume claude.session_id")
     }
 
     // MARK: - P7: browser-first and markdown-first layouts

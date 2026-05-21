@@ -370,6 +370,17 @@ extension Workspace {
             case SurfaceMetadataKeyName.terminalTypeCodex:
                 switch Workspace.persistedStringValue(
                     from: panelSnapshot.metadata,
+                    key: SurfaceMetadataKeyName.codexSessionStore
+                ) {
+                case .string(let value):
+                    meta[SurfaceMetadataKeyName.codexSessionStore] = value
+                case .absent:
+                    break
+                case .invalid:
+                    continue
+                }
+                switch Workspace.persistedStringValue(
+                    from: panelSnapshot.metadata,
                     key: SurfaceMetadataKeyName.codexSessionId
                 ) {
                 case .string(let value):

@@ -11,7 +11,7 @@ Claude Code emits a `SessionStart` hook event on startup with a JSON payload tha
 
 Both writes are best-effort: the hook never surfaces an error banner to Claude Code just because the c11 control socket is unreachable. The `surface.set_metadata` write in particular follows the existing advisory pattern and emits one of three breadcrumbs — `claude-hook.session-id.metadata-write.{ok,skipped,failed}` — so the outcome is visible in telemetry.
 
-Codex emits a `SessionStart` hook event with `session_id`, `cwd`, `model`, and related fields. The bundled `Resources/bin/codex` wrapper injects a c11-owned Codex profile only inside a live c11 terminal. That profile forwards trusted Codex hooks to `c11 codex-hook`, which writes `codex.session_id`, `codex.session_project_dir`, valid `model` ids, and `terminal_type=codex` onto the current surface. The wrapper uses a c11-owned Codex home overlay: auth/state entries are linked for continuity, but `config.toml` is copied into the overlay so Codex hook-trust writes do not mutate `~/.codex/config.toml`.
+Codex emits a `SessionStart` hook event with `session_id`, `cwd`, `model`, and related fields. The bundled `Resources/bin/codex` wrapper injects a c11-owned Codex profile only inside a live c11 terminal. That profile forwards trusted Codex hooks to `c11 codex-hook`, which writes `codex.session_id`, `codex.session_project_dir`, `codex.session_store`, valid `model` ids, and `terminal_type=codex` onto the current surface. The wrapper uses a c11-owned Codex home overlay for managed profile sessions. It copies an allowlist of seed files (`config.toml`, refreshed `auth.json`, `AGENTS.md`, `instructions.md`) into the overlay; if the real `auth.json` disappears, the stale overlay copy is removed. Mutable Codex runtime state such as `state_5.sqlite`, sessions, history, logs, and caches is not mirrored into the overlay.
 
 ## The operator-installed SessionStart hook
 
@@ -61,12 +61,12 @@ c11 restore --in-place 01KQ0XYZ…
 | Layer | Where the session id lives | How it's consumed |
 |---|---|---|
 | `~/.cmuxterm/claude-hook-sessions.json` | SessionStore record | Sidebar UI, stale-session detection |
-| Surface metadata (`SurfaceMetadataStore`) | `claude.session_id` / `codex.session_id`, source `.explicit` | Phase 1 restart registry; serialised into snapshot envelopes |
+| Surface metadata (`SurfaceMetadataStore`) | `claude.session_id` / `codex.session_id`, plus `codex.session_project_dir` and `codex.session_store`, source `.declare`/`.heuristic` for runtime bridge writes or `.explicit` for operator-authored writes | Phase 1 restart registry; serialised into snapshot envelopes |
 | Snapshot envelope (`WorkspaceSnapshotFile`) | Embedded plan → `surfaces[i].metadata[...]` | Loaded at restore time; executor synthesises the matching resume command when registry is set |
 
 ## Privacy and storage
 
-Snapshot envelopes store `claude.session_id` values in cleartext under `~/.c11-snapshots/` (and the legacy `~/.cmux-snapshots/`). Session ids are UUIDv4 transcript-lookup keys, not credentials: they cannot mint a new Claude session and they grant no API or auth scope on their own.
+Snapshot envelopes store `claude.session_id` and `codex.session_id` values in cleartext under `~/.c11-snapshots/` (and the legacy `~/.cmux-snapshots/`). They also store Codex project directories and session-store provenance when those values were captured. Session ids are UUID transcript/session lookup keys, not credentials: they cannot mint a new session and they grant no API or auth scope on their own. The c11-owned Codex overlay stores a refreshed copy of `auth.json` so managed Codex profile sessions can start without writing to `~/.codex`; treat that overlay as local credential-bearing application support data.
 
 The threat model is narrow: a local attacker who already has read access to the operator's home directory can pair a captured session id with `~/.claude/projects/<project>/` to enumerate historical Claude transcripts. If that is outside your threat model, no action is needed. If it is inside, treat `~/.c11-snapshots/` with the same hygiene you give `~/.claude/projects/`: restrict permissions, exclude from shared-volume backups, or delete snapshots after restore.
 

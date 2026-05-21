@@ -235,24 +235,69 @@ enum WorkspaceLayoutExecutor {
             } else if let registry = options.restartRegistry {
                 let surfaceMeta = stringMetadata(surfaceSpec.metadata)
                 let terminalType = surfaceMeta[SurfaceMetadataKeyName.terminalType]
-                let sessionId = surfaceMeta[SurfaceMetadataKeyName.claudeSessionId]
-                let synthesized = registry.resolveCommand(
-                    terminalType: terminalType,
-                    sessionId: sessionId,
-                    metadata: surfaceMeta
+                let sessionId = terminalType == SurfaceMetadataKeyName.terminalTypeCodex
+                    ? nil
+                    : surfaceMeta[SurfaceMetadataKeyName.claudeSessionId]
+                let codexSessionIdState = persistedStringValue(
+                    surfaceSpec.metadata,
+                    key: SurfaceMetadataKeyName.codexSessionId
                 )
-                if synthesized == nil, (terminalType != nil || sessionId != nil) {
-                    // Registry saw inputs but declined — make it visible.
-                    let message = "restart registry declined for terminal_type=\(terminalType ?? "nil") sessionId=\(sessionId?.prefix(8).description ?? "nil")"
+                let codexSessionStoreState = persistedStringValue(
+                    surfaceSpec.metadata,
+                    key: SurfaceMetadataKeyName.codexSessionStore
+                )
+                if terminalType == SurfaceMetadataKeyName.terminalTypeCodex,
+                   case .invalid = codexSessionIdState {
+                    // A typed snapshot can carry non-string JSON. Dropping a
+                    // present-but-invalid Codex session id before the
+                    // registry call would make the registry synthesize the
+                    // legacy `codex resume --last` fallback, weakening the
+                    // deterministic-resume contract. Treat it as a visible
+                    // decline instead.
+                    let message = "restart registry declined for terminal_type=codex codex.session_id=non_string"
                     walkState.warnings.append(message)
                     walkState.failures.append(ApplyFailure(
                         code: "restart_registry_declined",
                         step: "surface[\(surfaceSpec.id)].command.resolve",
                         message: message
                     ))
+                    effectiveCommand = nil
+                    usedRegistry = false
+                } else if terminalType == SurfaceMetadataKeyName.terminalTypeCodex,
+                          case .invalid = codexSessionStoreState {
+                    // Same fail-closed rule for provenance: dropping a
+                    // present-but-invalid store would make the registry
+                    // default a deterministic id to the managed overlay,
+                    // even if the persisted session actually lives in the
+                    // real Codex home.
+                    let message = "restart registry declined for terminal_type=codex codex.session_store=non_string"
+                    walkState.warnings.append(message)
+                    walkState.failures.append(ApplyFailure(
+                        code: "restart_registry_declined",
+                        step: "surface[\(surfaceSpec.id)].command.resolve",
+                        message: message
+                    ))
+                    effectiveCommand = nil
+                    usedRegistry = false
+                } else {
+                    let synthesized = registry.resolveCommand(
+                        terminalType: terminalType,
+                        sessionId: sessionId,
+                        metadata: surfaceMeta
+                    )
+                    if synthesized == nil, (terminalType != nil || sessionId != nil) {
+                        // Registry saw inputs but declined — make it visible.
+                        let message = "restart registry declined for terminal_type=\(terminalType ?? "nil") sessionId=\(sessionId?.prefix(8).description ?? "nil")"
+                        walkState.warnings.append(message)
+                        walkState.failures.append(ApplyFailure(
+                            code: "restart_registry_declined",
+                            step: "surface[\(surfaceSpec.id)].command.resolve",
+                            message: message
+                        ))
+                    }
+                    effectiveCommand = synthesized
+                    usedRegistry = synthesized != nil
                 }
-                effectiveCommand = synthesized
-                usedRegistry = synthesized != nil
             } else {
                 effectiveCommand = nil
                 usedRegistry = false
@@ -1170,9 +1215,9 @@ enum WorkspaceLayoutExecutor {
     /// restart-registry contract takes string-valued inputs only —
     /// `terminal_type` and `claude.session_id` are both strings in v1 —
     /// so non-string values (numbers, booleans, arrays, objects) are
-    /// silently dropped here rather than surfaced as warnings; a
-    /// non-string `terminal_type` would have been caught by
-    /// `SurfaceMetadataStore.validateReservedKey` at write time.
+    /// intentionally omitted. Callers must preflight reserved keys where an
+    /// omitted-but-present value would change semantics, e.g. Codex's
+    /// deterministic session id must not degrade to `resume --last`.
     fileprivate nonisolated static func stringMetadata(
         _ metadata: [String: PersistedJSONValue]?
     ) -> [String: String] {
@@ -1184,6 +1229,23 @@ enum WorkspaceLayoutExecutor {
             }
         }
         return out
+    }
+
+    fileprivate enum PersistedStringState: Equatable {
+        case absent
+        case string(String)
+        case invalid
+    }
+
+    fileprivate nonisolated static func persistedStringValue(
+        _ metadata: [String: PersistedJSONValue]?,
+        key: String
+    ) -> PersistedStringState {
+        guard let value = metadata?[key] else { return .absent }
+        if case .string(let s) = value {
+            return .string(s)
+        }
+        return .invalid
     }
 
     /// C11-25 fix S4+E1: returns `true` when the plan declares

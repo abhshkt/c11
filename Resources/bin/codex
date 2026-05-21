@@ -110,7 +110,17 @@ json_string() {
 
 codex_hook_context_json() {
     local cwd="$1"
-    printf '{"cwd":%s}' "$(json_string "$cwd")"
+    printf '{"c11_context":{"cwd":%s}}' "$(json_string "$cwd")"
+}
+
+codex_hook_command_toml_string() {
+    local subcommand="$1"
+    local command="command -v c11 >/dev/null && c11 codex-hook ${subcommand}"
+    if [[ -n "${CODEX_PROJECT_DIR:-}" ]]; then
+        command+=" --context-json '$(codex_hook_context_json "$CODEX_PROJECT_DIR")'"
+    fi
+    command+=" || true"
+    toml_string "$command"
 }
 
 codex_real_home_dir() {
@@ -169,7 +179,12 @@ copy_codex_home_seed_file() {
     local source="$real_home/$name"
     local target="$overlay/$name"
 
-    [[ -f "$source" ]] || return 0
+    if [[ ! -f "$source" ]]; then
+        if [[ "$refresh" == "1" ]]; then
+            rm -f "$target" 2>/dev/null || return 1
+        fi
+        return 0
+    fi
     if [[ -L "$target" ]]; then
         rm -f "$target" || return 1
     fi
@@ -225,6 +240,8 @@ prepare_c11_codex_home_overlay() {
     local real_home="$1"
     local base="$HOME/Library/Application Support/c11/codex-home"
     local key overlay profile_tmp
+    local session_start_command prompt_submit_command permission_request_command
+    local pre_tool_command post_tool_command stop_command
     if [[ "${CMUX_CODEX_ALLOW_TEST_HOME_OVERLAY_DIR:-}" == "1" && -n "${CMUX_CODEX_HOME_OVERLAY_DIR:-}" ]]; then
         base="$CMUX_CODEX_HOME_OVERLAY_DIR"
     fi
@@ -262,9 +279,16 @@ prepare_c11_codex_home_overlay() {
     copy_codex_home_seed_file "$real_home" "$overlay" "AGENTS.md" "0" || return 1
     copy_codex_home_seed_file "$real_home" "$overlay" "instructions.md" "0" || return 1
 
+    session_start_command="$(codex_hook_command_toml_string "session-start")" || return 1
+    prompt_submit_command="$(codex_hook_command_toml_string "prompt-submit")" || return 1
+    permission_request_command="$(codex_hook_command_toml_string "permission-request")" || return 1
+    pre_tool_command="$(codex_hook_command_toml_string "pre-tool-use")" || return 1
+    post_tool_command="$(codex_hook_command_toml_string "post-tool-use")" || return 1
+    stop_command="$(codex_hook_command_toml_string "stop --status-only")" || return 1
+
     profile_tmp="$(mktemp "$overlay/c11.config.toml.tmp.XXXXXX")" || return 1
     chmod 600 "$profile_tmp" 2>/dev/null || return 1
-    cat > "$profile_tmp" <<'EOF' || return 1
+    cat > "$profile_tmp" <<EOF || return 1
 [features]
 hooks = true
 
@@ -273,7 +297,7 @@ matcher = "startup|resume|clear"
 
 [[hooks.SessionStart.hooks]]
 type = "command"
-command = "command -v c11 >/dev/null && c11 codex-hook session-start || true"
+command = ${session_start_command}
 timeout = 10
 statusMessage = "Connecting Codex to c11"
 
@@ -281,7 +305,7 @@ statusMessage = "Connecting Codex to c11"
 
 [[hooks.UserPromptSubmit.hooks]]
 type = "command"
-command = "command -v c11 >/dev/null && c11 codex-hook prompt-submit || true"
+command = ${prompt_submit_command}
 timeout = 10
 statusMessage = "Updating c11 status"
 
@@ -290,7 +314,7 @@ matcher = "*"
 
 [[hooks.PermissionRequest.hooks]]
 type = "command"
-command = "command -v c11 >/dev/null && c11 codex-hook permission-request || true"
+command = ${permission_request_command}
 timeout = 10
 statusMessage = "Notifying c11"
 
@@ -299,7 +323,7 @@ matcher = "*"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "command -v c11 >/dev/null && c11 codex-hook pre-tool-use || true"
+command = ${pre_tool_command}
 timeout = 5
 statusMessage = "Updating c11 status"
 
@@ -308,7 +332,7 @@ matcher = "*"
 
 [[hooks.PostToolUse.hooks]]
 type = "command"
-command = "command -v c11 >/dev/null && c11 codex-hook post-tool-use || true"
+command = ${post_tool_command}
 timeout = 5
 statusMessage = "Updating c11 status"
 
@@ -316,7 +340,7 @@ statusMessage = "Updating c11 status"
 
 [[hooks.Stop.hooks]]
 type = "command"
-command = "command -v c11 >/dev/null && c11 codex-hook stop --status-only || true"
+command = ${stop_command}
 timeout = 10
 statusMessage = "Updating c11 status"
 EOF
@@ -402,8 +426,27 @@ codex_state_db_thread_query() {
 
     local cwd_select="''"
     local where_clauses=()
+    # The sqlite3 CLI output is still row/column delimited text. Fail closed
+    # in SQL before outputting values whose bytes could corrupt that framing
+    # (for example a cwd containing LF/TAB that starts with this pane's cwd).
+    # The shell validators remain the second line of defense.
+    where_clauses+=("typeof(id) = 'text'")
+    where_clauses+=("id <> ''")
+    where_clauses+=("instr(id, char(0)) = 0")
+    where_clauses+=("instr(id, char(9)) = 0")
+    where_clauses+=("instr(id, char(10)) = 0")
+    where_clauses+=("instr(id, char(13)) = 0")
+    where_clauses+=("instr(id, char(39)) = 0")
     if codex_state_db_has_column "$db_path" "cwd"; then
         cwd_select="cwd"
+        where_clauses+=("typeof(cwd) = 'text'")
+        where_clauses+=("cwd <> ''")
+        where_clauses+=("substr(cwd, 1, 1) = '/'")
+        where_clauses+=("instr(cwd, char(0)) = 0")
+        where_clauses+=("instr(cwd, char(9)) = 0")
+        where_clauses+=("instr(cwd, char(10)) = 0")
+        where_clauses+=("instr(cwd, char(13)) = 0")
+        where_clauses+=("instr(cwd, char(39)) = 0")
         if [[ -n "$cwd_filter" ]]; then
             where_clauses+=("cwd = '${cwd_filter}'")
         fi
@@ -466,6 +509,41 @@ codex_normalize_project_dir() {
         *$'\n'*|*$'\r'*|*$'\t'*|*"'"*) return 1 ;;
     esac
     printf '%s' "$candidate"
+}
+
+codex_project_dir_for_compare() {
+    local candidate="$1"
+    [[ -n "$candidate" && "$candidate" == /* ]] || return 1
+    case "$candidate" in
+        *$'\n'*|*$'\r'*|*$'\t'*|*"'"*) return 1 ;;
+    esac
+    if [[ -d "$candidate" ]]; then
+        candidate="$(cd "$candidate" 2>/dev/null && pwd -P)" || return 1
+    fi
+    [[ "$candidate" == /* ]] || return 1
+    printf '%s' "$candidate"
+}
+
+codex_state_global_fallback_matches_shell_project() {
+    local shell_project_dir="$1"
+    local candidate_project_dir="$2"
+    local has_cwd_column="${3:-0}"
+
+    # Older Codex state DB schemas did not expose cwd. In that degraded case
+    # the watcher can only capture the one fresh global thread id, so allow the
+    # fallback but do not write a project dir. If the schema *does* expose cwd,
+    # an empty/NULL/relative/uncanonicalizable cwd is not proof that the row
+    # belongs to this pane and must fail closed.
+    if [[ "$has_cwd_column" != "1" ]]; then
+        return 0
+    fi
+    [[ -n "$candidate_project_dir" ]] || return 1
+
+    local shell_compare candidate_compare
+    shell_compare="$(codex_project_dir_for_compare "$shell_project_dir" 2>/dev/null)" || return 1
+    candidate_compare="$(codex_project_dir_for_compare "$candidate_project_dir" 2>/dev/null)" || return 1
+
+    [[ "$candidate_compare" == "$shell_compare" ]]
 }
 
 codex_explicit_project_dir_arg() {
@@ -780,18 +858,26 @@ sanitize_codex_parent_environment() {
     fi
 }
 
-set_codex_metadata_value() {
+set_codex_session_metadata() {
     local c11_bin="$1"
     local socket="$2"
     local workspace="$3"
     local surface="$4"
-    local key="$5"
-    local value="$6"
-    local source="${7:-declare}"
+    local session_id="$5"
+    local project_dir="${6:-}"
+    local session_store="${7:-managed_overlay}"
+    local source="${8:-declare}"
 
-    [[ -n "$value" ]] || return 0
+    [[ -n "$session_id" ]] || return 0
 
-    local args=("$c11_bin" "--socket" "$socket" "set-metadata" "--key" "$key" "--value" "$value")
+    local metadata
+    metadata="{\"codex.session_id\":$(json_string "$session_id"),\"codex.session_store\":$(json_string "$session_store")"
+    if [[ "$project_dir" == /* ]]; then
+        metadata+=",\"codex.session_project_dir\":$(json_string "$project_dir")"
+    fi
+    metadata+="}"
+
+    local args=("$c11_bin" "--socket" "$socket" "set-metadata" "--json" "$metadata")
     if [[ -n "$workspace" ]]; then
         args+=("--workspace" "$workspace")
     fi
@@ -816,6 +902,7 @@ clear_codex_session_metadata() {
         "clear-metadata"
         "--key" "codex.session_id"
         "--key" "codex.session_project_dir"
+        "--key" "codex.session_store"
         "--source" "declare"
     )
     if [[ -n "$workspace" ]]; then
@@ -924,6 +1011,7 @@ start_codex_state_watcher() {
     local start_sec="$5"
     local codex_pid="$6"
     local shell_project_dir="$7"
+    local session_store="${8:-managed_overlay}"
 
     [[ "$start_sec" =~ ^[0-9]+$ && "$start_sec" -gt 0 ]] || return 0
     [[ -n "$shell_project_dir" ]] || return 0
@@ -942,38 +1030,39 @@ start_codex_state_watcher() {
             }
 
             local query rows
-            query="$(codex_state_db_thread_query "$db_path" "$floor_ms" "$shell_project_dir" 2>/dev/null)" || {
-                sleep 1
-                continue
-            }
-            rows="$(/usr/bin/sqlite3 -readonly -separator $'\t' "$db_path" "$query" 2>/dev/null)" || {
-                sleep 1
-                continue
-            }
+            local has_cwd_column=0
+            if codex_state_db_has_column "$db_path" "cwd"; then
+                has_cwd_column=1
+                query="$(codex_state_db_thread_query "$db_path" "$floor_ms" "$shell_project_dir" 2>/dev/null)" || {
+                    sleep 1
+                    continue
+                }
+                rows="$(/usr/bin/sqlite3 -readonly -separator $'\t' "$db_path" "$query" 2>/dev/null)" || {
+                    sleep 1
+                    continue
+                }
 
-            read_codex_state_rows "$rows"
+                read_codex_state_rows "$rows"
 
-            if [[ "$CODEX_STATE_COUNT" -eq 1 ]]; then
-                local initial_session_id="$CODEX_STATE_SESSION_ID"
-                if confirm_codex_state_single_candidate "$db_path" "$floor_ms" "$shell_project_dir" "$initial_session_id"; then
-                    set_codex_metadata_value "$c11_bin" "$socket" "$workspace" "$surface" "codex.session_id" "$CODEX_STATE_SESSION_ID" "heuristic"
-                    if [[ "$CODEX_STATE_PROJECT_DIR" == /* ]]; then
-                        set_codex_metadata_value "$c11_bin" "$socket" "$workspace" "$surface" "codex.session_project_dir" "$CODEX_STATE_PROJECT_DIR" "heuristic"
+                if [[ "$CODEX_STATE_COUNT" -eq 1 ]]; then
+                    local initial_session_id="$CODEX_STATE_SESSION_ID"
+                    if confirm_codex_state_single_candidate "$db_path" "$floor_ms" "$shell_project_dir" "$initial_session_id"; then
+                        set_codex_session_metadata "$c11_bin" "$socket" "$workspace" "$surface" "$CODEX_STATE_SESSION_ID" "$CODEX_STATE_PROJECT_DIR" "$session_store" "heuristic"
+                        exit 0
                     fi
-                    exit 0
+                    if [[ "$CODEX_STATE_COUNT" -gt 1 ]]; then
+                        exit 0
+                    fi
+                    sleep 1
+                    continue
                 fi
+
+                # Multiple fresh sessions in this project directory and time window
+                # means the DB cannot identify this pane safely. Leave restore on
+                # --last rather than writing the wrong session id.
                 if [[ "$CODEX_STATE_COUNT" -gt 1 ]]; then
                     exit 0
                 fi
-                sleep 1
-                continue
-            fi
-
-            # Multiple fresh sessions in this project directory and time window
-            # means the DB cannot identify this pane safely. Leave restore on
-            # --last rather than writing the wrong session id.
-            if [[ "$CODEX_STATE_COUNT" -gt 1 ]]; then
-                exit 0
             fi
 
             # Codex can write its state row shortly after process start. Give
@@ -1001,10 +1090,10 @@ start_codex_state_watcher() {
             if [[ "$CODEX_STATE_COUNT" -eq 1 ]]; then
                 local initial_session_id="$CODEX_STATE_SESSION_ID"
                 if confirm_codex_state_single_candidate "$db_path" "$floor_ms" "" "$initial_session_id"; then
-                    set_codex_metadata_value "$c11_bin" "$socket" "$workspace" "$surface" "codex.session_id" "$CODEX_STATE_SESSION_ID" "heuristic"
-                    if [[ "$CODEX_STATE_PROJECT_DIR" == /* ]]; then
-                        set_codex_metadata_value "$c11_bin" "$socket" "$workspace" "$surface" "codex.session_project_dir" "$CODEX_STATE_PROJECT_DIR" "heuristic"
+                    if ! codex_state_global_fallback_matches_shell_project "$shell_project_dir" "$CODEX_STATE_PROJECT_DIR" "$has_cwd_column"; then
+                        exit 0
                     fi
+                    set_codex_session_metadata "$c11_bin" "$socket" "$workspace" "$surface" "$CODEX_STATE_SESSION_ID" "$CODEX_STATE_PROJECT_DIR" "$session_store" "heuristic"
                     exit 0
                 fi
                 if [[ "$CODEX_STATE_COUNT" -gt 1 ]]; then
@@ -1089,17 +1178,19 @@ fi
 CODEX_LEGACY_RESUME_LAST=0
 if [[ "${CMUX_CODEX_LEGACY_RESUME_LAST:-}" == "1" ]] || codex_resume_last_arg "$@"; then
     CODEX_LEGACY_RESUME_LAST=1
-    export CMUX_CODEX_LEGACY_RESUME_LAST=1
 fi
 resume_session_id="$(codex_resume_session_id_arg "$@" 2>/dev/null || true)"
 CODEX_REAL_HOME_RESUME=0
-if [[ -n "$resume_session_id" && "${CMUX_CODEX_MANAGED_RESUME:-}" != "1" ]]; then
+if [[ -n "$resume_session_id" && "${CMUX_CODEX_REAL_HOME_RESUME:-}" == "1" ]]; then
+    # Restoring a session that was captured from the operator's real Codex
+    # home. Keep Codex pointed at the real home instead of the c11 overlay.
+    CODEX_REAL_HOME_RESUME=1
+elif [[ -n "$resume_session_id" && "${CMUX_CODEX_MANAGED_RESUME:-}" != "1" ]]; then
     # A bare/manual `codex resume <id>` inside c11 should keep Codex's normal
     # home lookup so pre-overlay sessions remain reachable. c11 restore
     # commands set CMUX_CODEX_MANAGED_RESUME=1 for sessions captured under the
     # managed overlay.
     CODEX_REAL_HOME_RESUME=1
-    export CMUX_CODEX_REAL_HOME_RESUME=1
 fi
 codex_profile_args=()
 if [[ "${CMUX_CODEX_DISABLE_PROFILE_HOOKS:-}" != "1" && "$CODEX_LEGACY_RESUME_LAST" != "1" && "$CODEX_REAL_HOME_RESUME" != "1" ]] && ! codex_args_include_profile_v2 "$@"; then
@@ -1114,29 +1205,60 @@ if [[ "${CMUX_CODEX_DISABLE_PROFILE_HOOKS:-}" != "1" && "$CODEX_LEGACY_RESUME_LA
         fi
     fi
 fi
+CODEX_SESSION_STORE="real_home"
+if [[ -n "${CMUX_CODEX_HOME_OVERLAY:-}" && "${CODEX_HOME:-}" == "${CMUX_CODEX_HOME_OVERLAY}" ]]; then
+    CODEX_SESSION_STORE="managed_overlay"
+fi
+export CMUX_CODEX_SESSION_STORE="$CODEX_SESSION_STORE"
 unset CMUX_CODEX_HOME_OVERLAY_DIR
 unset CMUX_CODEX_ALLOW_TEST_HOME_OVERLAY_DIR
+# Resume markers are one-shot instructions from the registry to this wrapper.
+# The real Codex child and any nested Codex it launches should not inherit
+# them; otherwise a restored agent can poison later child sessions into the
+# wrong home/overlay mode.
+unset CMUX_CODEX_MANAGED_RESUME
+unset CMUX_CODEX_LEGACY_RESUME_LAST
+unset CMUX_CODEX_REAL_HOME_RESUME
 set_codex_agent_pid_bg "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_CODEX_PID}"
 if codex_args_have_initial_prompt "$@"; then
     set_codex_running_for_initial_prompt_bg "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_CODEX_PID}"
 fi
 
-if [[ -n "$resume_session_id" ]]; then
-    export CMUX_CODEX_RESUME_SESSION_ID="$resume_session_id"
+current_resume_session_id="$resume_session_id"
+if [[ -n "$current_resume_session_id" ]]; then
+    export CMUX_CODEX_RESUME_SESSION_ID="$current_resume_session_id"
+else
+    # This env var is for the current wrapper invocation only. A restored
+    # Codex may spawn nested Codex children; inherited parent resume ids must
+    # not make a fresh nested launch look like the restored parent session.
+    unset CMUX_CODEX_RESUME_SESSION_ID
 fi
 
-if [[ -n "${CMUX_CODEX_RESUME_SESSION_ID:-}" ]]; then
+if [[ -n "$current_resume_session_id" ]]; then
     (
-        set_codex_metadata_value "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_SURFACE_ID:-}" "codex.session_id" "${CMUX_CODEX_RESUME_SESSION_ID}"
-        if [[ -n "$CODEX_PROJECT_DIR" ]]; then
-            set_codex_metadata_value "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_SURFACE_ID:-}" "codex.session_project_dir" "$CODEX_PROJECT_DIR"
-        fi
+        set_codex_session_metadata \
+            "$c11_bin" \
+            "${CMUX_SOCKET_PATH}" \
+            "${CMUX_WORKSPACE_ID:-}" \
+            "${CMUX_SURFACE_ID:-}" \
+            "$current_resume_session_id" \
+            "$CODEX_PROJECT_DIR" \
+            "$CODEX_SESSION_STORE" \
+            "declare"
     ) &
     disown 2>/dev/null || true
 else
     clear_codex_session_metadata "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_SURFACE_ID:-}"
     if [[ "${CMUX_CODEX_DISABLE_STATE_WATCHER:-}" != "1" && -n "$CODEX_PROJECT_DIR" ]]; then
-        start_codex_state_watcher "$c11_bin" "${CMUX_SOCKET_PATH}" "${CMUX_WORKSPACE_ID:-}" "${CMUX_SURFACE_ID:-}" "${CMUX_CODEX_START_SEC}" "$$" "$CODEX_PROJECT_DIR"
+        start_codex_state_watcher \
+            "$c11_bin" \
+            "${CMUX_SOCKET_PATH}" \
+            "${CMUX_WORKSPACE_ID:-}" \
+            "${CMUX_SURFACE_ID:-}" \
+            "${CMUX_CODEX_START_SEC}" \
+            "$$" \
+            "$CODEX_PROJECT_DIR" \
+            "$CODEX_SESSION_STORE"
     fi
 fi
 

@@ -9218,7 +9218,7 @@ struct CMUXCLI {
             Flags:
               --workspace <id|ref>   Target workspace (default: $CMUX_WORKSPACE_ID)
               --surface <id|ref>     Target surface (default: $CMUX_SURFACE_ID)
-              --context-json <json>   c11 wrapper fallback context; payload JSON wins
+              --context-json <json>   c11 wrapper fallback context under c11_context; payload JSON wins
               --status-only          For stop: mark idle without notifying
 
             Example:
@@ -14750,13 +14750,15 @@ struct CMUXCLI {
     private func codexLifecycleRawInput(payloadInput: String, contextInput: String?) -> String {
         let trimmedPayload = payloadInput.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedContext = contextInput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalizedContext = codexLifecycleNamespacedContextObject(trimmedContext)
         guard !trimmedPayload.isEmpty else {
-            return trimmedContext.isEmpty ? "" : contextInput ?? ""
+            guard let normalizedContext else { return "" }
+            return codexLifecycleJSONString(normalizedContext) ?? ""
         }
         guard !trimmedContext.isEmpty else {
             return payloadInput
         }
-        guard var contextObject = codexLifecycleJSONObject(trimmedContext),
+        guard var contextObject = normalizedContext,
               let payloadObject = codexLifecycleJSONObject(trimmedPayload) else {
             return payloadInput
         }
@@ -14769,6 +14771,26 @@ struct CMUXCLI {
             return payloadInput
         }
         return merged
+    }
+
+    private func codexLifecycleNamespacedContextObject(_ rawInput: String) -> [String: Any]? {
+        guard !rawInput.isEmpty,
+              let object = codexLifecycleJSONObject(rawInput) else {
+            return nil
+        }
+        if object["c11_context"] is [String: Any] {
+            return object
+        }
+        return ["c11_context": object]
+    }
+
+    private func codexLifecycleJSONString(_ object: [String: Any]) -> String? {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: []),
+              let encoded = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return encoded
     }
 
     private func codexLifecycleJSONObject(_ rawInput: String) -> [String: Any]? {
@@ -14856,15 +14878,18 @@ struct CMUXCLI {
             startedAtOverride: startedAtOverride,
             telemetry: telemetry
         )
+        let sessionStore = codexRuntimeSessionStore()
         if let sessionCapture {
             switch sessionCapture.source {
             case "heuristic":
                 heuristicSessionMetadata[SurfaceMetadataKeyName.codexSessionId] = sessionCapture.sessionId
+                heuristicSessionMetadata[SurfaceMetadataKeyName.codexSessionStore] = sessionStore
                 if let projectDir = sessionCapture.projectDir {
                     heuristicSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
                 }
             default:
                 declareSessionMetadata[SurfaceMetadataKeyName.codexSessionId] = sessionCapture.sessionId
+                declareSessionMetadata[SurfaceMetadataKeyName.codexSessionStore] = sessionStore
                 if let projectDir = cwd ?? sessionCapture.projectDir {
                     declareSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
                 }
@@ -14892,6 +14917,21 @@ struct CMUXCLI {
                 telemetry: telemetry
             )
         }
+    }
+
+    private func codexRuntimeSessionStore() -> String {
+        let env = ProcessInfo.processInfo.environment
+        if let raw = Self.normalizedEnvValue(env["CMUX_CODEX_SESSION_STORE"]),
+           raw == SurfaceMetadataKeyName.codexSessionStoreManagedOverlay ||
+            raw == SurfaceMetadataKeyName.codexSessionStoreRealHome {
+            return raw
+        }
+        if let codexHome = Self.normalizedEnvValue(env["CODEX_HOME"]),
+           let realHome = Self.normalizedEnvValue(env["CMUX_CODEX_REAL_HOME"]),
+           codexHome == realHome {
+            return SurfaceMetadataKeyName.codexSessionStoreRealHome
+        }
+        return SurfaceMetadataKeyName.codexSessionStoreManagedOverlay
     }
 
     private func writeCodexLifecycleMetadataChunk(
@@ -15194,16 +15234,18 @@ struct CMUXCLI {
         }
         let createdAtExpression = codexStateDBCreatedAtExpression(columns: columns)
         let cwdExpression = columns.contains("cwd") ? "cwd" : "''"
-        var whereClauses: [String] = []
+        var whereClauses: [String] = codexStateDBDelimitedTextSafetyClauses(column: "id", requireAbsolutePath: false)
         if columns.contains("archived") {
             whereClauses.append("coalesce(archived, 0) = 0")
         }
-        if let cwdFilter {
-            guard columns.contains("cwd") else {
-                telemetry.breadcrumb("codex-hook.state-db.skip", data: ["reason": "missing-cwd-column"])
-                return []
+        if columns.contains("cwd") {
+            whereClauses.append(contentsOf: codexStateDBDelimitedTextSafetyClauses(column: "cwd", requireAbsolutePath: true))
+            if let cwdFilter {
+                whereClauses.append("cwd = '\(sqliteStringLiteral(cwdFilter))'")
             }
-            whereClauses.append("cwd = '\(sqliteStringLiteral(cwdFilter))'")
+        } else if cwdFilter != nil {
+            telemetry.breadcrumb("codex-hook.state-db.skip", data: ["reason": "missing-cwd-column"])
+            return []
         }
         whereClauses.append("\(createdAtExpression) >= \(floorMs)")
         let query = """
@@ -15261,6 +15303,25 @@ struct CMUXCLI {
             return nil
         }
         return columns
+    }
+
+    private func codexStateDBDelimitedTextSafetyClauses(
+        column: String,
+        requireAbsolutePath: Bool
+    ) -> [String] {
+        var clauses = [
+            "typeof(\(column)) = 'text'",
+            "\(column) <> ''",
+            "instr(\(column), char(0)) = 0",
+            "instr(\(column), char(9)) = 0",
+            "instr(\(column), char(10)) = 0",
+            "instr(\(column), char(13)) = 0",
+            "instr(\(column), char(39)) = 0"
+        ]
+        if requireAbsolutePath {
+            clauses.append("substr(\(column), 1, 1) = '/'")
+        }
+        return clauses
     }
 
     private func codexStateDBCreatedAtExpression(columns: Set<String>) -> String {
@@ -15761,6 +15822,10 @@ struct CMUXCLI {
            let id = firstString(in: context, keys: keys) {
             return id
         }
+        if let context = object["c11_context"] as? [String: Any],
+           let id = firstString(in: context, keys: keys) {
+            return id
+        }
         return nil
     }
 
@@ -15791,6 +15856,10 @@ struct CMUXCLI {
            let cwd = firstString(in: context, keys: cwdKeys) {
             return cwd
         }
+        if let context = object["c11_context"] as? [String: Any],
+           let cwd = firstString(in: context, keys: cwdKeys) {
+            return cwd
+        }
         return nil
     }
 
@@ -15812,6 +15881,10 @@ struct CMUXCLI {
             return model
         }
         if let context = object["context"] as? [String: Any],
+           let model = firstString(in: context, keys: modelKeys) {
+            return model
+        }
+        if let context = object["c11_context"] as? [String: Any],
            let model = firstString(in: context, keys: modelKeys) {
             return model
         }

@@ -114,14 +114,14 @@ struct AgentRestartRegistry: Sendable {
     /// command, sees `--resume`, skips its own `--session-id` injection, and
     /// forwards to real claude with the hooks settings JSON intact.
     ///
-    /// Codex now uses captured `codex.session_id` metadata for deterministic
-    /// `codex resume <id>` when available. Codex treats an explicit UUID
-    /// argument as the session identity, so the project-dir hint preserves cwd
-    /// fidelity but is not required for identity. Older snapshots without a
-    /// captured id still fall back to `codex resume --last`, but malformed
-    /// captured ids fail closed rather than guessing with `--last`. Like Claude,
-    /// a malformed project_dir hint is dropped while the valid session id is
-    /// still resumed.
+    /// Codex uses captured `codex.session_id` metadata for deterministic
+    /// `codex resume <id>` when available. The generic `sessionId` parameter is
+    /// intentionally ignored for Codex so a stale `claude.session_id` cannot be
+    /// consumed as a Codex id. Older snapshots without a captured Codex id still
+    /// fall back to `codex resume --last`, but malformed captured ids and invalid
+    /// store provenance fail closed rather than guessing with `--last` or the
+    /// managed overlay. Like Claude, a malformed project_dir hint is dropped
+    /// while the valid session id is still resumed.
     /// Opencode and kimi have no verified resume flag and launch fresh —
     /// best-effort is preferable to a broken flag.
     static let phase1: AgentRestartRegistry = .init(name: "phase1", rows: [
@@ -146,7 +146,7 @@ struct AgentRestartRegistry: Sendable {
             }
             return "\(resume)\n"
         },
-        Row(terminalType: SurfaceMetadataKeyName.terminalTypeCodex) { sessionId, metadata in
+        Row(terminalType: SurfaceMetadataKeyName.terminalTypeCodex) { _, metadata in
             func recordedProjectDir() -> String? {
                 guard let rawDir = metadata[SurfaceMetadataKeyName.codexSessionProjectDir]?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -157,6 +157,19 @@ struct AgentRestartRegistry: Sendable {
                 return rawDir
             }
 
+            let sessionStore: String
+            if metadata.keys.contains(SurfaceMetadataKeyName.codexSessionStore) {
+                guard let candidate = metadata[SurfaceMetadataKeyName.codexSessionStore]?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                      candidate == SurfaceMetadataKeyName.codexSessionStoreManagedOverlay ||
+                        candidate == SurfaceMetadataKeyName.codexSessionStoreRealHome else {
+                    return nil
+                }
+                sessionStore = candidate
+            } else {
+                sessionStore = SurfaceMetadataKeyName.codexSessionStoreManagedOverlay
+            }
+
             let raw: String
             if metadata.keys.contains(SurfaceMetadataKeyName.codexSessionId) {
                 guard let candidate = metadata[SurfaceMetadataKeyName.codexSessionId]?
@@ -165,9 +178,6 @@ struct AgentRestartRegistry: Sendable {
                     return nil
                 }
                 raw = candidate
-            } else if let candidate = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines) {
-                guard !candidate.isEmpty else { return nil }
-                raw = candidate
             } else {
                 // Older snapshots or disabled hooks retain the historical
                 // best-effort behavior. `resume --last` must read the
@@ -175,14 +185,19 @@ struct AgentRestartRegistry: Sendable {
                 // overlay intentionally does not mirror sessions/state DBs.
                 // The wrapper also detects this argv shape for manual runs,
                 // but the env marker keeps restored legacy snapshots explicit.
-                let resumeLast = "CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last"
+                let resumeLast = "env CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last"
                 if let rawDir = recordedProjectDir() {
                     return "cd \(shellSingleQuote(rawDir)) 2>/dev/null || true; \(resumeLast)\n"
                 }
                 return "\(resumeLast)\n"
             }
             guard isValidCodexSessionId(raw) else { return nil }
-            let resume = "CMUX_CODEX_MANAGED_RESUME=1 codex resume \(raw)"
+            let resume: String
+            if sessionStore == SurfaceMetadataKeyName.codexSessionStoreRealHome {
+                resume = "env CMUX_CODEX_REAL_HOME_RESUME=1 codex resume \(raw)"
+            } else {
+                resume = "env CMUX_CODEX_MANAGED_RESUME=1 codex resume \(raw)"
+            }
             if let rawDir = recordedProjectDir() {
                 return "cd \(shellSingleQuote(rawDir)) 2>/dev/null || true; \(resume)\n"
             }

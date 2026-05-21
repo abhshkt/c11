@@ -190,6 +190,10 @@ def wait_for_notifications(cli_path: str, socket_path: str, workspace_uuid: str,
     return latest
 
 
+def sqlite_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
 def make_codex_state_db(
     codex_home: Path,
     *,
@@ -197,6 +201,8 @@ def make_codex_state_db(
     cwd: str,
     created_at_ms: bool,
     created_at: bool,
+    created_at_value: int = 4102444800,
+    created_at_ms_value: int = 4102444800000,
 ) -> None:
     codex_home.mkdir(parents=True, exist_ok=True)
     db_path = codex_home / "state_5.sqlite"
@@ -206,11 +212,11 @@ def make_codex_state_db(
     if created_at:
         created_columns.append("created_at INTEGER")
         insert_columns.append("created_at")
-        insert_values.append("4102444800")
+        insert_values.append(str(created_at_value))
     if created_at_ms:
         created_columns.append("created_at_ms INTEGER")
         insert_columns.append("created_at_ms")
-        insert_values.append("4102444800000")
+        insert_values.append(str(created_at_ms_value))
     created_columns_sql = ",\n  " + ",\n  ".join(created_columns) if created_columns else ""
     insert_columns_sql = ", " + ", ".join(insert_columns) if insert_columns else ""
     insert_values_sql = ", " + ", ".join(insert_values) if insert_values else ""
@@ -221,7 +227,7 @@ CREATE TABLE threads (
   archived INTEGER{created_columns_sql}
 );
 INSERT INTO threads (id, cwd, archived{insert_columns_sql})
-VALUES ('{session_id}', '{cwd}', 0{insert_values_sql});
+VALUES ({sqlite_literal(session_id)}, {sqlite_literal(cwd)}, 0{insert_values_sql});
 """
     subprocess.run(["/usr/bin/sqlite3", str(db_path), sql], check=True)
 
@@ -448,12 +454,52 @@ def main() -> int:
                 "--key",
                 "codex.session_project_dir",
                 "--key",
+                "codex.session_store",
+                "--key",
                 "model",
             ],
         )
         expect(f"codex.session_id = {session_id}" in metadata, f"Missing codex.session_id metadata: {metadata!r}")
         expect(f"codex.session_project_dir = {project_dir}" in metadata, f"Missing project-dir metadata: {metadata!r}")
+        expect("codex.session_store = managed_overlay" in metadata, f"Missing Codex managed-overlay provenance: {metadata!r}")
         expect("model = gpt-5.5" in metadata, f"Missing Codex model metadata: {metadata!r}")
+
+        real_home_session_id = "abababab-cdcd-efef-1234-567890abcdef"
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "session-start"],
+            payload={
+                "hook_event_name": "SessionStart",
+                "session_id": real_home_session_id,
+                "cwd": str(project_dir),
+                "model": "gpt-5.5",
+            },
+            env={**hook_env, "CMUX_CODEX_SESSION_STORE": "real_home"},
+        )
+        real_home_metadata = run_cli(
+            cli_path,
+            socket_path,
+            [
+                "get-metadata",
+                "--workspace",
+                workspace_id,
+                "--surface",
+                surface_id,
+                "--key",
+                "codex.session_id",
+                "--key",
+                "codex.session_store",
+            ],
+        )
+        expect(
+            f"codex.session_id = {real_home_session_id}" in real_home_metadata,
+            f"Real-home hook should still capture session id: {real_home_metadata!r}",
+        )
+        expect(
+            "codex.session_store = real_home" in real_home_metadata,
+            f"Hook provenance must follow wrapper runtime env instead of hard-coding managed_overlay: {real_home_metadata!r}",
+        )
 
         state_db_cases = [
             ("created-at-ms-only", True, False, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", True),
@@ -483,6 +529,8 @@ def main() -> int:
                         "codex.session_id",
                         "--key",
                         "codex.session_project_dir",
+                        "--key",
+                        "codex.session_store",
                         "--source",
                         source,
                     ],
@@ -545,6 +593,8 @@ def main() -> int:
                     "codex.session_id",
                     "--key",
                     "codex.session_project_dir",
+                    "--key",
+                    "codex.session_store",
                     "--source",
                     source,
                 ],
@@ -584,6 +634,77 @@ def main() -> int:
             f"Global state DB fallback must not pair another cwd with target cwd metadata: {mismatch_metadata!r}",
         )
 
+        for delimiter_label, delimiter_cwd, delimiter_session_id in [
+            ("tab", f"{project_dir}\tsuffix", "12121212-1212-4212-8212-121212121212"),
+            ("newline", f"{project_dir}\nsuffix", "34343434-3434-4434-8434-343434343434"),
+        ]:
+            delimiter_started_at = int(time.time()) - 5
+            delimiter_created_at = delimiter_started_at + 1
+            delimiter_state_home = test_root / f"state-home-delimiter-{delimiter_label}"
+            make_codex_state_db(
+                delimiter_state_home,
+                session_id=delimiter_session_id,
+                cwd=delimiter_cwd,
+                created_at_ms=True,
+                created_at=True,
+                created_at_value=delimiter_created_at,
+                created_at_ms_value=delimiter_created_at * 1000,
+            )
+            for source in ("declare", "heuristic"):
+                run_cli(
+                    cli_path,
+                    socket_path,
+                    [
+                        "clear-metadata",
+                        "--workspace",
+                        workspace_id,
+                        "--surface",
+                        surface_id,
+                        "--key",
+                        "codex.session_id",
+                        "--key",
+                        "codex.session_project_dir",
+                        "--key",
+                        "codex.session_store",
+                        "--source",
+                        source,
+                    ],
+                )
+            run_cli(
+                cli_path,
+                socket_path,
+                ["codex-hook", "session-start", "--started-at", str(delimiter_started_at)],
+                payload={
+                    "hook_event_name": "SessionStart",
+                    "cwd": str(project_dir),
+                    "model": "gpt-5.5",
+                },
+                env={**hook_env, "CODEX_HOME": str(delimiter_state_home)},
+            )
+            delimiter_metadata = run_cli(
+                cli_path,
+                socket_path,
+                [
+                    "get-metadata",
+                    "--workspace",
+                    workspace_id,
+                    "--surface",
+                    surface_id,
+                    "--key",
+                    "codex.session_id",
+                    "--key",
+                    "codex.session_project_dir",
+                ],
+            )
+            expect(
+                delimiter_session_id not in delimiter_metadata,
+                f"{delimiter_label}: delimiter-corrupted DB cwd must not capture session id: {delimiter_metadata!r}",
+            )
+            expect(
+                str(project_dir) not in delimiter_metadata,
+                f"{delimiter_label}: delimiter-corrupted DB cwd must not truncate to target project dir: {delimiter_metadata!r}",
+            )
+
         stale_session_id = "13131313-2424-3535-4646-575757575757"
         for source in ("declare", "heuristic"):
             run_cli(
@@ -599,6 +720,8 @@ def main() -> int:
                     "codex.session_id",
                     "--key",
                     "codex.session_project_dir",
+                    "--key",
+                    "codex.session_store",
                     "--source",
                     source,
                 ],
@@ -825,16 +948,20 @@ def main() -> int:
                 "--context-json",
                 json.dumps(
                     {
-                        "cwd": str(other_project_dir),
-                        "model": "context/model",
+                        "c11_context": {
+                            "cwd": str(other_project_dir),
+                            "model": "context/model",
+                        },
                         "last_assistant_message": "Context should not win",
                     }
                 ),
                 json.dumps(
                     {
                         "hook_event_name": "Stop",
-                        "session_id": context_shadow_session_id,
-                        "cwd": str(project_dir),
+                        "notification": {
+                            "session_id": context_shadow_session_id,
+                            "cwd": str(project_dir),
+                        },
                         "model": "gpt-5.5",
                         "last_assistant_message": "Payload wins",
                     }
@@ -867,6 +994,59 @@ def main() -> int:
         expect(
             context_shadow_session_id in context_shadow_metadata and str(project_dir) in context_shadow_metadata,
             f"Payload metadata should win over wrapper context metadata: {context_shadow_metadata!r}",
+        )
+
+        legacy_context_shadow_session_id = "67676767-8989-abab-cdcd-efefefefefef"
+        legacy_context_shadow_output = run_cli_with_open_stdin(
+            cli_path,
+            socket_path,
+            [
+                "codex-hook",
+                "notify",
+                "--context-json",
+                json.dumps(
+                    {
+                        "cwd": str(other_project_dir),
+                        "model": "legacy/context",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "hook_event_name": "Stop",
+                        "notification": {
+                            "session_id": legacy_context_shadow_session_id,
+                            "cwd": str(project_dir),
+                        },
+                        "last_assistant_message": "Nested payload cwd wins",
+                    }
+                ),
+            ],
+            env=hook_env,
+            timeout=2,
+        )
+        expect(legacy_context_shadow_output == "", f"Legacy context-shadow notify should exit quietly, got {legacy_context_shadow_output!r}")
+        legacy_context_shadow_metadata = run_cli(
+            cli_path,
+            socket_path,
+            [
+                "get-metadata",
+                "--workspace",
+                workspace_id,
+                "--surface",
+                surface_id,
+                "--key",
+                "codex.session_id",
+                "--key",
+                "codex.session_project_dir",
+            ],
+        )
+        expect(
+            legacy_context_shadow_session_id in legacy_context_shadow_metadata and str(project_dir) in legacy_context_shadow_metadata,
+            f"Nested payload metadata should outrank legacy top-level context JSON: {legacy_context_shadow_metadata!r}",
+        )
+        expect(
+            str(other_project_dir) not in legacy_context_shadow_metadata,
+            f"Legacy context cwd must be namespaced fallback, not top-level authority: {legacy_context_shadow_metadata!r}",
         )
 
         argv_notify_session_id = "55555555-6666-7777-8888-999999999999"
@@ -948,11 +1128,17 @@ def main() -> int:
                 surface_id,
                 "--key",
                 "codex.session_id",
+                "--key",
+                "codex.session_store",
             ],
         )
         expect(
             f"codex.session_id = {status_only_session_id}" in status_only_metadata,
             f"status-only Stop must still capture session metadata: {status_only_metadata!r}",
+        )
+        expect(
+            "codex.session_store = managed_overlay" in status_only_metadata,
+            f"status-only Stop must capture managed-overlay provenance: {status_only_metadata!r}",
         )
 
         print("PASS: codex-hook bridge updates metadata, notifications, status, and no-target safety")

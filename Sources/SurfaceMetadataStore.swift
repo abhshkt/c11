@@ -174,7 +174,14 @@ final class SurfaceMetadataStore: @unchecked Sendable {
         "claude.session_id",
         "claude.session_project_dir",
         "codex.session_id",
-        "codex.session_project_dir"
+        "codex.session_project_dir",
+        "codex.session_store"
+    ]
+
+    private static let codexSessionAtomicKeys: Set<String> = [
+        "codex.session_id",
+        "codex.session_project_dir",
+        "codex.session_store"
     ]
 
     static func validateReservedKey(_ key: String, _ value: Any) -> WriteError? {
@@ -318,6 +325,18 @@ final class SurfaceMetadataStore: @unchecked Sendable {
                 return .reservedKeyInvalidType(
                     key,
                     "must be an absolute POSIX path (≤4096 chars, no NUL/newline/single-quote)"
+                )
+            }
+            return nil
+        case "codex.session_store":
+            guard let s = value as? String else {
+                return .reservedKeyInvalidType(key, "expected string")
+            }
+            if s != SurfaceMetadataKeyName.codexSessionStoreManagedOverlay &&
+                s != SurfaceMetadataKeyName.codexSessionStoreRealHome {
+                return .reservedKeyInvalidType(
+                    key,
+                    "must be managed_overlay or real_home"
                 )
             }
             return nil
@@ -654,7 +673,40 @@ final class SurfaceMetadataStore: @unchecked Sendable {
             if !priorBlob.isEmpty || !priorSrc.isEmpty { mutated = true }
         }
 
+        var atomicallyRejectedKeys = Set<String>()
+        let incomingCodexSessionKeys = Set(partial.keys).intersection(Self.codexSessionAtomicKeys)
+        var codexSessionKeysToClear = Set<String>()
+        if mode == .merge,
+           incomingCodexSessionKeys.contains(SurfaceMetadataKeyName.codexSessionId) {
+            let keysToPreflight = Self.codexSessionAtomicKeys
+            let blockedByPrecedence = keysToPreflight.contains { key in
+                guard let current = sblob[key] else { return false }
+                return source.precedence < current.source.precedence
+            }
+            if blockedByPrecedence {
+                atomicallyRejectedKeys = incomingCodexSessionKeys
+                for key in incomingCodexSessionKeys {
+                    result.applied[key] = false
+                    result.reasons[key] = "lower_precedence"
+                }
+            } else {
+                codexSessionKeysToClear = keysToPreflight.subtracting(incomingCodexSessionKeys)
+            }
+        }
+
+        for key in codexSessionKeysToClear {
+            if blob.removeValue(forKey: key) != nil {
+                mutated = true
+            }
+            if sblob.removeValue(forKey: key) != nil {
+                mutated = true
+            }
+        }
+
         for (k, v) in partial {
+            if atomicallyRejectedKeys.contains(k) {
+                continue
+            }
             if mode == .merge, let cur = sblob[k], source.precedence < cur.source.precedence {
                 result.applied[k] = false
                 result.reasons[k] = "lower_precedence"

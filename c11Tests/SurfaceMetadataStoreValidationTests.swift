@@ -274,6 +274,234 @@ final class SurfaceMetadataStoreValidationTests: XCTestCase {
         XCTAssertEqual(result.applied["codex.session_project_dir"], true)
     }
 
+    func testStoreValidatesCodexSessionStoreProvenance() throws {
+        let workspace = UUID()
+        let surface = UUID()
+        defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+        let result = try store.setMetadata(
+            workspaceId: workspace,
+            surfaceId: surface,
+            partial: ["codex.session_store": SurfaceMetadataKeyName.codexSessionStoreRealHome],
+            mode: .merge,
+            source: .explicit
+        )
+        XCTAssertEqual(result.applied["codex.session_store"], true)
+
+        XCTAssertThrowsError(
+            try store.setMetadata(
+                workspaceId: workspace,
+                surfaceId: surface,
+                partial: ["codex.session_store": "tenant_home"],
+                mode: .merge,
+                source: .explicit
+            )
+        ) { error in
+            guard let writeError = error as? SurfaceMetadataStore.WriteError else {
+                return XCTFail("expected WriteError, got \(error)")
+            }
+            XCTAssertEqual(writeError.code, "reserved_key_invalid_type")
+        }
+    }
+
+    func testCodexSessionPairRejectsBothKeysWhenSessionIdLosesPrecedence() throws {
+        let workspace = UUID()
+        let surface = UUID()
+        defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+        let existingSessionId = "11111111-2222-3333-4444-555555555555"
+        let weakerSessionId = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+        let projectDir = "/Users/op/repo/c11"
+
+        _ = try store.setMetadata(
+            workspaceId: workspace,
+            surfaceId: surface,
+            partial: ["codex.session_id": existingSessionId],
+            mode: .merge,
+            source: .explicit
+        )
+
+        let result = try store.setMetadata(
+            workspaceId: workspace,
+            surfaceId: surface,
+            partial: [
+                "codex.session_id": weakerSessionId,
+                "codex.session_project_dir": projectDir,
+                "codex.session_store": SurfaceMetadataKeyName.codexSessionStoreRealHome
+            ],
+            mode: .merge,
+            source: .heuristic
+        )
+
+        XCTAssertEqual(result.applied["codex.session_id"], false)
+        XCTAssertEqual(result.applied["codex.session_project_dir"], false)
+        XCTAssertEqual(result.applied["codex.session_store"], false)
+        XCTAssertEqual(result.reasons["codex.session_id"], "lower_precedence")
+        XCTAssertEqual(result.reasons["codex.session_project_dir"], "lower_precedence")
+        XCTAssertEqual(result.reasons["codex.session_store"], "lower_precedence")
+
+        let current = store.getMetadata(workspaceId: workspace, surfaceId: surface)
+        XCTAssertEqual(current.metadata["codex.session_id"] as? String, existingSessionId)
+        XCTAssertNil(current.metadata["codex.session_project_dir"])
+        XCTAssertNil(current.metadata["codex.session_store"])
+    }
+
+    func testCodexSessionPairRejectsBothKeysWhenProjectDirLosesPrecedence() throws {
+        let workspace = UUID()
+        let surface = UUID()
+        defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+        let sessionId = "11111111-2222-3333-4444-555555555555"
+        let existingProjectDir = "/Users/op/repo/c11"
+        let weakerProjectDir = "/Users/op/repo/other"
+
+        _ = try store.setMetadata(
+            workspaceId: workspace,
+            surfaceId: surface,
+            partial: ["codex.session_project_dir": existingProjectDir],
+            mode: .merge,
+            source: .explicit
+        )
+
+        let result = try store.setMetadata(
+            workspaceId: workspace,
+            surfaceId: surface,
+            partial: [
+                "codex.session_id": sessionId,
+                "codex.session_project_dir": weakerProjectDir,
+                "codex.session_store": SurfaceMetadataKeyName.codexSessionStoreManagedOverlay
+            ],
+            mode: .merge,
+            source: .heuristic
+        )
+
+        XCTAssertEqual(result.applied["codex.session_id"], false)
+        XCTAssertEqual(result.applied["codex.session_project_dir"], false)
+        XCTAssertEqual(result.applied["codex.session_store"], false)
+        XCTAssertEqual(result.reasons["codex.session_id"], "lower_precedence")
+        XCTAssertEqual(result.reasons["codex.session_project_dir"], "lower_precedence")
+        XCTAssertEqual(result.reasons["codex.session_store"], "lower_precedence")
+
+        let current = store.getMetadata(workspaceId: workspace, surfaceId: surface)
+        XCTAssertNil(current.metadata["codex.session_id"])
+        XCTAssertEqual(current.metadata["codex.session_project_dir"] as? String, existingProjectDir)
+        XCTAssertNil(current.metadata["codex.session_store"])
+    }
+
+    func testCodexSessionWriteWithoutProjectDirRejectsWhenExistingProjectDirLosesPrecedence() throws {
+        let workspace = UUID()
+        let surface = UUID()
+        defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+        let sessionId = "11111111-2222-3333-4444-555555555555"
+        let existingProjectDir = "/Users/op/repo/c11"
+
+        _ = try store.setMetadata(
+            workspaceId: workspace,
+            surfaceId: surface,
+            partial: ["codex.session_project_dir": existingProjectDir],
+            mode: .merge,
+            source: .explicit
+        )
+
+        let result = try store.setMetadata(
+            workspaceId: workspace,
+            surfaceId: surface,
+            partial: [
+                "codex.session_id": sessionId,
+                "codex.session_store": SurfaceMetadataKeyName.codexSessionStoreRealHome
+            ],
+            mode: .merge,
+            source: .heuristic
+        )
+
+        XCTAssertEqual(result.applied["codex.session_id"], false)
+        XCTAssertEqual(result.applied["codex.session_store"], false)
+        XCTAssertEqual(result.reasons["codex.session_id"], "lower_precedence")
+        XCTAssertEqual(result.reasons["codex.session_store"], "lower_precedence")
+
+        let current = store.getMetadata(workspaceId: workspace, surfaceId: surface)
+        XCTAssertNil(current.metadata["codex.session_id"])
+        XCTAssertEqual(current.metadata["codex.session_project_dir"] as? String, existingProjectDir)
+        XCTAssertNil(current.metadata["codex.session_store"])
+    }
+
+    func testSingleCodexSessionIdWriteRejectsWhenExistingProvenanceLosesPrecedence() throws {
+        let workspace = UUID()
+        let surface = UUID()
+        defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+        let existingProjectDir = "/Users/op/repo/c11"
+        let sessionId = "11111111-2222-3333-4444-555555555555"
+
+        _ = try store.setMetadata(
+            workspaceId: workspace,
+            surfaceId: surface,
+            partial: [
+                "codex.session_project_dir": existingProjectDir,
+                "codex.session_store": SurfaceMetadataKeyName.codexSessionStoreRealHome
+            ],
+            mode: .merge,
+            source: .explicit
+        )
+
+        let result = try store.setMetadata(
+            workspaceId: workspace,
+            surfaceId: surface,
+            partial: ["codex.session_id": sessionId],
+            mode: .merge,
+            source: .declare
+        )
+
+        XCTAssertEqual(result.applied["codex.session_id"], false)
+        XCTAssertEqual(result.reasons["codex.session_id"], "lower_precedence")
+
+        let current = store.getMetadata(workspaceId: workspace, surfaceId: surface)
+        XCTAssertNil(current.metadata["codex.session_id"])
+        XCTAssertEqual(current.metadata["codex.session_project_dir"] as? String, existingProjectDir)
+        XCTAssertEqual(current.metadata["codex.session_store"] as? String, SurfaceMetadataKeyName.codexSessionStoreRealHome)
+    }
+
+    func testCodexSessionIdReplacementClearsOmittedSamePrecedenceProjectDir() throws {
+        let workspace = UUID()
+        let surface = UUID()
+        defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+        let oldSessionId = "11111111-2222-3333-4444-555555555555"
+        let newSessionId = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+        let oldProjectDir = "/Users/op/repo/old"
+
+        _ = try store.setMetadata(
+            workspaceId: workspace,
+            surfaceId: surface,
+            partial: [
+                "codex.session_id": oldSessionId,
+                "codex.session_project_dir": oldProjectDir
+            ],
+            mode: .merge,
+            source: .declare
+        )
+
+        let result = try store.setMetadata(
+            workspaceId: workspace,
+            surfaceId: surface,
+            partial: [
+                "codex.session_id": newSessionId,
+                "codex.session_store": SurfaceMetadataKeyName.codexSessionStoreRealHome
+            ],
+            mode: .merge,
+            source: .declare
+        )
+
+        XCTAssertEqual(result.applied["codex.session_id"], true)
+        XCTAssertEqual(result.applied["codex.session_store"], true)
+
+        let current = store.getMetadata(workspaceId: workspace, surfaceId: surface)
+        XCTAssertEqual(current.metadata["codex.session_id"] as? String, newSessionId)
+        XCTAssertNil(current.metadata["codex.session_project_dir"], "new session id must not retain stale same-source project dir")
+        XCTAssertEqual(current.metadata["codex.session_store"] as? String, SurfaceMetadataKeyName.codexSessionStoreRealHome)
+    }
+
     func testStoreRejectsMalformedCodexProjectDir() {
         let workspace = UUID()
         let surface = UUID()
@@ -339,10 +567,11 @@ final class SurfaceMetadataStoreValidationTests: XCTestCase {
         defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
 
         // A single quote would break the registry's single-quote shell
-        // escape; a newline would let an attacker append a second command
-        // after the synthesized `cd ... && claude --resume`.
+        // escape; LF/CR/TAB can corrupt shell or sqlite text-delimited
+        // lifecycle parsing before the restore command is synthesized.
         let payloads = [
             "/path/with'quote",
+            "/path/with\ttab",
             "/path/with\nnewline",
             "/path/with\rcr",
             "/path/with\u{0000}nul"

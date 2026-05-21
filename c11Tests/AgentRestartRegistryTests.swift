@@ -275,13 +275,13 @@ final class AgentRestartRegistryTests: XCTestCase {
 
     // MARK: - Phase 5: codex / opencode / kimi rows
 
-    /// Codex falls back to `--last` only when no trustworthy session id was captured.
-    func testCodexRowUsesSessionIdWhenPresentAndFallsBackToLastWhenAbsent() {
+    /// Codex falls back to `--last` only when no trustworthy codex.session_id metadata was captured.
+    func testCodexRowUsesMetadataSessionIdWhenPresentAndFallsBackToLastWhenAbsent() {
         let registry = AgentRestartRegistry.phase1
         let sessionId = "abc12345-ef67-890a-bcde-f0123456789a"
         XCTAssertEqual(
             registry.resolveCommand(terminalType: "codex", sessionId: nil, metadata: [:]),
-            "CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last\n",
+            "env CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last\n",
             "older snapshots without codex.session_id keep best-effort resume --last against the real Codex home"
         )
         XCTAssertEqual(
@@ -290,8 +290,8 @@ final class AgentRestartRegistryTests: XCTestCase {
                 sessionId: sessionId,
                 metadata: [:]
             ),
-            "CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionId)\n",
-            "captured codex session ids should resume deterministically"
+            "env CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last\n",
+            "Codex must ignore the generic sessionId fallback; only codex.session_id metadata proves a Codex session"
         )
         XCTAssertEqual(
             registry.resolveCommand(
@@ -299,8 +299,46 @@ final class AgentRestartRegistryTests: XCTestCase {
                 sessionId: nil,
                 metadata: [SurfaceMetadataKeyName.codexSessionId: sessionId]
             ),
-            "CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionId)\n",
+            "env CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionId)\n",
             "codex.session_id metadata is the canonical restore source"
+        )
+        XCTAssertEqual(
+            registry.resolveCommand(
+                terminalType: "codex",
+                sessionId: nil,
+                metadata: [
+                    SurfaceMetadataKeyName.codexSessionId: sessionId,
+                    SurfaceMetadataKeyName.codexSessionStore: SurfaceMetadataKeyName.codexSessionStoreRealHome
+                ]
+            ),
+            "env CMUX_CODEX_REAL_HOME_RESUME=1 codex resume \(sessionId)\n",
+            "manual real-home Codex resumes must be restored against the real Codex home, not the managed overlay"
+        )
+    }
+
+    func testCodexRowRejectsInvalidSessionStoreInsteadOfDefaultingToOverlay() {
+        let registry = AgentRestartRegistry.phase1
+        let sessionId = "abc12345-ef67-890a-bcde-f0123456789a"
+        for payload in ["", "   \t ", "tenant_home", "managed-overlay", "real-home"] {
+            XCTAssertNil(
+                registry.resolveCommand(
+                    terminalType: "codex",
+                    sessionId: nil,
+                    metadata: [
+                        SurfaceMetadataKeyName.codexSessionId: sessionId,
+                        SurfaceMetadataKeyName.codexSessionStore: payload
+                    ]
+                ),
+                "invalid codex.session_store '\(payload)' must fail closed instead of defaulting to managed overlay"
+            )
+        }
+        XCTAssertNil(
+            registry.resolveCommand(
+                terminalType: "codex",
+                sessionId: nil,
+                metadata: [SurfaceMetadataKeyName.codexSessionStore: "tenant_home"]
+            ),
+            "invalid codex.session_store must also block legacy resume --last fallback"
         )
     }
 
@@ -317,7 +355,7 @@ final class AgentRestartRegistryTests: XCTestCase {
                     SurfaceMetadataKeyName.codexSessionProjectDir: projectDir
                 ]
             ),
-            "cd '\(projectDir)' 2>/dev/null || true; CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionId)\n"
+            "cd '\(projectDir)' 2>/dev/null || true; env CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionId)\n"
         )
     }
 
@@ -330,7 +368,7 @@ final class AgentRestartRegistryTests: XCTestCase {
                 sessionId: nil,
                 metadata: [SurfaceMetadataKeyName.codexSessionProjectDir: projectDir]
             ),
-            "cd '\(projectDir)' 2>/dev/null || true; CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last\n"
+            "cd '\(projectDir)' 2>/dev/null || true; env CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last\n"
         )
     }
 
@@ -346,10 +384,10 @@ final class AgentRestartRegistryTests: XCTestCase {
             XCTAssertNil(
                 registry.resolveCommand(
                     terminalType: "codex",
-                    sessionId: payload,
-                    metadata: [:]
+                    sessionId: nil,
+                    metadata: [SurfaceMetadataKeyName.codexSessionId: payload]
                 ),
-                "malformed codex id must fail closed rather than synthesize '\(payload)' or fall back to --last"
+                "malformed codex.session_id metadata must fail closed rather than synthesize '\(payload)' or fall back to --last"
             )
         }
     }
@@ -368,16 +406,17 @@ final class AgentRestartRegistryTests: XCTestCase {
         }
     }
 
-    func testCodexRowRejectsEmptyFallbackSessionId() {
+    func testCodexRowIgnoresEmptyGenericSessionIdFallback() {
         let registry = AgentRestartRegistry.phase1
         for payload in ["", "   \t "] {
-            XCTAssertNil(
+            XCTAssertEqual(
                 registry.resolveCommand(
                     terminalType: "codex",
                     sessionId: payload,
                     metadata: [:]
                 ),
-                "empty direct Codex session id must fail closed; absent id is represented by nil"
+                "env CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last\n",
+                "Codex must ignore generic sessionId fallback values and use legacy --last when codex.session_id is absent"
             )
         }
     }
@@ -394,7 +433,7 @@ final class AgentRestartRegistryTests: XCTestCase {
                     SurfaceMetadataKeyName.codexSessionProjectDir: "relative/path"
                 ]
             ),
-            "CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionId)\n",
+            "env CMUX_CODEX_MANAGED_RESUME=1 codex resume \(sessionId)\n",
             "malformed codex project_dir must be ignored when the session id is valid, matching Claude's restore behavior"
         )
     }

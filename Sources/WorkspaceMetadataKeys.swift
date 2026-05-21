@@ -50,6 +50,13 @@ public enum SurfaceMetadataKeyName {
     /// same session from the same cwd instead of falling back to
     /// `codex resume --last`.
     public static let codexSessionProjectDir = "codex.session_project_dir"
+    /// Surface-scoped provenance for the Codex session store that owns
+    /// `codex.session_id`. Managed c11 profile sessions live under the
+    /// c11-owned CODEX_HOME overlay; manual/legacy real-home resumes must
+    /// be restored against the operator's real Codex home.
+    public static let codexSessionStore = "codex.session_store"
+    public static let codexSessionStoreManagedOverlay = "managed_overlay"
+    public static let codexSessionStoreRealHome = "real_home"
 
     /// Canonical `terminal_type` key (same literal as
     /// `SurfaceMetadataStore.reservedKeys`). Named here for executor
@@ -124,7 +131,7 @@ nonisolated public func isValidClaudeSessionProjectDir(_ candidate: String) -> B
     if candidate.count > claudeSessionProjectDirMaxLen { return false }
     for scalar in candidate.unicodeScalars {
         switch scalar.value {
-        case 0x00, 0x0A, 0x0D, 0x27: return false  // NUL, LF, CR, '
+        case 0x00, 0x09, 0x0A, 0x0D, 0x27: return false  // NUL, TAB, LF, CR, '
         default: continue
         }
     }
