@@ -14794,7 +14794,8 @@ struct CMUXCLI {
             telemetry: telemetry
         )
 
-        var sessionMetadata: [String: Any] = [:]
+        var declareSessionMetadata: [String: Any] = [:]
+        var heuristicSessionMetadata: [String: Any] = [:]
         let cwd = codexValidatedProjectDir(parsedInput.cwd ?? cwdFallback)
         let sessionCapture = codexMetadataSessionCapture(
             parsedInput: parsedInput,
@@ -14803,18 +14804,41 @@ struct CMUXCLI {
             telemetry: telemetry
         )
         if let sessionCapture {
-            sessionMetadata[SurfaceMetadataKeyName.codexSessionId] = sessionCapture.sessionId
+            switch sessionCapture.source {
+            case "heuristic":
+                heuristicSessionMetadata[SurfaceMetadataKeyName.codexSessionId] = sessionCapture.sessionId
+            default:
+                declareSessionMetadata[SurfaceMetadataKeyName.codexSessionId] = sessionCapture.sessionId
+            }
         }
-        let projectDir = sessionCapture?.projectDir ?? cwd
-        if let projectDir {
-            sessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
+        if let cwd {
+            declareSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = cwd
+        } else if let capture = sessionCapture,
+                  let projectDir = capture.projectDir {
+            switch capture.source {
+            case "heuristic":
+                heuristicSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
+            default:
+                declareSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
+            }
         }
-        if !sessionMetadata.isEmpty {
+        if !heuristicSessionMetadata.isEmpty {
             writeCodexLifecycleMetadataChunk(
                 client: client,
                 workspaceId: workspaceId,
                 surfaceId: surfaceId,
-                metadata: sessionMetadata,
+                metadata: heuristicSessionMetadata,
+                source: "heuristic",
+                label: "session",
+                telemetry: telemetry
+            )
+        }
+        if !declareSessionMetadata.isEmpty {
+            writeCodexLifecycleMetadataChunk(
+                client: client,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                metadata: declareSessionMetadata,
                 source: "declare",
                 label: "session",
                 telemetry: telemetry
@@ -14857,7 +14881,7 @@ struct CMUXCLI {
         cwd: String?,
         startedAtOverride: String?,
         telemetry: CLISocketSentryTelemetry
-    ) -> (sessionId: String, projectDir: String?)? {
+    ) -> (sessionId: String, projectDir: String?, source: String)? {
         if let rawSessionId = parsedInput.sessionId?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !rawSessionId.isEmpty {
@@ -14866,12 +14890,12 @@ struct CMUXCLI {
                 return nil
             }
             telemetry.breadcrumb("codex-hook.session-id.payload")
-            return (rawSessionId, nil)
+            return (rawSessionId, nil, "declare")
         }
 
         if let resumeSessionId = codexResumeSessionIdFromEnvironment() {
             telemetry.breadcrumb("codex-hook.session-id.resume-env")
-            return (resumeSessionId, nil)
+            return (resumeSessionId, nil, "declare")
         }
 
         if let inferredSession = inferCodexSessionIdFromStateDB(
@@ -14880,7 +14904,7 @@ struct CMUXCLI {
             telemetry: telemetry
         ) {
             telemetry.breadcrumb("codex-hook.session-id.state-db")
-            return (inferredSession.sessionId, inferredSession.cwd)
+            return (inferredSession.sessionId, inferredSession.cwd, "heuristic")
         }
 
         return nil
@@ -14960,14 +14984,27 @@ struct CMUXCLI {
                 }
                 switch candidates.count {
                 case 1:
-                    telemetry.breadcrumb(
-                        "codex-hook.state-db.single-candidate",
-                        data: [
-                            "scope": "cwd",
-                            "attempt": attempt
-                        ]
-                    )
-                    return candidates[0]
+                    switch confirmCodexStateDBSingleCandidate(
+                        dbPath: dbPath,
+                        floorMs: floorMs,
+                        cwdFilter: scopedCwd,
+                        initialCandidate: candidates[0],
+                        telemetry: telemetry
+                    ) {
+                    case .confirmed(let candidate):
+                        telemetry.breadcrumb(
+                            "codex-hook.state-db.single-candidate",
+                            data: [
+                                "scope": "cwd",
+                                "attempt": attempt
+                            ]
+                        )
+                        return candidate
+                    case .retry:
+                        break
+                    case .failClosed:
+                        return nil
+                    }
                 case 0:
                     break
                 default:
@@ -14999,14 +15036,31 @@ struct CMUXCLI {
             }
             switch candidates.count {
             case 1:
-                telemetry.breadcrumb(
-                    "codex-hook.state-db.single-candidate",
-                    data: [
-                        "scope": "global",
-                        "attempt": attempt
-                    ]
-                )
-                return candidates[0]
+                switch confirmCodexStateDBSingleCandidate(
+                    dbPath: dbPath,
+                    floorMs: floorMs,
+                    cwdFilter: nil,
+                    initialCandidate: candidates[0],
+                    telemetry: telemetry
+                ) {
+                case .confirmed(let candidate):
+                    telemetry.breadcrumb(
+                        "codex-hook.state-db.single-candidate",
+                        data: [
+                            "scope": "global",
+                            "attempt": attempt
+                        ]
+                    )
+                    return candidate
+                case .retry:
+                    if attempt == retryDelays.count - 1 {
+                        telemetry.breadcrumb("codex-hook.state-db.skip", data: ["reason": "no-candidates"])
+                        return nil
+                    }
+                    continue
+                case .failClosed:
+                    return nil
+                }
             case 0:
                 if attempt == retryDelays.count - 1 {
                     telemetry.breadcrumb("codex-hook.state-db.skip", data: ["reason": "no-candidates"])
@@ -15026,6 +15080,45 @@ struct CMUXCLI {
             }
         }
         return nil
+    }
+
+    private enum CodexStateDBSingleCandidateDecision {
+        case confirmed(CodexStateThreadCandidate)
+        case retry
+        case failClosed
+    }
+
+    private func confirmCodexStateDBSingleCandidate(
+        dbPath: String,
+        floorMs: Int64,
+        cwdFilter: String?,
+        initialCandidate: CodexStateThreadCandidate,
+        telemetry: CLISocketSentryTelemetry
+    ) -> CodexStateDBSingleCandidateDecision {
+        Thread.sleep(forTimeInterval: 0.75)
+        guard let confirmed = codexStateDBCandidates(
+            dbPath: dbPath,
+            floorMs: floorMs,
+            cwdFilter: cwdFilter,
+            telemetry: telemetry
+        ) else {
+            return .failClosed
+        }
+        switch confirmed.count {
+        case 1 where confirmed[0].sessionId == initialCandidate.sessionId:
+            return .confirmed(confirmed[0])
+        case 0:
+            return .retry
+        default:
+            telemetry.breadcrumb(
+                "codex-hook.state-db.skip",
+                data: [
+                    "reason": "settle-ambiguous",
+                    "candidate_count": confirmed.count
+                ]
+            )
+            return .failClosed
+        }
     }
 
     private func codexStateDBCandidates(

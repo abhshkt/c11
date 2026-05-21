@@ -60,6 +60,14 @@ DELAYED_STATE_ROW_FAKE_CODEX = DEFAULT_FAKE_CODEX + """
 sleep 4
 """
 
+DELAYED_AMBIGUOUS_STATE_ROW_FAKE_CODEX = DEFAULT_FAKE_CODEX + """
+(
+  sleep 0.4
+  /usr/bin/sqlite3 "$CODEX_HOME/state_5.sqlite" "INSERT INTO threads (id, cwd, archived, created_at, created_at_ms) VALUES ('$FAKE_SECOND_SESSION_ID', '$FAKE_PROJECT_CWD', 0, 4102444800, 4102444800001);"
+) &
+sleep 3
+"""
+
 PROJECT_DIR_CHECKING_FAKE_CODEX = DEFAULT_FAKE_CODEX + """
 if [[ "${CMUX_CODEX_PROJECT_DIR-}" != "${EXPECTED_CMUX_CODEX_PROJECT_DIR-}" ]]; then
   echo "expected CMUX_CODEX_PROJECT_DIR=$EXPECTED_CMUX_CODEX_PROJECT_DIR, got ${CMUX_CODEX_PROJECT_DIR-__UNSET__}" >&2
@@ -91,6 +99,14 @@ if [[ -L "$CODEX_HOME/config.toml" ]]; then
   echo "overlay config.toml must be c11-owned, not a symlink" >&2
   exit 52
 fi
+if [[ ! -f "$CODEX_HOME/auth.json" ]]; then
+  echo "expected auth.json seed copy in overlay" >&2
+  exit 58
+fi
+if [[ -L "$CODEX_HOME/auth.json" ]]; then
+  echo "overlay auth.json must be c11-owned, not a symlink" >&2
+  exit 59
+fi
 for private_dir in "$EXPECTED_CODEX_HOME_OVERLAY_DIR" "$CODEX_HOME"; do
   mode="$(stat_mode "$private_dir")"
   if [[ "$mode" != "700" ]]; then
@@ -98,7 +114,7 @@ for private_dir in "$EXPECTED_CODEX_HOME_OVERLAY_DIR" "$CODEX_HOME"; do
     exit 56
   fi
 done
-for private_file in "$CODEX_HOME/config.toml" "$CODEX_HOME/c11.config.toml"; do
+for private_file in "$CODEX_HOME/config.toml" "$CODEX_HOME/auth.json" "$CODEX_HOME/c11.config.toml"; do
   mode="$(stat_mode "$private_file")"
   if [[ "$mode" != "600" ]]; then
     echo "$private_file must be owner-only (600), got $mode" >&2
@@ -109,6 +125,16 @@ if [[ "$(cat "$CODEX_HOME/config.toml")" != *"# real Codex config"* ]]; then
   echo "overlay config.toml did not preserve the real Codex config contents" >&2
   exit 53
 fi
+if [[ "$(cat "$CODEX_HOME/auth.json")" != *"real-auth-token"* ]]; then
+  echo "overlay auth.json did not preserve the real auth seed contents" >&2
+  exit 60
+fi
+for non_seed in state_5.sqlite history.jsonl sessions skills logs_2.sqlite; do
+  if [[ -e "$CODEX_HOME/$non_seed" || -L "$CODEX_HOME/$non_seed" ]]; then
+    echo "non-allowlisted Codex home entry should not be mirrored into overlay: $non_seed" >&2
+    exit 61
+  fi
+done
 printf '\\n# simulated hook trust write\\n' >> "$CODEX_HOME/config.toml"
 if [[ "$(cat "$EXPECTED_CODEX_REAL_HOME/config.toml")" == *"simulated hook trust write"* ]]; then
   echo "hook trust write leaked through to real Codex config" >&2
@@ -223,9 +249,24 @@ def run_wrapper(
         real_codex_home = tmp / "real-codex-home"
         real_codex_home.mkdir(parents=True, exist_ok=True)
         (real_codex_home / "config.toml").write_text("# real Codex config\n", encoding="utf-8")
+        (real_codex_home / "auth.json").write_text('{"token":"real-auth-token"}\n', encoding="utf-8")
+        (real_codex_home / "history.jsonl").write_text("tenant history\n", encoding="utf-8")
+        (real_codex_home / "state_5.sqlite").write_text("tenant state\n", encoding="utf-8")
+        (real_codex_home / "logs_2.sqlite").write_text("tenant logs\n", encoding="utf-8")
+        (real_codex_home / "sessions").mkdir()
+        (real_codex_home / "sessions" / "tenant-session.jsonl").write_text("tenant session\n", encoding="utf-8")
+        (real_codex_home / "skills").mkdir()
+        (real_codex_home / "skills" / "tenant-skill.md").write_text("tenant skill\n", encoding="utf-8")
         overlay_dir = tmp / "c11-codex-home-overlays"
         if overlay_setup == "dir":
             overlay_dir.mkdir(parents=True, exist_ok=True)
+        elif overlay_setup == "legacy-mirror":
+            overlay_dir.mkdir(parents=True, exist_ok=True)
+            overlay_key = hashlib.md5(str(real_codex_home).encode("utf-8")).hexdigest()
+            overlay = overlay_dir / overlay_key
+            overlay.mkdir(parents=True, exist_ok=True)
+            for name in ("config.toml", "auth.json", "history.jsonl", "state_5.sqlite", "logs_2.sqlite", "sessions", "skills"):
+                (overlay / name).symlink_to(real_codex_home / name, target_is_directory=(real_codex_home / name).is_dir())
         elif overlay_setup == "symlink-base":
             overlay_target = tmp / "overlay-target"
             overlay_target.mkdir(parents=True, exist_ok=True)
@@ -410,6 +451,17 @@ def test_profile_layer_rejects_symlinked_overlay_paths(failures: list[str]) -> N
         )
 
 
+def test_profile_layer_prunes_legacy_mirror_symlinks(failures: list[str]) -> None:
+    code, real_argv, _, stderr, _, _, _ = run_wrapper(
+        socket_state="live",
+        argv=["hello"],
+        real_codex_script=PROFILE_CHECKING_FAKE_CODEX,
+        overlay_setup="legacy-mirror",
+    )
+    expect(code == 0, f"legacy profile mirror: wrapper exited {code}: {stderr}", failures)
+    expect("--profile-v2" in real_argv, f"legacy profile mirror: expected managed c11 profile, got {real_argv}", failures)
+
+
 def test_plain_interactive_codex_does_not_mark_running(failures: list[str]) -> None:
     code, real_argv, c11_log, stderr, _, _, _ = run_wrapper(socket_state="live", argv=[])
     expect(code == 0, f"plain interactive: wrapper exited {code}: {stderr}", failures)
@@ -466,7 +518,12 @@ def test_state_watcher_writes_unambiguous_session_metadata(failures: list[str]) 
         code, _, c11_log, stderr, _, _, _ = run_wrapper(
             socket_state="live",
             argv=["hello"],
-            extra_env={"CODEX_HOME": str(codex_home), "CMUX_CODEX_DISABLE_STATE_WATCHER": "0"},
+            extra_env={
+                "CODEX_HOME": str(codex_home),
+                "CMUX_CODEX_DISABLE_STATE_WATCHER": "0",
+                "CMUX_CODEX_DISABLE_PROFILE_HOOKS": "1",
+                "CMUX_CODEX_STATE_WATCHER_SETTLE_SEC": "0.1",
+            },
             real_codex_script=DEFAULT_FAKE_CODEX + "sleep 2\n",
             wrapper_cwd=project_dir,
         )
@@ -475,6 +532,11 @@ def test_state_watcher_writes_unambiguous_session_metadata(failures: list[str]) 
     expect(
         any(f"set-metadata --key codex.session_id --value {session_id}" in line for line in c11_log),
         f"state watcher: missing codex.session_id metadata write: {c11_log}",
+        failures,
+    )
+    expect(
+        any(f"set-metadata --key codex.session_id --value {session_id} --workspace workspace:test --surface surface:test --source heuristic" in line for line in c11_log),
+        f"state watcher: inferred session id must be written at heuristic precedence: {c11_log}",
         failures,
     )
     expect(
@@ -506,7 +568,12 @@ def test_state_watcher_handles_created_time_schema_variants(failures: list[str])
             code, _, c11_log, stderr, _, _, _ = run_wrapper(
                 socket_state="live",
                 argv=["hello"],
-                extra_env={"CODEX_HOME": str(codex_home), "CMUX_CODEX_DISABLE_STATE_WATCHER": "0"},
+                extra_env={
+                    "CODEX_HOME": str(codex_home),
+                    "CMUX_CODEX_DISABLE_STATE_WATCHER": "0",
+                    "CMUX_CODEX_DISABLE_PROFILE_HOOKS": "1",
+                    "CMUX_CODEX_STATE_WATCHER_SETTLE_SEC": "0.1",
+                },
                 real_codex_script=DEFAULT_FAKE_CODEX + "sleep 2\n",
                 wrapper_cwd=project_dir,
             )
@@ -536,7 +603,12 @@ def test_state_watcher_rejects_same_cwd_ambiguity(failures: list[str]) -> None:
         code, _, c11_log, stderr, _, _, _ = run_wrapper(
             socket_state="live",
             argv=["hello"],
-            extra_env={"CODEX_HOME": str(codex_home), "CMUX_CODEX_DISABLE_STATE_WATCHER": "0"},
+            extra_env={
+                "CODEX_HOME": str(codex_home),
+                "CMUX_CODEX_DISABLE_STATE_WATCHER": "0",
+                "CMUX_CODEX_DISABLE_PROFILE_HOOKS": "1",
+                "CMUX_CODEX_STATE_WATCHER_SETTLE_SEC": "0.1",
+            },
             real_codex_script=DEFAULT_FAKE_CODEX + "sleep 2\n",
             wrapper_cwd=project_dir,
         )
@@ -545,6 +617,47 @@ def test_state_watcher_rejects_same_cwd_ambiguity(failures: list[str]) -> None:
     expect(
         all("set-metadata --key codex.session_id" not in line for line in c11_log),
         f"state watcher ambiguity: must not write a session id when same-cwd candidates are ambiguous: {c11_log}",
+        failures,
+    )
+
+
+def test_state_watcher_settles_before_writing_single_same_cwd_candidate(failures: list[str]) -> None:
+    first_id = "11111111-2222-3333-4444-555555555555"
+    second_id = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+    with tempfile.TemporaryDirectory(prefix="c11-codex-state-delayed-ambiguous-") as td:
+        codex_home = Path(td) / "codex-home"
+        project_dir = Path(td).resolve() / "project"
+        project_dir.mkdir()
+        make_codex_state_db(
+            codex_home,
+            session_id=first_id,
+            cwd=str(project_dir),
+        )
+
+        code, _, c11_log, stderr, _, _, _ = run_wrapper(
+            socket_state="live",
+            argv=["hello"],
+            extra_env={
+                "CODEX_HOME": str(codex_home),
+                "CMUX_CODEX_DISABLE_STATE_WATCHER": "0",
+                "CMUX_CODEX_DISABLE_PROFILE_HOOKS": "1",
+                "CMUX_CODEX_STATE_WATCHER_SETTLE_SEC": "0.8",
+                "FAKE_SECOND_SESSION_ID": second_id,
+                "FAKE_PROJECT_CWD": str(project_dir),
+            },
+            real_codex_script=DELAYED_AMBIGUOUS_STATE_ROW_FAKE_CODEX,
+            wrapper_cwd=project_dir,
+        )
+
+    expect(code == 0, f"state watcher delayed ambiguity: wrapper exited {code}: {stderr}", failures)
+    expect(
+        all(f"set-metadata --key codex.session_id --value {first_id}" not in line for line in c11_log),
+        f"state watcher delayed ambiguity: must not commit first same-cwd candidate before settle: {c11_log}",
+        failures,
+    )
+    expect(
+        all(f"set-metadata --key codex.session_id --value {second_id}" not in line for line in c11_log),
+        f"state watcher delayed ambiguity: must not commit delayed same-cwd candidate either: {c11_log}",
         failures,
     )
 
@@ -562,7 +675,12 @@ def test_state_watcher_allows_single_global_fallback(failures: list[str]) -> Non
         code, _, c11_log, stderr, _, _, _ = run_wrapper(
             socket_state="live",
             argv=["hello"],
-            extra_env={"CODEX_HOME": str(codex_home), "CMUX_CODEX_DISABLE_STATE_WATCHER": "0"},
+            extra_env={
+                "CODEX_HOME": str(codex_home),
+                "CMUX_CODEX_DISABLE_STATE_WATCHER": "0",
+                "CMUX_CODEX_DISABLE_PROFILE_HOOKS": "1",
+                "CMUX_CODEX_STATE_WATCHER_SETTLE_SEC": "0.1",
+            },
             real_codex_script=DEFAULT_FAKE_CODEX + "sleep 4\n",
             wrapper_cwd=shell_dir,
         )
@@ -571,6 +689,11 @@ def test_state_watcher_allows_single_global_fallback(failures: list[str]) -> Non
     expect(
         any(f"set-metadata --key codex.session_id --value {session_id}" in line for line in c11_log),
         f"state watcher global fallback: missing codex.session_id metadata write: {c11_log}",
+        failures,
+    )
+    expect(
+        any(f"set-metadata --key codex.session_id --value {session_id} --workspace workspace:test --surface surface:test --source heuristic" in line for line in c11_log),
+        f"state watcher global fallback: inferred session id must be heuristic precedence: {c11_log}",
         failures,
     )
     expect(
@@ -597,6 +720,7 @@ def test_state_watcher_waits_for_cwd_candidate_before_global_fallback(failures: 
             extra_env={
                 "CODEX_HOME": str(codex_home),
                 "CMUX_CODEX_DISABLE_STATE_WATCHER": "0",
+                "CMUX_CODEX_DISABLE_PROFILE_HOOKS": "1",
                 "FAKE_PROJECT_SESSION_ID": project_session_id,
                 "FAKE_PROJECT_CWD": str(project_dir),
             },
@@ -822,11 +946,13 @@ def main() -> int:
     test_live_socket_injects_notify_bridge(failures)
     test_live_socket_uses_c11_owned_profile_layer(failures)
     test_profile_layer_rejects_symlinked_overlay_paths(failures)
+    test_profile_layer_prunes_legacy_mirror_symlinks(failures)
     test_plain_interactive_codex_does_not_mark_running(failures)
     test_fresh_launch_clears_declare_session_metadata(failures)
     test_state_watcher_writes_unambiguous_session_metadata(failures)
     test_state_watcher_handles_created_time_schema_variants(failures)
     test_state_watcher_rejects_same_cwd_ambiguity(failures)
+    test_state_watcher_settles_before_writing_single_same_cwd_candidate(failures)
     test_state_watcher_allows_single_global_fallback(failures)
     test_state_watcher_waits_for_cwd_candidate_before_global_fallback(failures)
     test_missing_socket_skips_hook_injection(failures)

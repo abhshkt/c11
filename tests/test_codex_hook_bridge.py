@@ -469,6 +469,24 @@ def main() -> int:
                 created_at_ms=has_created_at_ms,
                 created_at=has_created_at,
             )
+            for source in ("declare", "heuristic"):
+                run_cli(
+                    cli_path,
+                    socket_path,
+                    [
+                        "clear-metadata",
+                        "--workspace",
+                        workspace_id,
+                        "--surface",
+                        surface_id,
+                        "--key",
+                        "codex.session_id",
+                        "--key",
+                        "codex.session_project_dir",
+                        "--source",
+                        source,
+                    ],
+                )
             run_cli(
                 cli_path,
                 socket_path,
@@ -548,6 +566,48 @@ def main() -> int:
         expect("terminal_type = shell" in guarded_metadata, f"Hook declare writes must not override explicit terminal_type: {guarded_metadata!r}")
         expect(f"model = {operator_model}" in guarded_metadata, f"Hook declare writes must not override explicit model: {guarded_metadata!r}")
         expect(f"codex.session_id = {guarded_session_id}" in guarded_metadata, f"Hook should still refresh declare-level session metadata: {guarded_metadata!r}")
+
+        heuristic_state_id = "77777777-8888-9999-aaaa-bbbbbbbbbbbb"
+        guarded_state_home = test_root / "state-home-guarded"
+        make_codex_state_db(
+            guarded_state_home,
+            session_id=heuristic_state_id,
+            cwd=str(project_dir),
+            created_at_ms=True,
+            created_at=True,
+        )
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "session-start", "--started-at", "4102444799"],
+            payload={
+                "hook_event_name": "SessionStart",
+                "cwd": str(project_dir),
+                "model": "gpt-5.5",
+            },
+            env={**hook_env, "CODEX_HOME": str(guarded_state_home)},
+        )
+        guarded_after_heuristic = run_cli(
+            cli_path,
+            socket_path,
+            [
+                "get-metadata",
+                "--workspace",
+                workspace_id,
+                "--surface",
+                surface_id,
+                "--key",
+                "codex.session_id",
+            ],
+        )
+        expect(
+            f"codex.session_id = {guarded_session_id}" in guarded_after_heuristic,
+            f"State-DB heuristic metadata must not override hook-provided declare metadata: {guarded_after_heuristic!r}",
+        )
+        expect(
+            heuristic_state_id not in guarded_after_heuristic,
+            f"State-DB heuristic session id should remain hidden behind declare metadata: {guarded_after_heuristic!r}",
+        )
         run_cli(
             cli_path,
             socket_path,

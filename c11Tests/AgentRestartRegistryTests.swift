@@ -341,6 +341,34 @@ final class AgentRestartRegistryTests: XCTestCase {
         }
     }
 
+    func testCodexRowRejectsPresentButEmptyMetadataSessionId() {
+        let registry = AgentRestartRegistry.phase1
+        for payload in ["", "   \t "] {
+            XCTAssertNil(
+                registry.resolveCommand(
+                    terminalType: "codex",
+                    sessionId: nil,
+                    metadata: [SurfaceMetadataKeyName.codexSessionId: payload]
+                ),
+                "present empty/whitespace codex.session_id must fail closed, not resume --last"
+            )
+        }
+    }
+
+    func testCodexRowRejectsEmptyFallbackSessionId() {
+        let registry = AgentRestartRegistry.phase1
+        for payload in ["", "   \t "] {
+            XCTAssertNil(
+                registry.resolveCommand(
+                    terminalType: "codex",
+                    sessionId: payload,
+                    metadata: [:]
+                ),
+                "empty direct Codex session id must fail closed; absent id is represented by nil"
+            )
+        }
+    }
+
     func testCodexRowDropsMalformedProjectDirLikeClaude() {
         let registry = AgentRestartRegistry.phase1
         let sessionId = "abc12345-ef67-890a-bcde-f0123456789a"

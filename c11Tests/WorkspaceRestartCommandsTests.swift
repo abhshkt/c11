@@ -324,6 +324,44 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
         XCTAssertEqual(pending.first?.command, "codex resume --last\n")
     }
 
+    func testCodexWithNonStringSessionIdFailsClosed() {
+        let snapshot = makeSnapshot(panels: [
+            makePanelSnapshot(
+                id: UUID(),
+                type: .terminal,
+                metadata: [
+                    SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeCodex),
+                    SurfaceMetadataKeyName.codexSessionId: .number(42)
+                ]
+            )
+        ])
+
+        XCTAssertTrue(
+            Workspace.pendingRestartCommands(from: snapshot, registry: .phase1).isEmpty,
+            "present non-string codex.session_id must not degrade into codex resume --last"
+        )
+    }
+
+    func testCodexWithEmptySessionIdFailsClosed() {
+        for value in ["", "   \t "] {
+            let snapshot = makeSnapshot(panels: [
+                makePanelSnapshot(
+                    id: UUID(),
+                    type: .terminal,
+                    metadata: [
+                        SurfaceMetadataKeyName.terminalType: .string(SurfaceMetadataKeyName.terminalTypeCodex),
+                        SurfaceMetadataKeyName.codexSessionId: .string(value)
+                    ]
+                )
+            ])
+
+            XCTAssertTrue(
+                Workspace.pendingRestartCommands(from: snapshot, registry: .phase1).isEmpty,
+                "present empty/whitespace codex.session_id must not degrade into codex resume --last"
+            )
+        }
+    }
+
     func testCodexSameCwdPanelsResumeDistinctSessionIds() {
         let panelA = UUID()
         let panelB = UUID()

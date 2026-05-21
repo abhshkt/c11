@@ -147,11 +147,18 @@ struct AgentRestartRegistry: Sendable {
             return "\(resume)\n"
         },
         Row(terminalType: SurfaceMetadataKeyName.terminalTypeCodex) { sessionId, metadata in
-            let metadataCandidate = metadata[SurfaceMetadataKeyName.codexSessionId]?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let fallbackCandidate = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let candidate = metadataCandidate ?? fallbackCandidate
-            guard let raw = candidate, !raw.isEmpty else {
+            let raw: String
+            if metadata.keys.contains(SurfaceMetadataKeyName.codexSessionId) {
+                guard let candidate = metadata[SurfaceMetadataKeyName.codexSessionId]?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                      !candidate.isEmpty else {
+                    return nil
+                }
+                raw = candidate
+            } else if let candidate = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines) {
+                guard !candidate.isEmpty else { return nil }
+                raw = candidate
+            } else {
                 // Older snapshots or disabled hooks retain the historical
                 // best-effort behavior. Once a snapshot claims a specific
                 // Codex id, though, malformed metadata must not degrade into

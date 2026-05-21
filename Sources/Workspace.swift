@@ -360,12 +360,26 @@ extension Workspace {
         var result: [(panelId: UUID, command: String)] = []
         for panelSnapshot in snapshot.panels {
             guard panelSnapshot.type == .terminal else { continue }
-            let meta = Workspace.stringValues(from: panelSnapshot.metadata)
-            let terminalType = meta[SurfaceMetadataKeyName.terminalType]
+            guard case .string(let terminalType) = Workspace.persistedStringValue(
+                from: panelSnapshot.metadata,
+                key: SurfaceMetadataKeyName.terminalType
+            ) else { continue }
+            var meta = Workspace.stringValues(from: panelSnapshot.metadata)
             let sessionId: String?
             switch terminalType {
             case SurfaceMetadataKeyName.terminalTypeCodex:
-                sessionId = meta[SurfaceMetadataKeyName.codexSessionId]
+                switch Workspace.persistedStringValue(
+                    from: panelSnapshot.metadata,
+                    key: SurfaceMetadataKeyName.codexSessionId
+                ) {
+                case .string(let value):
+                    sessionId = value
+                    meta[SurfaceMetadataKeyName.codexSessionId] = value
+                case .absent:
+                    sessionId = nil
+                case .invalid:
+                    continue
+                }
             default:
                 sessionId = meta[SurfaceMetadataKeyName.claudeSessionId]
             }
@@ -379,13 +393,33 @@ extension Workspace {
         return result
     }
 
+    enum PersistedStringValue {
+        case absent
+        case string(String)
+        case invalid
+    }
+
+    static func persistedStringValue(
+        from metadata: [String: PersistedJSONValue]?,
+        key: String
+    ) -> PersistedStringValue {
+        guard let metadata,
+              let value = metadata[key] else {
+            return .absent
+        }
+        if case .string(let string) = value {
+            return .string(string)
+        }
+        return .invalid
+    }
+
     /// Flatten persisted metadata to `[String: String]`, keeping only
     /// `.string(...)` entries. Mirrors the existing
     /// `WorkspaceLayoutExecutor.stringMetadata` helper: the registry
     /// contract is string-valued (`terminal_type`, `*.session_id`) and the
-    /// metadata store rejects non-string writes for these reserved keys at
-    /// the boundary, so silently dropping any non-string value here is
-    /// consistent with the executor's restore path.
+    /// Restore callers that need to distinguish "key absent" from "key
+    /// present but malformed" must use `persistedStringValue(from:key:)`
+    /// before flattening.
     static func stringValues(from metadata: [String: PersistedJSONValue]?) -> [String: String] {
         guard let metadata else { return [:] }
         var out: [String: String] = [:]
