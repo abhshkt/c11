@@ -53,9 +53,9 @@ final class WorkspaceApplyPlanCodableTests: XCTestCase {
             id: "main",
             kind: .terminal,
             title: "driver",
-            description: "cc on auth",
+            description: "Claude on auth",
             workingDirectory: "/Users/op/repo",
-            command: "cc --resume abc123",
+            command: "claude --dangerously-skip-permissions --resume abc123",
             metadata: [
                 "role": .string("driver"),
                 "status": .string("ready"),

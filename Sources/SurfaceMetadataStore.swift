@@ -155,11 +155,10 @@ final class SurfaceMetadataStore: @unchecked Sendable {
 
     /// Reserved canonical keys. Keys not in this set accept any JSON value.
     ///
-    /// `claude.session_id` is reserved because its value is interpolated
-    /// into the `cc --resume <id>` shell command at restore time by
-    /// `AgentRestartRegistry.phase1`. Accepting arbitrary strings here
-    /// would make the metadata layer a command-injection vector. See
-    /// `validateReservedKey` for the UUIDv4 grammar enforced at write time.
+    /// `*.session_id` reserved keys are interpolated into shell commands at
+    /// restore time by `AgentRestartRegistry.phase1`. Accepting arbitrary
+    /// strings here would make the metadata layer a command-injection vector.
+    /// See `validateReservedKey` for the UUID grammar enforced at write time.
     static let reservedKeys: Set<String> = [
         "role",
         "status",
@@ -173,7 +172,18 @@ final class SurfaceMetadataStore: @unchecked Sendable {
         "worktree",
         "branch",
         "claude.session_id",
-        "claude.session_project_dir"
+        "claude.session_project_dir",
+        "codex.session_id",
+        "codex.session_project_dir",
+        "codex.session_store",
+        "codex.restart_blocked"
+    ]
+
+    private static let codexSessionAtomicKeys: Set<String> = [
+        "codex.session_id",
+        "codex.session_project_dir",
+        "codex.session_store",
+        "codex.restart_blocked"
     ]
 
     static func validateReservedKey(_ key: String, _ value: Any) -> WriteError? {
@@ -185,7 +195,16 @@ final class SurfaceMetadataStore: @unchecked Sendable {
         case "task":
             return validateString(key: key, value: value, maxLen: 128)
         case "model":
-            return validateKebab(key: key, value: value, maxLen: 64)
+            guard let s = value as? String else {
+                return .reservedKeyInvalidType(key, "expected string")
+            }
+            if !isValidSurfaceModelId(s) {
+                return .reservedKeyInvalidType(
+                    key,
+                    "must be 1-64 ASCII chars: letters, digits, dot, underscore, colon, slash, plus, hyphen"
+                )
+            }
+            return nil
         case "progress":
             guard let num = value as? NSNumber, !(num is Bool) else {
                 return .reservedKeyInvalidType(key, "expected number")
@@ -252,12 +271,27 @@ final class SurfaceMetadataStore: @unchecked Sendable {
         case "claude.session_id":
             // Claude SessionStart's `session_id` is a UUIDv4; reject
             // anything else. The value is interpolated verbatim into
-            // `cc --resume <id>` at restore time, so a non-UUID value
+            // a restore command at restore time, so a non-UUID value
             // would be a command-injection vector.
             guard let s = value as? String else {
                 return .reservedKeyInvalidType(key, "expected string")
             }
             if !isValidClaudeSessionId(s) {
+                return .reservedKeyInvalidType(
+                    key,
+                    "must match UUIDv4 shape 8-4-4-4-12 hex"
+                )
+            }
+            return nil
+        case "codex.session_id":
+            // Codex SessionStart's `session_id` is used by
+            // `codex resume <id>` at restore time. Keep the same
+            // UUID-only boundary as Claude so the resume command cannot be
+            // shaped by arbitrary metadata.
+            guard let s = value as? String else {
+                return .reservedKeyInvalidType(key, "expected string")
+            }
+            if !isValidCodexSessionId(s) {
                 return .reservedKeyInvalidType(
                     key,
                     "must match UUIDv4 shape 8-4-4-4-12 hex"
@@ -279,6 +313,45 @@ final class SurfaceMetadataStore: @unchecked Sendable {
                 return .reservedKeyInvalidType(
                     key,
                     "must be an absolute POSIX path (≤4096 chars, no NUL/newline/single-quote)"
+                )
+            }
+            return nil
+        case "codex.session_project_dir":
+            // Project directory the codex session was created in;
+            // interpolated into `cd '<path>' && ...` at restore time.
+            // Use the same absolute-path grammar as Claude.
+            guard let s = value as? String else {
+                return .reservedKeyInvalidType(key, "expected string")
+            }
+            if !isValidCodexSessionProjectDir(s) {
+                return .reservedKeyInvalidType(
+                    key,
+                    "must be an absolute POSIX path (≤4096 chars, no NUL/newline/single-quote)"
+                )
+            }
+            return nil
+        case "codex.session_store":
+            guard let s = value as? String else {
+                return .reservedKeyInvalidType(key, "expected string")
+            }
+            if s != SurfaceMetadataKeyName.codexSessionStoreManagedOverlay &&
+                s != SurfaceMetadataKeyName.codexSessionStoreRealHome {
+                return .reservedKeyInvalidType(
+                    key,
+                    "must be managed_overlay or real_home"
+                )
+            }
+            return nil
+        case "codex.restart_blocked":
+            guard let s = value as? String else {
+                return .reservedKeyInvalidType(key, "expected string")
+            }
+            if s != SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionId &&
+                s != SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionStore &&
+                s != SurfaceMetadataKeyName.codexRestartBlockedInvalidMarker {
+                return .reservedKeyInvalidType(
+                    key,
+                    "must be invalid_session_id, invalid_session_store, or invalid_restart_blocked"
                 )
             }
             return nil
@@ -466,13 +539,64 @@ final class SurfaceMetadataStore: @unchecked Sendable {
         sources: [String: SourceRecord]
     ) {
         queue.sync {
-            metadata[workspaceId, default: [:]][surfaceId] = values
-            self.sources[workspaceId, default: [:]][surfaceId] = sources
+            let sanitized = Self.sanitizedSnapshotMetadata(values: values, sources: sources)
+            metadata[workspaceId, default: [:]][surfaceId] = sanitized.values
+            self.sources[workspaceId, default: [:]][surfaceId] = sanitized.sources
             // Bump the revision so a post-restore autosave tick sees the
             // fingerprint differ from the pre-restore state, writing the
             // restored contents back to disk with a fresh createdAt.
             metadataStoreRevision &+= 1
         }
+    }
+
+    private static func sanitizedSnapshotMetadata(
+        values: [String: Any],
+        sources: [String: SourceRecord]
+    ) -> (values: [String: Any], sources: [String: SourceRecord]) {
+        var restoredValues = values
+        var restoredSources = sources
+        let isCodexTerminal = (values[SurfaceMetadataKeyName.terminalType] as? String) ==
+            SurfaceMetadataKeyName.terminalTypeCodex
+        var codexRestartBlockReason: String?
+
+        for (key, value) in values where reservedKeys.contains(key) {
+            if validateReservedKey(key, value) != nil {
+                restoredValues.removeValue(forKey: key)
+                restoredSources.removeValue(forKey: key)
+                if isCodexTerminal {
+                    if key == SurfaceMetadataKeyName.codexSessionId {
+                        codexRestartBlockReason = SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionId
+                    } else if key == SurfaceMetadataKeyName.codexSessionStore,
+                              codexRestartBlockReason == nil {
+                        codexRestartBlockReason = SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionStore
+                    } else if key == SurfaceMetadataKeyName.codexRestartBlocked,
+                              codexRestartBlockReason == nil {
+                        codexRestartBlockReason = SurfaceMetadataKeyName.codexRestartBlockedInvalidMarker
+                    }
+                }
+            }
+        }
+
+        if let codexRestartBlockReason {
+            // Preserve the distinction between "Codex id absent" (legacy
+            // snapshots may use resume --last) and "Codex restart metadata was
+            // present but invalid" (must fail closed even after sanitize +
+            // autosave). The invalid reserved value itself cannot be kept, so
+            // write a small valid marker that future restore passes honor.
+            for key in Self.codexSessionAtomicKeys {
+                restoredValues.removeValue(forKey: key)
+                restoredSources.removeValue(forKey: key)
+            }
+            restoredValues[SurfaceMetadataKeyName.codexRestartBlocked] = codexRestartBlockReason
+            restoredSources[SurfaceMetadataKeyName.codexRestartBlocked] = SourceRecord(
+                source: .declare,
+                ts: Date().timeIntervalSince1970
+            )
+        }
+
+        let valueKeys = Set(restoredValues.keys)
+        restoredSources = restoredSources.filter { valueKeys.contains($0.key) }
+        return (restoredValues, restoredSources)
     }
 
     /// Remove all metadata for a surface. Called from `pruneSurfaceMetadata`
@@ -595,7 +719,40 @@ final class SurfaceMetadataStore: @unchecked Sendable {
             if !priorBlob.isEmpty || !priorSrc.isEmpty { mutated = true }
         }
 
+        var atomicallyRejectedKeys = Set<String>()
+        let incomingCodexSessionKeys = Set(partial.keys).intersection(Self.codexSessionAtomicKeys)
+        var codexSessionKeysToClear = Set<String>()
+        if mode == .merge,
+           incomingCodexSessionKeys.contains(SurfaceMetadataKeyName.codexSessionId) {
+            let keysToPreflight = Self.codexSessionAtomicKeys
+            let blockedByPrecedence = keysToPreflight.contains { key in
+                guard let current = sblob[key] else { return false }
+                return source.precedence < current.source.precedence
+            }
+            if blockedByPrecedence {
+                atomicallyRejectedKeys = incomingCodexSessionKeys
+                for key in incomingCodexSessionKeys {
+                    result.applied[key] = false
+                    result.reasons[key] = "lower_precedence"
+                }
+            } else {
+                codexSessionKeysToClear = keysToPreflight.subtracting(incomingCodexSessionKeys)
+            }
+        }
+
+        for key in codexSessionKeysToClear {
+            if blob.removeValue(forKey: key) != nil {
+                mutated = true
+            }
+            if sblob.removeValue(forKey: key) != nil {
+                mutated = true
+            }
+        }
+
         for (k, v) in partial {
+            if atomicallyRejectedKeys.contains(k) {
+                continue
+            }
             if mode == .merge, let cur = sblob[k], source.precedence < cur.source.precedence {
                 result.applied[k] = false
                 result.reasons[k] = "lower_precedence"

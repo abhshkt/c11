@@ -5408,9 +5408,10 @@ class TerminalController {
 
     /// `snapshot.restore`: read a snapshot by id, run the embedded plan
     /// through `WorkspaceLayoutExecutor`, optionally threading a named
-    /// restart registry (`"phase1"` → `AgentRestartRegistry.phase1`) so cc
-    /// terminals resume via `cc --resume <session-id>`. Returns the same
-    /// `ApplyResult` shape `workspace.apply` returns.
+    /// restart registry (`"phase1"` → `AgentRestartRegistry.phase1`) so
+    /// lifecycle-integrated agents can resume from captured per-surface
+    /// session metadata. Returns the same `ApplyResult` shape
+    /// `workspace.apply` returns.
     ///
     /// Socket-initiated restores resolve `snapshot_id` through
     /// `WorkspaceSnapshotStore.resolvePath(byId:)`, which validates the id
@@ -5503,7 +5504,7 @@ class TerminalController {
                 // "phase5" against an older c11 binary should still land
                 // their restore, just without restart synthesis.
                 preApplyWarnings.append(
-                    "unknown restart_registry '\(registryName)': falling back to no-op (no cc --resume synthesis)"
+                    "unknown restart_registry '\(registryName)': falling back to no-op (no agent resume synthesis)"
                 )
             }
         }
@@ -5641,7 +5642,7 @@ class TerminalController {
             optionsTemplate.restartRegistry = resolved
             if resolved == nil {
                 preApplyWarnings.append(
-                    "unknown restart_registry '\(registryName)': falling back to no-op (no cc --resume synthesis)"
+                    "unknown restart_registry '\(registryName)': falling back to no-op (no agent resume synthesis)"
                 )
             }
         }

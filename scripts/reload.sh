@@ -456,6 +456,12 @@ if [[ -x "$GHOSTTY_HELPER_SRC" ]]; then
   cp "$GHOSTTY_HELPER_SRC" "$BIN_DIR/ghostty"
   chmod +x "$BIN_DIR/ghostty"
 fi
+if [[ -n "$TAG" ]]; then
+  # Tagged validation copies rebuilt helper binaries and wrapper scripts into
+  # the app bundle after Xcode signs it. Re-sign so the launched tagged app is
+  # the exact bundle under test, including Resources/bin/codex.
+  /usr/bin/codesign --force --sign - --timestamp=none --generate-entitlement-der "$APP_PATH" >/dev/null
+fi
 CLI_PATH="$APP_PATH/Contents/Resources/bin/c11"
 if [[ -x "$CLI_PATH" ]]; then
   echo "$CLI_PATH" > /tmp/c11-last-cli-path || true

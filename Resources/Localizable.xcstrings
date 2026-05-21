@@ -33322,6 +33322,53 @@
         }
       }
     },
+    "settings.automation.codex": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex Integration"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex連携"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 集成"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 整合"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 연동"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Интеграция с Codex"
+          }
+        },
+        "uk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Інтеграція з Codex"
+          }
+        }
+      }
+    },
     "settings.automation.claudeCode.note": {
       "extractionState": "manual",
       "localizations": {
@@ -33365,6 +33412,53 @@
           "stringUnit": {
             "state": "translated",
             "value": "Обгортає команду claude, щоб додати відстеження сесій і хуки сповіщень. Вимкніть, щоб керувати хуками Claude Code самостійно."
+          }
+        }
+      }
+    },
+    "settings.automation.agentIntegrations.note": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When enabled, c11 wraps the corresponding agent command to inject session tracking and notification hooks. Disable an integration if you prefer to manage that agent's hooks yourself."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有効にすると、c11は対応するエージェントコマンドをラップして、セッション追跡と通知フックを挿入します。そのエージェントのフックを自分で管理する場合は、その連携を無効にしてください。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启用后，c11 会包装对应的代理命令以注入会话跟踪和通知钩子。如果你想自行管理该代理的钩子，请关闭相应集成。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "啟用後，c11 會包裝對應的代理指令以注入工作階段追蹤和通知掛鉤。如果你想自行管理該代理的掛鉤，請停用相應整合。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "활성화하면 c11이 해당 에이전트 명령을 래핑하여 세션 추적 및 알림 훅을 삽입합니다. 해당 에이전트의 훅을 직접 관리하려면 그 연동을 끄세요."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Когда включено, c11 оборачивает соответствующую команду агента, чтобы внедрить хуки отслеживания сеанса и уведомлений. Отключите интеграцию, если хотите управлять хуками этого агента самостоятельно."
+          }
+        },
+        "uk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Коли ввімкнено, c11 обгортає відповідну команду агента, щоб додати хуки відстеження сесій і сповіщень. Вимкніть інтеграцію, якщо хочете керувати хуками цього агента самостійно."
           }
         }
       }
@@ -33416,6 +33510,53 @@
         }
       }
     },
+    "settings.automation.codex.subtitleOff": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex runs without c11 integration."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codexはc11連携なしで実行されます。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 在没有 c11 集成的情况下运行。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 在不使用 c11 整合的情況下運行。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex가 c11 연동 없이 실행됩니다."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex работает без интеграции с c11."
+          }
+        },
+        "uk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex працює без інтеграції з c11."
+          }
+        }
+      }
+    },
     "settings.automation.claudeCode.subtitleOn": {
       "extractionState": "manual",
       "localizations": {
@@ -33459,6 +33600,53 @@
           "stringUnit": {
             "state": "translated",
             "value": "Бічна панель показує статус сеансу Claude та сповіщення."
+          }
+        }
+      }
+    },
+    "settings.automation.codex.subtitleOn": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sidebar shows Codex session status and notifications."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "サイドバーにCodexセッションのステータスと通知が表示されます。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "侧边栏显示 Codex 会话状态和通知。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "側邊欄顯示 Codex 工作階段狀態和通知。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "사이드바에 Codex 세션 상태와 알림이 표시됩니다."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Боковая панель показывает статус сеанса Codex и уведомления."
+          }
+        },
+        "uk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Бічна панель показує статус сеансу Codex та сповіщення."
           }
         }
       }
