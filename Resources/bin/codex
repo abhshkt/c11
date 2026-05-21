@@ -555,6 +555,78 @@ codex_should_passthrough() {
     return 1
 }
 
+codex_resume_last_arg() {
+    local args=("$@")
+    local i=0
+    local arg
+    local saw_resume=0
+    local saw_last=0
+    while (( i < ${#args[@]} )); do
+        arg="${args[$i]}"
+        if [[ "$saw_resume" == "0" ]]; then
+            case "$arg" in
+                --)
+                    return 1
+                    ;;
+                -c|--config|--enable|--disable|--remote|--remote-auth-token-env|-i|--image|-m|--model|--local-provider|-p|--profile|--profile-v2|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval)
+                    i=$((i + 2))
+                    continue
+                    ;;
+                --config=*|--enable=*|--disable=*|--remote=*|--remote-auth-token-env=*|--image=*|--model=*|--local-provider=*|--profile=*|--profile-v2=*|--sandbox=*|--cd=*|--add-dir=*|--ask-for-approval=*)
+                    i=$((i + 1))
+                    continue
+                    ;;
+                --strict-config|--oss|--dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-hook-trust|--search|--no-alt-screen|--help|-h|--version|-V|-VV)
+                    i=$((i + 1))
+                    continue
+                    ;;
+                -*)
+                    return 1
+                    ;;
+                resume)
+                    saw_resume=1
+                    i=$((i + 1))
+                    continue
+                    ;;
+                *)
+                    return 1
+                    ;;
+            esac
+        fi
+
+        case "$arg" in
+            --)
+                i=$((i + 1))
+                continue
+                ;;
+            -c|--config|--enable|--disable|--remote|--remote-auth-token-env|-i|--image|-m|--model|--local-provider|-p|--profile|--profile-v2|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval)
+                i=$((i + 2))
+                continue
+                ;;
+            --config=*|--enable=*|--disable=*|--remote=*|--remote-auth-token-env=*|--image=*|--model=*|--local-provider=*|--profile=*|--profile-v2=*|--sandbox=*|--cd=*|--add-dir=*|--ask-for-approval=*)
+                i=$((i + 1))
+                continue
+                ;;
+            --last)
+                saw_last=1
+                i=$((i + 1))
+                continue
+                ;;
+            --all|--include-non-interactive|--strict-config|--oss|--dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-hook-trust|--search|--no-alt-screen|--help|-h|--version|-V|-VV)
+                i=$((i + 1))
+                continue
+                ;;
+            -*)
+                return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+    [[ "$saw_resume" == "1" && "$saw_last" == "1" ]]
+}
+
 codex_resume_session_id_arg() {
     local args=("$@")
     local i=0
@@ -987,8 +1059,13 @@ CODEX_PROJECT_DIR="$(codex_effective_project_dir "$@" || true)"
 if [[ -n "$CODEX_PROJECT_DIR" ]]; then
     export CMUX_CODEX_PROJECT_DIR="$CODEX_PROJECT_DIR"
 fi
+CODEX_LEGACY_RESUME_LAST=0
+if [[ "${CMUX_CODEX_LEGACY_RESUME_LAST:-}" == "1" ]] || codex_resume_last_arg "$@"; then
+    CODEX_LEGACY_RESUME_LAST=1
+    export CMUX_CODEX_LEGACY_RESUME_LAST=1
+fi
 codex_profile_args=()
-if [[ "${CMUX_CODEX_DISABLE_PROFILE_HOOKS:-}" != "1" ]] && ! codex_args_include_profile_v2 "$@"; then
+if [[ "${CMUX_CODEX_DISABLE_PROFILE_HOOKS:-}" != "1" && "$CODEX_LEGACY_RESUME_LAST" != "1" ]] && ! codex_args_include_profile_v2 "$@"; then
     CODEX_ORIGINAL_HOME="$(codex_real_home_dir || true)"
     if [[ -n "$CODEX_ORIGINAL_HOME" ]]; then
         C11_CODEX_HOME="$(prepare_c11_codex_home_overlay "$CODEX_ORIGINAL_HOME" || true)"

@@ -156,6 +156,21 @@ for expected in \
 done
 """
 
+REAL_HOME_CHECKING_FAKE_CODEX = DEFAULT_FAKE_CODEX + """
+if [[ "${CODEX_HOME-}" != "${EXPECTED_CODEX_REAL_HOME}" ]]; then
+  echo "legacy resume --last must use real Codex home, got CODEX_HOME=${CODEX_HOME-__UNSET__}" >&2
+  exit 62
+fi
+if [[ -n "${CMUX_CODEX_HOME_OVERLAY-}" ]]; then
+  echo "legacy resume --last must not export c11 overlay home: ${CMUX_CODEX_HOME_OVERLAY}" >&2
+  exit 63
+fi
+if [[ "${CMUX_CODEX_LEGACY_RESUME_LAST-}" != "1" ]]; then
+  echo "legacy resume --last marker should be visible to child Codex" >&2
+  exit 64
+fi
+"""
+
 
 def make_executable(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
@@ -460,6 +475,25 @@ def test_profile_layer_prunes_legacy_mirror_symlinks(failures: list[str]) -> Non
     )
     expect(code == 0, f"legacy profile mirror: wrapper exited {code}: {stderr}", failures)
     expect("--profile-v2" in real_argv, f"legacy profile mirror: expected managed c11 profile, got {real_argv}", failures)
+
+
+def test_legacy_resume_last_uses_real_codex_home(failures: list[str]) -> None:
+    for label, extra_env in (
+        ("manual argv shape", {}),
+        ("restore env marker", {"CMUX_CODEX_LEGACY_RESUME_LAST": "1"}),
+    ):
+        code, real_argv, c11_log, stderr, _, _, resume_value = run_wrapper(
+            socket_state="live",
+            argv=["resume", "--last"],
+            extra_env=extra_env,
+            real_codex_script=REAL_HOME_CHECKING_FAKE_CODEX,
+        )
+        expect(code == 0, f"{label}: legacy resume --last wrapper exited {code}: {stderr}", failures)
+        expect(real_argv[-2:] == ["resume", "--last"], f"{label}: expected original resume args, got {real_argv}", failures)
+        expect("--profile-v2" not in real_argv, f"{label}: legacy --last must not use overlay profile args: {real_argv}", failures)
+        expect(resume_value == "__UNSET__", f"{label}: --last should not masquerade as explicit resume id: {resume_value!r}", failures)
+        expect(any("set-agent --type codex" in line for line in c11_log), f"{label}: should still mark surface as Codex: {c11_log}", failures)
+        expect(any("clear-metadata" in line for line in c11_log), f"{label}: fresh legacy --last launch should clear stale explicit session metadata: {c11_log}", failures)
 
 
 def test_plain_interactive_codex_does_not_mark_running(failures: list[str]) -> None:
@@ -947,6 +981,7 @@ def main() -> int:
     test_live_socket_uses_c11_owned_profile_layer(failures)
     test_profile_layer_rejects_symlinked_overlay_paths(failures)
     test_profile_layer_prunes_legacy_mirror_symlinks(failures)
+    test_legacy_resume_last_uses_real_codex_home(failures)
     test_plain_interactive_codex_does_not_mark_running(failures)
     test_fresh_launch_clears_declare_session_metadata(failures)
     test_state_watcher_writes_unambiguous_session_metadata(failures)

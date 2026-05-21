@@ -14811,16 +14811,16 @@ struct CMUXCLI {
                 declareSessionMetadata[SurfaceMetadataKeyName.codexSessionId] = sessionCapture.sessionId
             }
         }
-        if let cwd {
+        if let capture = sessionCapture,
+           capture.source == "heuristic" {
+            if let projectDir = capture.projectDir {
+                heuristicSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
+            }
+        } else if let cwd {
             declareSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = cwd
         } else if let capture = sessionCapture,
                   let projectDir = capture.projectDir {
-            switch capture.source {
-            case "heuristic":
-                heuristicSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
-            default:
-                declareSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
-            }
+            declareSessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
         }
         if !heuristicSessionMetadata.isEmpty {
             writeCodexLifecycleMetadataChunk(
@@ -14903,8 +14903,19 @@ struct CMUXCLI {
             startedAtOverride: startedAtOverride,
             telemetry: telemetry
         ) {
+            let inferredProjectDir = codexValidatedProjectDir(inferredSession.cwd)
+            if let cwd {
+                guard let inferredProjectDir,
+                      inferredProjectDir == cwd else {
+                    telemetry.breadcrumb(
+                        "codex-hook.state-db.skip",
+                        data: ["reason": "project-mismatch"]
+                    )
+                    return nil
+                }
+            }
             telemetry.breadcrumb("codex-hook.session-id.state-db")
-            return (inferredSession.sessionId, inferredSession.cwd, "heuristic")
+            return (inferredSession.sessionId, inferredProjectDir, "heuristic")
         }
 
         return nil

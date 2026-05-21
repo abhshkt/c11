@@ -522,6 +522,68 @@ def main() -> int:
                     f"{label}: state DB schema without created time must not capture session id: {state_metadata!r}",
                 )
 
+        mismatch_state_id = "99999999-aaaa-bbbb-cccc-dddddddddddd"
+        mismatch_state_home = test_root / "state-home-mismatch"
+        make_codex_state_db(
+            mismatch_state_home,
+            session_id=mismatch_state_id,
+            cwd=str(other_project_dir),
+            created_at_ms=True,
+            created_at=True,
+        )
+        for source in ("declare", "heuristic"):
+            run_cli(
+                cli_path,
+                socket_path,
+                [
+                    "clear-metadata",
+                    "--workspace",
+                    workspace_id,
+                    "--surface",
+                    surface_id,
+                    "--key",
+                    "codex.session_id",
+                    "--key",
+                    "codex.session_project_dir",
+                    "--source",
+                    source,
+                ],
+            )
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "session-start", "--started-at", "4102444799"],
+            payload={
+                "hook_event_name": "SessionStart",
+                "cwd": str(project_dir),
+                "model": "gpt-5.5",
+            },
+            env={**hook_env, "CODEX_HOME": str(mismatch_state_home)},
+        )
+        mismatch_metadata = run_cli(
+            cli_path,
+            socket_path,
+            [
+                "get-metadata",
+                "--workspace",
+                workspace_id,
+                "--surface",
+                surface_id,
+                "--key",
+                "codex.session_id",
+                "--key",
+                "codex.session_project_dir",
+            ],
+        )
+        expect(
+            mismatch_state_id not in mismatch_metadata,
+            f"Global state DB fallback must not capture a session from another cwd: {mismatch_metadata!r}",
+        )
+        expect(
+            str(other_project_dir) not in mismatch_metadata,
+            f"Global state DB fallback must not pair another cwd with target cwd metadata: {mismatch_metadata!r}",
+        )
+
         operator_model = "operator/model"
         guarded_session_id = "33333333-4444-5555-6666-777777777777"
         run_cli(

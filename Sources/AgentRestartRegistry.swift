@@ -160,10 +160,12 @@ struct AgentRestartRegistry: Sendable {
                 raw = candidate
             } else {
                 // Older snapshots or disabled hooks retain the historical
-                // best-effort behavior. Once a snapshot claims a specific
-                // Codex id, though, malformed metadata must not degrade into
-                // the potentially wrong newest session for that cwd.
-                return "codex resume --last\n"
+                // best-effort behavior. `resume --last` must read the
+                // operator's real Codex state; c11's managed CODEX_HOME
+                // overlay intentionally does not mirror sessions/state DBs.
+                // The wrapper also detects this argv shape for manual runs,
+                // but the env marker keeps restored legacy snapshots explicit.
+                return "CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last\n"
             }
             guard isValidCodexSessionId(raw) else { return nil }
             let resume = "codex resume \(raw)"

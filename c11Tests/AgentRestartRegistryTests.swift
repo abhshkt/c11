@@ -281,8 +281,8 @@ final class AgentRestartRegistryTests: XCTestCase {
         let sessionId = "abc12345-ef67-890a-bcde-f0123456789a"
         XCTAssertEqual(
             registry.resolveCommand(terminalType: "codex", sessionId: nil, metadata: [:]),
-            "codex resume --last\n",
-            "older snapshots without codex.session_id keep best-effort resume --last"
+            "CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last\n",
+            "older snapshots without codex.session_id keep best-effort resume --last against the real Codex home"
         )
         XCTAssertEqual(
             registry.resolveCommand(

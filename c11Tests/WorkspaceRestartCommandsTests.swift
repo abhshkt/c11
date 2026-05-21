@@ -321,7 +321,7 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
 
         XCTAssertEqual(pending.count, 1)
         XCTAssertEqual(pending.first?.panelId, panelId)
-        XCTAssertEqual(pending.first?.command, "codex resume --last\n")
+        XCTAssertEqual(pending.first?.command, "CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last\n")
     }
 
     func testCodexWithNonStringSessionIdFailsClosed() {
