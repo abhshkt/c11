@@ -304,6 +304,34 @@ final class SurfaceMetadataStoreValidationTests: XCTestCase {
         }
     }
 
+    func testSnapshotSanitizeMarksInvalidCodexRestartMetadataFailClosed() {
+        let workspace = UUID()
+        let surface = UUID()
+        defer { store.removeSurface(workspaceId: workspace, surfaceId: surface) }
+
+        store.restoreFromSnapshot(
+            workspaceId: workspace,
+            surfaceId: surface,
+            values: [
+                SurfaceMetadataKeyName.terminalType: SurfaceMetadataKeyName.terminalTypeCodex,
+                SurfaceMetadataKeyName.codexSessionId: 42,
+                SurfaceMetadataKeyName.codexSessionProjectDir: "/Users/op/repo/c11",
+                SurfaceMetadataKeyName.codexSessionStore: SurfaceMetadataKeyName.codexSessionStoreRealHome
+            ],
+            sources: [:]
+        )
+
+        let current = store.getMetadata(workspaceId: workspace, surfaceId: surface)
+        XCTAssertEqual(current.metadata[SurfaceMetadataKeyName.terminalType] as? String, SurfaceMetadataKeyName.terminalTypeCodex)
+        XCTAssertNil(current.metadata[SurfaceMetadataKeyName.codexSessionId])
+        XCTAssertNil(current.metadata[SurfaceMetadataKeyName.codexSessionProjectDir])
+        XCTAssertNil(current.metadata[SurfaceMetadataKeyName.codexSessionStore])
+        XCTAssertEqual(
+            current.metadata[SurfaceMetadataKeyName.codexRestartBlocked] as? String,
+            SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionId
+        )
+    }
+
     func testCodexSessionPairRejectsBothKeysWhenSessionIdLosesPrecedence() throws {
         let workspace = UUID()
         let surface = UUID()

@@ -50,6 +50,12 @@ public enum SurfaceMetadataKeyName {
     /// same session from the same cwd instead of falling back to
     /// `codex resume --last`.
     public static let codexSessionProjectDir = "codex.session_project_dir"
+    /// Internal fail-closed marker written while sanitizing corrupted
+    /// snapshots. Its presence means Codex restart metadata was present but
+    /// unusable, so restore must not degrade to `codex resume --last`.
+    public static let codexRestartBlocked = "codex.restart_blocked"
+    public static let codexRestartBlockedInvalidSessionId = "invalid_session_id"
+    public static let codexRestartBlockedInvalidSessionStore = "invalid_session_store"
     /// Surface-scoped provenance for the Codex session store that owns
     /// `codex.session_id`. Managed c11 profile sessions live under the
     /// c11-owned CODEX_HOME overlay; manual/legacy real-home resumes must

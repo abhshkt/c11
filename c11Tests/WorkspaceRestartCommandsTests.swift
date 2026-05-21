@@ -438,6 +438,47 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
         )
     }
 
+    func testSanitizedInvalidCodexSessionMarkerBlocksResumeLastFallback() {
+        let panelId = UUID()
+        let workspaceId = UUID()
+        let surfaceId = UUID()
+        defer { SurfaceMetadataStore.shared.removeSurface(workspaceId: workspaceId, surfaceId: surfaceId) }
+
+        SurfaceMetadataStore.shared.restoreFromSnapshot(
+            workspaceId: workspaceId,
+            surfaceId: surfaceId,
+            values: [
+                SurfaceMetadataKeyName.terminalType: SurfaceMetadataKeyName.terminalTypeCodex,
+                SurfaceMetadataKeyName.codexSessionId: 42,
+                SurfaceMetadataKeyName.codexSessionProjectDir: "/Users/test/corrupted-codex"
+            ],
+            sources: [:]
+        )
+        let sanitized = SurfaceMetadataStore.shared.getMetadata(workspaceId: workspaceId, surfaceId: surfaceId)
+        let autosaveLikeMetadata = PersistedMetadataBridge.encodeValues(
+            sanitized.metadata,
+            surfaceIdForLog: surfaceId,
+            sources: sanitized.sources
+        )
+
+        let snapshot = makeSnapshot(panels: [
+            makePanelSnapshot(
+                id: panelId,
+                type: .terminal,
+                metadata: autosaveLikeMetadata
+            )
+        ])
+
+        XCTAssertEqual(
+            autosaveLikeMetadata[SurfaceMetadataKeyName.codexRestartBlocked],
+            .string(SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionId)
+        )
+        XCTAssertTrue(
+            Workspace.pendingRestartCommands(from: snapshot, registry: .phase1).isEmpty,
+            "sanitized invalid Codex restart metadata must remain fail-closed after autosave-like persistence"
+        )
+    }
+
     func testCodexWithEmptySessionIdFailsClosed() {
         for value in ["", "   \t "] {
             let snapshot = makeSnapshot(panels: [

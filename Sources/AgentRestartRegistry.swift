@@ -147,6 +147,10 @@ struct AgentRestartRegistry: Sendable {
             return "\(resume)\n"
         },
         Row(terminalType: SurfaceMetadataKeyName.terminalTypeCodex) { _, metadata in
+            if metadata.keys.contains(SurfaceMetadataKeyName.codexRestartBlocked) {
+                return nil
+            }
+
             func recordedProjectDir() -> String? {
                 guard let rawDir = metadata[SurfaceMetadataKeyName.codexSessionProjectDir]?
                     .trimmingCharacters(in: .whitespacesAndNewlines),

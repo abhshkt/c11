@@ -74,6 +74,12 @@ if [[ "${FAKE_NESTED_CODEX-0}" != "1" ]]; then
 fi
 """
 
+NESTED_PASSTHROUGH_FROM_RESUME_FAKE_CODEX = DEFAULT_FAKE_CODEX + """
+if [[ "${FAKE_NESTED_CODEX-0}" != "1" ]]; then
+  FAKE_NESTED_CODEX=1 codex exec echo nested
+fi
+"""
+
 PROJECT_DIR_CHECKING_FAKE_CODEX = DEFAULT_FAKE_CODEX + """
 if [[ "${CMUX_CODEX_PROJECT_DIR-}" != "${EXPECTED_CMUX_CODEX_PROJECT_DIR-}" ]]; then
   echo "expected CMUX_CODEX_PROJECT_DIR=$EXPECTED_CMUX_CODEX_PROJECT_DIR, got ${CMUX_CODEX_PROJECT_DIR-__UNSET__}" >&2
@@ -1292,6 +1298,26 @@ def test_nested_fresh_codex_does_not_reuse_parent_resume_id(failures: list[str])
     )
 
 
+def test_nested_passthrough_codex_does_not_inherit_parent_resume_id(failures: list[str]) -> None:
+    session_id = "abc12345-ef67-890a-bcde-f0123456789a"
+    code, real_argv, _, stderr, _, _, resume_value = run_wrapper(
+        socket_state="live",
+        argv=["resume", session_id],
+        real_codex_script=NESTED_PASSTHROUGH_FROM_RESUME_FAKE_CODEX,
+    )
+    expect(code == 0, f"nested passthrough from resume: wrapper exited {code}: {stderr}", failures)
+    expect(
+        real_argv[-3:] == ["exec", "echo", "nested"],
+        f"nested passthrough from resume: expected nested passthrough args last, got {real_argv}",
+        failures,
+    )
+    expect(
+        resume_value == "__UNSET__",
+        f"nested passthrough from resume: nested `codex exec` must not inherit parent CMUX_CODEX_RESUME_SESSION_ID, got {resume_value!r}",
+        failures,
+    )
+
+
 def main() -> int:
     failures: list[str] = []
     test_live_socket_injects_notify_bridge(failures)
@@ -1324,6 +1350,7 @@ def main() -> int:
     test_auxiliary_commands_passthrough_after_probe(failures)
     test_resume_session_id_exported_for_metadata_capture(failures)
     test_nested_fresh_codex_does_not_reuse_parent_resume_id(failures)
+    test_nested_passthrough_codex_does_not_inherit_parent_resume_id(failures)
 
     if failures:
         print("FAIL: codex wrapper regression checks failed")

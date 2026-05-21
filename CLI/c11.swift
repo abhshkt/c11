@@ -389,6 +389,7 @@ private struct CodexHookParsedInput {
 private struct CodexStateThreadCandidate {
     let sessionId: String
     let cwd: String?
+    let hasCwdColumn: Bool
 }
 
 private struct ClaudeHookSessionRecord: Codable {
@@ -14992,7 +14993,7 @@ struct CMUXCLI {
             telemetry: telemetry
         ) {
             let inferredProjectDir = codexValidatedProjectDir(inferredSession.cwd)
-            if let cwd {
+            if let cwd, inferredSession.hasCwdColumn {
                 guard let inferredProjectDir,
                       let inferredCanonical = codexCanonicalProjectDir(inferredProjectDir),
                       let cwdCanonical = codexCanonicalProjectDir(cwd),
@@ -15232,13 +15233,14 @@ struct CMUXCLI {
               columns.contains("id") else {
             return nil
         }
+        let hasCwdColumn = columns.contains("cwd")
         let createdAtExpression = codexStateDBCreatedAtExpression(columns: columns)
-        let cwdExpression = columns.contains("cwd") ? "cwd" : "''"
+        let cwdExpression = hasCwdColumn ? "cwd" : "''"
         var whereClauses: [String] = codexStateDBDelimitedTextSafetyClauses(column: "id", requireAbsolutePath: false)
         if columns.contains("archived") {
             whereClauses.append("coalesce(archived, 0) = 0")
         }
-        if columns.contains("cwd") {
+        if hasCwdColumn {
             whereClauses.append(contentsOf: codexStateDBDelimitedTextSafetyClauses(column: "cwd", requireAbsolutePath: true))
             if let cwdFilter {
                 whereClauses.append("cwd = '\(sqliteStringLiteral(cwdFilter))'")
@@ -15268,7 +15270,10 @@ struct CMUXCLI {
             telemetry.breadcrumb("codex-hook.state-db.skip", data: ["reason": "sqlite-status-\(result.status)"])
             return nil
         }
-        return uniqueValidCodexStateThreadCandidates(fromSQLiteOutput: result.stdout)
+        return uniqueValidCodexStateThreadCandidates(
+            fromSQLiteOutput: result.stdout,
+            hasCwdColumn: hasCwdColumn
+        )
     }
 
     private func codexStateDBThreadColumns(
@@ -15393,7 +15398,10 @@ struct CMUXCLI {
         value.replacingOccurrences(of: "'", with: "''")
     }
 
-    private func uniqueValidCodexStateThreadCandidates(fromSQLiteOutput output: String) -> [CodexStateThreadCandidate] {
+    private func uniqueValidCodexStateThreadCandidates(
+        fromSQLiteOutput output: String,
+        hasCwdColumn: Bool
+    ) -> [CodexStateThreadCandidate] {
         var seen = Set<String>()
         var candidates: [CodexStateThreadCandidate] = []
         for rawLine in output.components(separatedBy: .newlines) {
@@ -15407,7 +15415,11 @@ struct CMUXCLI {
             }
             let cwd = parts.count > 1 ? codexValidatedProjectDir(String(parts[1])) : nil
             seen.insert(sessionId)
-            candidates.append(CodexStateThreadCandidate(sessionId: sessionId, cwd: cwd))
+            candidates.append(CodexStateThreadCandidate(
+                sessionId: sessionId,
+                cwd: cwd,
+                hasCwdColumn: hasCwdColumn
+            ))
         }
         return candidates
     }

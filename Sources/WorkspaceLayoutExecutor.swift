@@ -247,7 +247,18 @@ enum WorkspaceLayoutExecutor {
                     key: SurfaceMetadataKeyName.codexSessionStore
                 )
                 if terminalType == SurfaceMetadataKeyName.terminalTypeCodex,
-                   case .invalid = codexSessionIdState {
+                   surfaceMeta[SurfaceMetadataKeyName.codexRestartBlocked] != nil {
+                    let message = "restart registry declined for terminal_type=codex codex.restart_blocked"
+                    walkState.warnings.append(message)
+                    walkState.failures.append(ApplyFailure(
+                        code: "restart_registry_declined",
+                        step: "surface[\(surfaceSpec.id)].command.resolve",
+                        message: message
+                    ))
+                    effectiveCommand = nil
+                    usedRegistry = false
+                } else if terminalType == SurfaceMetadataKeyName.terminalTypeCodex,
+                          case .invalid = codexSessionIdState {
                     // A typed snapshot can carry non-string JSON. Dropping a
                     // present-but-invalid Codex session id before the
                     // registry call would make the registry synthesize the

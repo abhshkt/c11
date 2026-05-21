@@ -175,7 +175,8 @@ final class SurfaceMetadataStore: @unchecked Sendable {
         "claude.session_project_dir",
         "codex.session_id",
         "codex.session_project_dir",
-        "codex.session_store"
+        "codex.session_store",
+        "codex.restart_blocked"
     ]
 
     private static let codexSessionAtomicKeys: Set<String> = [
@@ -337,6 +338,18 @@ final class SurfaceMetadataStore: @unchecked Sendable {
                 return .reservedKeyInvalidType(
                     key,
                     "must be managed_overlay or real_home"
+                )
+            }
+            return nil
+        case "codex.restart_blocked":
+            guard let s = value as? String else {
+                return .reservedKeyInvalidType(key, "expected string")
+            }
+            if s != SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionId &&
+                s != SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionStore {
+                return .reservedKeyInvalidType(
+                    key,
+                    "must be invalid_session_id or invalid_session_store"
                 )
             }
             return nil
@@ -540,12 +553,40 @@ final class SurfaceMetadataStore: @unchecked Sendable {
     ) -> (values: [String: Any], sources: [String: SourceRecord]) {
         var restoredValues = values
         var restoredSources = sources
+        let isCodexTerminal = (values[SurfaceMetadataKeyName.terminalType] as? String) ==
+            SurfaceMetadataKeyName.terminalTypeCodex
+        var codexRestartBlockReason: String?
 
         for (key, value) in values where reservedKeys.contains(key) {
             if validateReservedKey(key, value) != nil {
                 restoredValues.removeValue(forKey: key)
                 restoredSources.removeValue(forKey: key)
+                if isCodexTerminal {
+                    if key == SurfaceMetadataKeyName.codexSessionId {
+                        codexRestartBlockReason = SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionId
+                    } else if key == SurfaceMetadataKeyName.codexSessionStore,
+                              codexRestartBlockReason == nil {
+                        codexRestartBlockReason = SurfaceMetadataKeyName.codexRestartBlockedInvalidSessionStore
+                    }
+                }
             }
+        }
+
+        if let codexRestartBlockReason {
+            // Preserve the distinction between "Codex id absent" (legacy
+            // snapshots may use resume --last) and "Codex restart metadata was
+            // present but invalid" (must fail closed even after sanitize +
+            // autosave). The invalid reserved value itself cannot be kept, so
+            // write a small valid marker that future restore passes honor.
+            for key in Self.codexSessionAtomicKeys {
+                restoredValues.removeValue(forKey: key)
+                restoredSources.removeValue(forKey: key)
+            }
+            restoredValues[SurfaceMetadataKeyName.codexRestartBlocked] = codexRestartBlockReason
+            restoredSources[SurfaceMetadataKeyName.codexRestartBlocked] = SourceRecord(
+                source: .declare,
+                ts: Date().timeIntervalSince1970
+            )
         }
 
         let valueKeys = Set(restoredValues.keys)

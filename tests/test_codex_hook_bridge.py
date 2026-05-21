@@ -203,6 +203,7 @@ def make_codex_state_db(
     created_at: bool,
     created_at_value: int = 4102444800,
     created_at_ms_value: int = 4102444800000,
+    include_cwd: bool = True,
 ) -> None:
     codex_home.mkdir(parents=True, exist_ok=True)
     db_path = codex_home / "state_5.sqlite"
@@ -220,14 +221,17 @@ def make_codex_state_db(
     created_columns_sql = ",\n  " + ",\n  ".join(created_columns) if created_columns else ""
     insert_columns_sql = ", " + ", ".join(insert_columns) if insert_columns else ""
     insert_values_sql = ", " + ", ".join(insert_values) if insert_values else ""
+    cwd_column_sql = "  cwd TEXT,\n" if include_cwd else ""
+    insert_cwd_column_sql = ", cwd" if include_cwd else ""
+    insert_cwd_value_sql = f", {sqlite_literal(cwd)}" if include_cwd else ""
     sql = f"""
 CREATE TABLE threads (
   id TEXT,
-  cwd TEXT,
+{cwd_column_sql}
   archived INTEGER{created_columns_sql}
 );
-INSERT INTO threads (id, cwd, archived{insert_columns_sql})
-VALUES ({sqlite_literal(session_id)}, {sqlite_literal(cwd)}, 0{insert_values_sql});
+INSERT INTO threads (id{insert_cwd_column_sql}, archived{insert_columns_sql})
+VALUES ({sqlite_literal(session_id)}{insert_cwd_value_sql}, 0{insert_values_sql});
 """
     subprocess.run(["/usr/bin/sqlite3", str(db_path), sql], check=True)
 
@@ -569,6 +573,75 @@ def main() -> int:
                     f"codex.session_id = {state_session_id}" not in state_metadata,
                     f"{label}: state DB schema without created time must not capture session id: {state_metadata!r}",
                 )
+
+        no_cwd_state_id = "45454545-4545-4545-8545-454545454545"
+        no_cwd_state_home = test_root / "state-home-no-cwd-column"
+        no_cwd_started_at = int(time.time()) - 5
+        no_cwd_created_at = no_cwd_started_at + 1
+        make_codex_state_db(
+            no_cwd_state_home,
+            session_id=no_cwd_state_id,
+            cwd=str(other_project_dir),
+            created_at_ms=True,
+            created_at=True,
+            created_at_value=no_cwd_created_at,
+            created_at_ms_value=no_cwd_created_at * 1000,
+            include_cwd=False,
+        )
+        for source in ("declare", "heuristic"):
+            run_cli(
+                cli_path,
+                socket_path,
+                [
+                    "clear-metadata",
+                    "--workspace",
+                    workspace_id,
+                    "--surface",
+                    surface_id,
+                    "--key",
+                    "codex.session_id",
+                    "--key",
+                    "codex.session_project_dir",
+                    "--key",
+                    "codex.session_store",
+                    "--source",
+                    source,
+                ],
+            )
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "session-start", "--started-at", str(no_cwd_started_at)],
+            payload={
+                "hook_event_name": "SessionStart",
+                "cwd": str(project_dir),
+                "model": "gpt-5.5",
+            },
+            env={**hook_env, "CODEX_HOME": str(no_cwd_state_home)},
+        )
+        no_cwd_metadata = run_cli(
+            cli_path,
+            socket_path,
+            [
+                "get-metadata",
+                "--workspace",
+                workspace_id,
+                "--surface",
+                surface_id,
+                "--key",
+                "codex.session_id",
+                "--key",
+                "codex.session_project_dir",
+            ],
+        )
+        expect(
+            f"codex.session_id = {no_cwd_state_id}" in no_cwd_metadata,
+            f"No-cwd legacy schema should capture the one fresh global session id: {no_cwd_metadata!r}",
+        )
+        expect(
+            "codex.session_project_dir" not in no_cwd_metadata,
+            f"No-cwd legacy schema must not invent project-dir proof: {no_cwd_metadata!r}",
+        )
 
         mismatch_state_id = "99999999-aaaa-bbbb-cccc-dddddddddddd"
         mismatch_state_home = test_root / "state-home-mismatch"
