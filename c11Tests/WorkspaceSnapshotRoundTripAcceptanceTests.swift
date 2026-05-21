@@ -311,8 +311,8 @@ final class WorkspaceSnapshotRoundTripAcceptanceTests: XCTestCase {
         let restoredWorkspace = try XCTUnwrap(resolveWorkspace(from: result.workspaceRef))
 
         let expected: [String: String] = [
-            "codex-a": "cd '\(projectDir)' && codex resume \(sessionA)",
-            "codex-b": "cd '\(projectDir)' && codex resume \(sessionB)"
+            "codex-a": "cd '\(projectDir)' 2>/dev/null || true; codex resume \(sessionA)",
+            "codex-b": "cd '\(projectDir)' 2>/dev/null || true; codex resume \(sessionB)"
         ]
 
         for surfaceSpec in plan.surfaces {

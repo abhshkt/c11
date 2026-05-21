@@ -98,6 +98,21 @@ toml_array() {
     printf ']'
 }
 
+json_string() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '"%s"' "$value"
+}
+
+codex_hook_context_json() {
+    local cwd="$1"
+    printf '{"cwd":%s}' "$(json_string "$cwd")"
+}
+
 codex_real_home_dir() {
     local real_home="${CMUX_CODEX_REAL_HOME:-${CODEX_HOME:-$HOME/.codex}}"
     if [[ "$real_home" == "~" ]]; then
@@ -551,6 +566,7 @@ set_codex_metadata_value() {
     if [[ -n "$surface" ]]; then
         args+=("--surface" "$surface")
     fi
+    args+=("--source" "declare")
 
     CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC=0.75 "${args[@]}" >/dev/null 2>&1 || true
 }
@@ -829,6 +845,9 @@ if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then
     notify_args+=("--surface" "${CMUX_SURFACE_ID}")
 fi
 notify_args+=("--started-at" "${CMUX_CODEX_START_SEC}")
+if [[ -n "$CODEX_PROJECT_DIR" ]]; then
+    notify_args+=("$(codex_hook_context_json "$CODEX_PROJECT_DIR")")
+fi
 
 CODEX_NOTIFY_CONFIG="notify=$(toml_array "${notify_args[@]}")"
 CODEX_TUI_NOTIFICATIONS_CONFIG="tui.notifications=true"

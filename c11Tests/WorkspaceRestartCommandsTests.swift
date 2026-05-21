@@ -301,7 +301,7 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
         XCTAssertEqual(pending.first?.panelId, panelId)
         XCTAssertEqual(
             pending.first?.command,
-            "cd '\(projectDir)' && codex resume \(codexSessionId)\n"
+            "cd '\(projectDir)' 2>/dev/null || true; codex resume \(codexSessionId)\n"
         )
     }
 
@@ -357,11 +357,11 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
         let byPanel = Dictionary(uniqueKeysWithValues: pending.map { ($0.panelId, $0.command) })
         XCTAssertEqual(
             byPanel[panelA],
-            "cd '\(projectDir)' && codex resume \(sessionA)\n"
+            "cd '\(projectDir)' 2>/dev/null || true; codex resume \(sessionA)\n"
         )
         XCTAssertEqual(
             byPanel[panelB],
-            "cd '\(projectDir)' && codex resume \(sessionB)\n"
+            "cd '\(projectDir)' 2>/dev/null || true; codex resume \(sessionB)\n"
         )
     }
 

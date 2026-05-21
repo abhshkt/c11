@@ -14522,7 +14522,17 @@ struct CMUXCLI {
             ]
         )
 
-        if !hasCodexHookWorkspaceTarget && !["help", "--help", "-h"].contains(subcommand) {
+        if ["help", "--help", "-h"].contains(subcommand) {
+            telemetry.breadcrumb("codex-hook.help")
+            print(
+                """
+                c11 codex-hook <session-start|stop|notify|permission-request|prompt-submit|pre-tool-use|post-tool-use> [--workspace <id|index>] [--surface <id|index>] [--status-only]
+                """
+            )
+            return
+        }
+
+        if !hasCodexHookWorkspaceTarget {
             // Codex hooks can be configured globally in ~/.codex. When they
             // fire outside a c11-managed terminal they have no pane target.
             // Do not fall back to the currently focused c11 workspace; that
@@ -14578,6 +14588,16 @@ struct CMUXCLI {
                 surfaceArg,
                 workspaceId: workspaceId,
                 client: client
+            )
+            let cwdFallback = codexRuntimeCwdFallback()
+            writeCodexLifecycleMetadata(
+                client: client,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                parsedInput: parsedInput,
+                cwdFallback: cwdFallback,
+                startedAtOverride: startedAtArg,
+                telemetry: telemetry
             )
             if !statusOnly {
                 let completion = summarizeCodexHookStop(parsedInput: parsedInput)
@@ -14697,12 +14717,7 @@ struct CMUXCLI {
             )
 
         case "help", "--help", "-h":
-            telemetry.breadcrumb("codex-hook.help")
-            print(
-                """
-                c11 codex-hook <session-start|stop|notify|permission-request|prompt-submit|pre-tool-use|post-tool-use> [--workspace <id|index>] [--surface <id|index>] [--status-only]
-                """
-            )
+            return
 
         default:
             throw CLIError(message: "Unknown codex-hook subcommand: \(subcommand)")
@@ -14749,12 +14764,23 @@ struct CMUXCLI {
         startedAtOverride: String?,
         telemetry: CLISocketSentryTelemetry
     ) {
-        var metadata: [String: Any] = [
+        var identityMetadata: [String: Any] = [
             SurfaceMetadataKeyName.terminalType: SurfaceMetadataKeyName.terminalTypeCodex
         ]
         if let model = codexValidatedModel(parsedInput.model) {
-            metadata["model"] = model
+            identityMetadata["model"] = model
         }
+        writeCodexLifecycleMetadataChunk(
+            client: client,
+            workspaceId: workspaceId,
+            surfaceId: surfaceId,
+            metadata: identityMetadata,
+            source: "declare",
+            label: "identity",
+            telemetry: telemetry
+        )
+
+        var sessionMetadata: [String: Any] = [:]
         let cwd = codexValidatedProjectDir(parsedInput.cwd ?? cwdFallback)
         let sessionCapture = codexMetadataSessionCapture(
             parsedInput: parsedInput,
@@ -14763,29 +14789,52 @@ struct CMUXCLI {
             telemetry: telemetry
         )
         if let sessionCapture {
-            metadata[SurfaceMetadataKeyName.codexSessionId] = sessionCapture.sessionId
+            sessionMetadata[SurfaceMetadataKeyName.codexSessionId] = sessionCapture.sessionId
         }
         let projectDir = sessionCapture?.projectDir ?? cwd
         if let projectDir {
-            metadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
+            sessionMetadata[SurfaceMetadataKeyName.codexSessionProjectDir] = projectDir
         }
+        if !sessionMetadata.isEmpty {
+            writeCodexLifecycleMetadataChunk(
+                client: client,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                metadata: sessionMetadata,
+                source: "declare",
+                label: "session",
+                telemetry: telemetry
+            )
+        }
+    }
 
+    private func writeCodexLifecycleMetadataChunk(
+        client: SocketClient,
+        workspaceId: String,
+        surfaceId: String,
+        metadata: [String: Any],
+        source: String,
+        label: String,
+        telemetry: CLISocketSentryTelemetry
+    ) {
+        guard !metadata.isEmpty else { return }
         var params: [String: Any] = [
             "surface_id": surfaceId,
             "metadata": metadata,
             "mode": "merge",
-            "source": "explicit"
+            "source": source
         ]
         if !workspaceId.isEmpty {
             params["workspace_id"] = workspaceId
         }
         do {
             _ = try client.sendV2(method: "surface.set_metadata", params: params)
-            telemetry.breadcrumb("codex-hook.metadata-write.ok")
+            telemetry.breadcrumb("codex-hook.metadata-write.ok", data: ["label": label, "source": source])
         } catch let error as CLIError where isAdvisoryHookConnectivityError(error) {
-            telemetry.breadcrumb("codex-hook.metadata-write.skipped")
+            telemetry.breadcrumb("codex-hook.metadata-write.skipped", data: ["label": label, "source": source])
         } catch {
-            telemetry.breadcrumb("codex-hook.metadata-write.failed")
+            telemetry.breadcrumb("codex-hook.metadata-write.failed", data: ["label": label, "source": source])
+            codexHookDebugStderr("metadata write failed (\(label), source=\(source)): \(error)")
         }
     }
 
@@ -15096,14 +15145,40 @@ struct CMUXCLI {
             return true
         }
         guard let payloadCwd = parsedInput.cwd else {
-            return true
+            return false
         }
         guard let validPayloadCwd = codexValidatedProjectDir(payloadCwd) else {
             return false
         }
-        let normalizedPayload = NSString(string: validPayloadCwd).expandingTildeInPath
-        let normalizedTarget = NSString(string: target).expandingTildeInPath
+        guard let normalizedPayload = codexCanonicalProjectDir(validPayloadCwd),
+              let normalizedTarget = codexCanonicalProjectDir(target) else {
+            return false
+        }
         return normalizedPayload == normalizedTarget
+    }
+
+    private func codexCanonicalProjectDir(_ candidate: String) -> String? {
+        guard let valid = codexValidatedProjectDir(candidate) else { return nil }
+        let expanded = NSString(string: valid).expandingTildeInPath
+        guard expanded.hasPrefix("/") else { return nil }
+        return URL(fileURLWithPath: expanded)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+    }
+
+    private func codexHookDebugStderr(_ message: String) {
+        let env = ProcessInfo.processInfo.environment
+        let enabled = ["CMUX_HOOK_DEBUG_STDERR", "CMUX_HOOK_STRICT"].contains { key in
+            guard let raw = env[key]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+                return false
+            }
+            return ["1", "true", "yes"].contains(raw)
+        }
+        guard enabled else { return }
+        if let data = "c11 codex-hook: \(message)\n".data(using: .utf8) {
+            FileHandle.standardError.write(data)
+        }
     }
 
     private func setCodexStatus(

@@ -317,7 +317,7 @@ final class AgentRestartRegistryTests: XCTestCase {
                     SurfaceMetadataKeyName.codexSessionProjectDir: projectDir
                 ]
             ),
-            "cd '\(projectDir)' && codex resume \(sessionId)\n"
+            "cd '\(projectDir)' 2>/dev/null || true; codex resume \(sessionId)\n"
         )
     }
 

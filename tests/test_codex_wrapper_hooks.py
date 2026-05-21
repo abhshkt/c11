@@ -585,6 +585,22 @@ def test_target_project_env_tracks_effective_cd(failures: list[str]) -> None:
         )
     expect(code == 0, f"target project env explicit --cd: wrapper exited {code}: {stderr}", failures)
 
+    with tempfile.TemporaryDirectory(prefix="c11-codex-cwd-env-symlink-") as td:
+        project_dir = Path(td).resolve() / "project"
+        explicit_dir = Path(td).resolve() / "explicit"
+        symlink_dir = Path(td).resolve() / "explicit-link"
+        project_dir.mkdir()
+        explicit_dir.mkdir()
+        symlink_dir.symlink_to(explicit_dir, target_is_directory=True)
+        code, _, _, stderr, _, _, _ = run_wrapper(
+            socket_state="live",
+            argv=["--cd", str(symlink_dir), "hello"],
+            extra_env={"EXPECTED_CMUX_CODEX_PROJECT_DIR": str(explicit_dir)},
+            real_codex_script=PROJECT_DIR_CHECKING_FAKE_CODEX,
+            wrapper_cwd=project_dir,
+        )
+    expect(code == 0, f"target project env symlink --cd: wrapper exited {code}: {stderr}", failures)
+
     with tempfile.TemporaryDirectory(prefix="c11-codex-cwd-env-default-") as td:
         project_dir = Path(td).resolve() / "project"
         project_dir.mkdir()

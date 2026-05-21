@@ -164,7 +164,7 @@ struct AgentRestartRegistry: Sendable {
                 .trimmingCharacters(in: .whitespacesAndNewlines),
                !rawDir.isEmpty,
                isValidCodexSessionProjectDir(rawDir) {
-                return "cd \(shellSingleQuote(rawDir)) && \(resume)\n"
+                return "cd \(shellSingleQuote(rawDir)) 2>/dev/null || true; \(resume)\n"
             }
             return "\(resume)\n"
         },

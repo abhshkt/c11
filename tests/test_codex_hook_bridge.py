@@ -153,6 +153,10 @@ def expect(condition: bool, message: str) -> None:
 
 
 def main() -> int:
+    if os.environ.get("C11_LIVE_BRIDGE_TEST") != "1":
+        print("SKIP: set C11_LIVE_BRIDGE_TEST=1 with C11_CLI_BIN and C11_SOCKET to run the live bridge acceptance check")
+        return 0
+
     try:
         cli_path = resolve_c11_cli()
         socket_path = resolve_socket_path(cli_path)
@@ -195,11 +199,21 @@ def main() -> int:
             any(item["title"] == "Guard" for item in post_no_target_items),
             "No-target codex-hook must not clear notifications from the focused workspace",
         )
+        help_output = run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "help"],
+            clean_c11_env=True,
+        )
+        expect("c11 codex-hook" in help_output, f"codex-hook help should not require a target workspace: {help_output!r}")
 
-        project_dir = Path(tempfile.gettempdir()) / f"c11_codex_hook_project_{os.getpid()}"
+        test_root = Path(tempfile.mkdtemp(prefix=f"c11_codex_hook_project_{os.getpid()}_"))
+        project_dir = test_root / "project"
         project_dir.mkdir(parents=True, exist_ok=True)
-        other_project_dir = Path(tempfile.gettempdir()) / f"c11_codex_hook_other_{os.getpid()}"
+        other_project_dir = test_root / "other"
         other_project_dir.mkdir(parents=True, exist_ok=True)
+        linked_project_dir = test_root / "project-link"
+        linked_project_dir.symlink_to(project_dir, target_is_directory=True)
         session_id = "abc12345-ef67-890a-bcde-f0123456789a"
 
         run_cli(
@@ -230,6 +244,67 @@ def main() -> int:
         expect(
             "badbad00-0000-4000-8000-000000000000" not in empty_metadata,
             f"Project-mismatched Codex hook must not write metadata: {empty_metadata!r}",
+        )
+
+        missing_cwd_session_id = "11111111-2222-3333-4444-555555555555"
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "session-start"],
+            payload={
+                "hook_event_name": "SessionStart",
+                "session_id": missing_cwd_session_id,
+                "model": "gpt-5.5",
+            },
+            env={**hook_env, "CMUX_CODEX_PROJECT_DIR": str(project_dir)},
+        )
+        missing_cwd_metadata = run_cli(
+            cli_path,
+            socket_path,
+            [
+                "get-metadata",
+                "--workspace",
+                workspace_id,
+                "--surface",
+                surface_id,
+                "--key",
+                "codex.session_id",
+            ],
+        )
+        expect(
+            missing_cwd_session_id not in missing_cwd_metadata,
+            f"Target-scoped Codex hook without cwd must fail closed: {missing_cwd_metadata!r}",
+        )
+
+        symlink_session_id = "22222222-3333-4444-5555-666666666666"
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "session-start"],
+            payload={
+                "hook_event_name": "SessionStart",
+                "session_id": symlink_session_id,
+                "cwd": str(linked_project_dir),
+                "model": "gpt-5.5",
+            },
+            env={**hook_env, "CMUX_CODEX_PROJECT_DIR": str(project_dir)},
+        )
+        symlink_metadata = run_cli(
+            cli_path,
+            socket_path,
+            [
+                "get-metadata",
+                "--workspace",
+                workspace_id,
+                "--surface",
+                surface_id,
+                "--key",
+                "codex.session_id",
+            ],
+        )
+        expect(
+            f"codex.session_id = {symlink_session_id}" in symlink_metadata,
+            f"Symlinked hook cwd should match the physical target project dir: {symlink_metadata!r}",
         )
 
         run_cli(
@@ -264,6 +339,56 @@ def main() -> int:
         expect(f"codex.session_id = {session_id}" in metadata, f"Missing codex.session_id metadata: {metadata!r}")
         expect(f"codex.session_project_dir = {project_dir}" in metadata, f"Missing project-dir metadata: {metadata!r}")
         expect("model = gpt-5.5" in metadata, f"Missing Codex model metadata: {metadata!r}")
+
+        operator_model = "operator/model"
+        guarded_session_id = "33333333-4444-5555-6666-777777777777"
+        run_cli(
+            cli_path,
+            socket_path,
+            ["set-metadata", "--key", "model", "--value", operator_model, "--workspace", workspace_id, "--surface", surface_id],
+        )
+        run_cli(
+            cli_path,
+            socket_path,
+            ["set-metadata", "--key", "terminal_type", "--value", "shell", "--workspace", workspace_id, "--surface", surface_id],
+        )
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "session-start"],
+            payload={
+                "hook_event_name": "SessionStart",
+                "session_id": guarded_session_id,
+                "cwd": str(project_dir),
+                "model": "gpt-5.4",
+            },
+            env=hook_env,
+        )
+        guarded_metadata = run_cli(
+            cli_path,
+            socket_path,
+            [
+                "get-metadata",
+                "--workspace",
+                workspace_id,
+                "--surface",
+                surface_id,
+                "--key",
+                "terminal_type",
+                "--key",
+                "model",
+                "--key",
+                "codex.session_id",
+            ],
+        )
+        expect("terminal_type = shell" in guarded_metadata, f"Hook declare writes must not override explicit terminal_type: {guarded_metadata!r}")
+        expect(f"model = {operator_model}" in guarded_metadata, f"Hook declare writes must not override explicit model: {guarded_metadata!r}")
+        expect(f"codex.session_id = {guarded_session_id}" in guarded_metadata, f"Hook should still refresh declare-level session metadata: {guarded_metadata!r}")
+        run_cli(
+            cli_path,
+            socket_path,
+            ["set-metadata", "--key", "terminal_type", "--value", "codex", "--workspace", workspace_id, "--surface", surface_id],
+        )
 
         run_cli(
             cli_path,
@@ -328,13 +453,14 @@ def main() -> int:
         expect("codex=Idle" in status, f"Expected Idle status after notify, got {status!r}")
 
         before_status_only_count = len(list_notifications(cli_path, socket_path, workspace_uuid))
+        status_only_session_id = "44444444-5555-6666-7777-888888888888"
         run_cli(
             cli_path,
             socket_path,
             ["codex-hook", "stop", "--status-only"],
             payload={
                 "hook_event_name": "Stop",
-                "session_id": session_id,
+                "session_id": status_only_session_id,
                 "cwd": str(project_dir),
                 "last_assistant_message": "No duplicate please",
             },
@@ -344,6 +470,23 @@ def main() -> int:
         expect(
             len(after_status_only) == before_status_only_count,
             f"status-only Stop must not add a notification: before={before_status_only_count} after={after_status_only!r}",
+        )
+        status_only_metadata = run_cli(
+            cli_path,
+            socket_path,
+            [
+                "get-metadata",
+                "--workspace",
+                workspace_id,
+                "--surface",
+                surface_id,
+                "--key",
+                "codex.session_id",
+            ],
+        )
+        expect(
+            f"codex.session_id = {status_only_session_id}" in status_only_metadata,
+            f"status-only Stop must still capture session metadata: {status_only_metadata!r}",
         )
 
         print("PASS: codex-hook bridge updates metadata, notifications, status, and no-target safety")

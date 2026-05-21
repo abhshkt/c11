@@ -395,32 +395,6 @@ enum GhosttyDefaultBackgroundUpdateScope: Int {
     }
 }
 
-@MainActor
-private func markCodexIdleFromTerminalNotification(
-    tabId: UUID,
-    surfaceId: UUID?,
-    owningManager: TabManager?
-) {
-    guard let surfaceId,
-          let workspace = owningManager?.tabs.first(where: { $0.id == tabId }) else {
-        return
-    }
-    let metadata = SurfaceMetadataStore.shared
-        .getMetadata(workspaceId: tabId, surfaceId: surfaceId)
-        .metadata
-    guard metadata[SurfaceMetadataKeyName.terminalType] as? String == SurfaceMetadataKeyName.terminalTypeCodex else {
-        return
-    }
-
-    workspace.statusEntries["codex"] = SidebarStatusEntry(
-        key: "codex",
-        value: "Idle",
-        icon: "pause.circle.fill",
-        color: "#8E8E93",
-        timestamp: Date()
-    )
-}
-
 /// Coalesces Ghostty background notifications so consumers only observe
 /// the latest runtime background for a burst of updates.
 final class GhosttyDefaultBackgroundNotificationDispatcher {
@@ -1996,11 +1970,6 @@ class GhosttyApp {
                         subtitle: "",
                         body: body
                     )
-                    markCodexIdleFromTerminalNotification(
-                        tabId: tabId,
-                        surfaceId: surfaceId,
-                        owningManager: owningManager
-                    )
                     return true
                 }
             }
@@ -2280,11 +2249,6 @@ class GhosttyApp {
                     title: command,
                     subtitle: "",
                     body: body
-                )
-                markCodexIdleFromTerminalNotification(
-                    tabId: tabId,
-                    surfaceId: surfaceId,
-                    owningManager: owningManager
                 )
             }
             return true
