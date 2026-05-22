@@ -62,6 +62,38 @@ if [[ -n "${CODEX_PROXY_GIT_SSH_COMMAND+x}" ]]; then
   echo "CODEX_PROXY_GIT_SSH_COMMAND leaked into nested Codex" >&2
   exit 83
 fi
+if [[ -n "${CODEX_SNAPSHOT_PROXY_ENV_SET+x}" ]]; then
+  echo "CODEX_SNAPSHOT_PROXY_ENV_SET leaked into nested Codex" >&2
+  exit 89
+fi
+if [[ -n "${CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_SET+x}" ]]; then
+  echo "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_SET leaked into nested Codex" >&2
+  exit 90
+fi
+if [[ -n "${CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_AFTER_MARKED+x}" ]]; then
+  echo "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_AFTER_MARKED leaked into nested Codex" >&2
+  exit 91
+fi
+if [[ -n "${CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_LIVE_MARKED+x}" ]]; then
+  echo "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_LIVE_MARKED leaked into nested Codex" >&2
+  exit 92
+fi
+"""
+
+PROXY_SANITIZING_FAKE_CODEX = SANITIZING_FAKE_CODEX + """
+for proxy_var in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do
+  if [[ -n "${!proxy_var+x}" ]]; then
+    echo "$proxy_var leaked into nested Codex" >&2
+    exit 87
+  fi
+done
+"""
+
+USER_PROXY_PRESERVED_FAKE_CODEX = SANITIZING_FAKE_CODEX + """
+if [[ "${HTTPS_PROXY-}" != "http://proxy.example:8080" ]]; then
+  echo "expected user HTTPS_PROXY to be preserved, got ${HTTPS_PROXY-__UNSET__}" >&2
+  exit 88
+fi
 """
 
 DELAYED_STATE_ROW_FAKE_CODEX = DEFAULT_FAKE_CODEX + """
@@ -172,6 +204,10 @@ fi
 if [[ "$(cat "$CODEX_HOME/plugins/cache/openai-bundled/browser/plugin.txt")" != *"real plugin cache"* ]]; then
   echo "overlay plugin cache did not preserve the real plugin cache contents" >&2
   exit 86
+fi
+if [[ -e "$CODEX_HOME/plugins/cache/non-bundled" || -L "$CODEX_HOME/plugins/cache/non-bundled" ]]; then
+  echo "non-bundled plugin cache should not be mirrored into overlay" >&2
+  exit 93
 fi
 for non_seed in state_5.sqlite history.jsonl sessions skills logs_2.sqlite; do
   if [[ -e "$CODEX_HOME/$non_seed" || -L "$CODEX_HOME/$non_seed" ]]; then
@@ -410,6 +446,9 @@ def run_wrapper(
         plugin_cache = real_codex_home / "plugins" / "cache" / "openai-bundled" / "browser"
         plugin_cache.mkdir(parents=True)
         (plugin_cache / "plugin.txt").write_text("real plugin cache\n", encoding="utf-8")
+        non_bundled_cache = real_codex_home / "plugins" / "cache" / "non-bundled"
+        non_bundled_cache.mkdir(parents=True)
+        (non_bundled_cache / "plugin.txt").write_text("non-bundled plugin cache\n", encoding="utf-8")
         overlay_dir = tmp / "c11-codex-home-overlays"
         overlay_key = hashlib.md5(str(real_codex_home).encode("utf-8")).hexdigest()
         if overlay_setup == "dir":
@@ -439,6 +478,25 @@ def run_wrapper(
             overlay.mkdir(parents=True, exist_ok=True)
             os.link(real_codex_home / "config.toml", overlay / "config.toml")
             os.link(real_codex_home / "auth.json", overlay / "auth.json")
+        elif overlay_setup == "empty-plugins":
+            overlay_dir.mkdir(parents=True, exist_ok=True)
+            overlay = overlay_dir / overlay_key
+            (overlay / "plugins" / "cache").mkdir(parents=True, exist_ok=True)
+        elif overlay_setup == "symlink-plugin-cache":
+            overlay_dir.mkdir(parents=True, exist_ok=True)
+            overlay = overlay_dir / overlay_key
+            (overlay / "plugins" / "cache").mkdir(parents=True, exist_ok=True)
+            plugin_target = tmp / "external-plugin-cache-target"
+            plugin_target.mkdir(parents=True, exist_ok=True)
+            (overlay / "plugins" / "cache" / "openai-bundled").symlink_to(plugin_target, target_is_directory=True)
+        elif overlay_setup == "symlink-plugin-cache-source-missing":
+            shutil.rmtree(real_codex_home / "plugins" / "cache" / "openai-bundled")
+            overlay_dir.mkdir(parents=True, exist_ok=True)
+            overlay = overlay_dir / overlay_key
+            (overlay / "plugins" / "cache").mkdir(parents=True, exist_ok=True)
+            plugin_target = tmp / "external-plugin-cache-target"
+            plugin_target.mkdir(parents=True, exist_ok=True)
+            (overlay / "plugins" / "cache" / "openai-bundled").symlink_to(plugin_target, target_is_directory=True)
         elif overlay_setup == "symlink-base":
             overlay_target = tmp / "overlay-target"
             overlay_target.mkdir(parents=True, exist_ok=True)
@@ -480,6 +538,34 @@ exit 0
             test_socket.bind(socket_path)
 
         env = os.environ.copy()
+        for codex_private_var in (
+            "CODEX_THREAD_ID",
+            "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+            "CODEX_SHELL",
+            "CODEX_CI",
+            "CODEX_SANDBOX",
+            "CODEX_SANDBOX_NETWORK_DISABLED",
+            "CODEX_NETWORK_PROXY_ACTIVE",
+            "CODEX_NETWORK_ALLOW_LOCAL_BINDING",
+            "CODEX_PROXY_GIT_SSH_COMMAND",
+            "CODEX_SNAPSHOT_PROXY_ENV_SET",
+            "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND",
+            "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_AFTER_MARKED",
+            "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_LIVE_MARKED",
+            "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_SET",
+        ):
+            env.pop(codex_private_var, None)
+        for proxy_var in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ):
+            env.pop(proxy_var, None)
         env["PATH"] = f"{wrapper_dir}:{real_dir}:/usr/bin:/bin"
         env["CMUX_SURFACE_ID"] = "surface:test"
         env["CMUX_WORKSPACE_ID"] = "workspace:test"
@@ -690,6 +776,32 @@ def test_profile_layer_replaces_hardlinked_seed_files(failures: list[str]) -> No
     )
     expect(code == 0, f"hardlinked seed: wrapper exited {code}: {stderr}", failures)
     expect("--profile-v2" in real_argv, f"hardlinked seed: expected managed c11 profile, got {real_argv}", failures)
+
+
+def test_profile_layer_seeds_incomplete_plugin_cache_overlay(failures: list[str]) -> None:
+    code, real_argv, _, stderr, _, _, _ = run_wrapper(
+        socket_state="live",
+        argv=["hello"],
+        real_codex_script=PROFILE_CHECKING_FAKE_CODEX,
+        overlay_setup="empty-plugins",
+    )
+    expect(code == 0, f"incomplete plugin cache overlay: wrapper exited {code}: {stderr}", failures)
+    expect("--profile-v2" in real_argv, f"incomplete plugin cache overlay: expected managed c11 profile, got {real_argv}", failures)
+
+
+def test_profile_layer_rejects_symlinked_plugin_cache(failures: list[str]) -> None:
+    for setup in ("symlink-plugin-cache", "symlink-plugin-cache-source-missing"):
+        code, real_argv, _, stderr, _, _, _ = run_wrapper(
+            socket_state="live",
+            argv=["hello"],
+            overlay_setup=setup,
+        )
+        expect(code == 0, f"{setup}: wrapper should fall through without profile overlay, exited {code}: {stderr}", failures)
+        expect(
+            "--profile-v2" not in real_argv,
+            f"{setup}: unsafe bundled plugin cache target must not receive a managed profile layer: {real_argv}",
+            failures,
+        )
 
 
 def test_profile_layer_ignores_unmanaged_overlay_override(failures: list[str]) -> None:
@@ -1111,7 +1223,7 @@ def test_disabled_env_skips_socket_probe_and_hook_injection(failures: list[str])
 
 
 def test_parent_codex_session_env_is_sanitized(failures: list[str]) -> None:
-    code, _, _, stderr, _, _, _ = run_wrapper(
+    code, real_argv, _, stderr, _, _, _ = run_wrapper(
         socket_state="live",
         argv=["hello"],
         extra_env={
@@ -1123,10 +1235,21 @@ def test_parent_codex_session_env_is_sanitized(failures: list[str]) -> None:
             "CODEX_SANDBOX_NETWORK_DISABLED": "1",
             "CODEX_NETWORK_PROXY_ACTIVE": "1",
             "CODEX_PROXY_GIT_SSH_COMMAND": "ssh -o ProxyCommand=false",
+            "CODEX_SNAPSHOT_PROXY_ENV_SET": "1",
+            "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_SET": "1",
+            "HTTP_PROXY": "http://127.0.0.1:9",
+            "HTTPS_PROXY": "http://127.0.0.1:9",
+            "ALL_PROXY": "socks5://127.0.0.1:9",
+            "NO_PROXY": "*",
+            "http_proxy": "http://127.0.0.1:9",
+            "https_proxy": "http://127.0.0.1:9",
+            "all_proxy": "socks5://127.0.0.1:9",
+            "no_proxy": "*",
         },
-        real_codex_script=SANITIZING_FAKE_CODEX,
+        real_codex_script=PROXY_SANITIZING_FAKE_CODEX,
     )
     expect(code == 0, f"parent Codex env sanitize: wrapper exited {code}: {stderr}", failures)
+    expect("--profile-v2" in real_argv, f"parent Codex env sanitize: expected managed profile launch, got {real_argv}", failures)
 
     code, _, _, stderr, _, _, _ = run_wrapper(
         socket_state="live",
@@ -1135,10 +1258,33 @@ def test_parent_codex_session_env_is_sanitized(failures: list[str]) -> None:
             "CODEX_SANDBOX": "seatbelt",
             "CODEX_SANDBOX_NETWORK_DISABLED": "1",
             "CODEX_NETWORK_PROXY_ACTIVE": "1",
+            "HTTPS_PROXY": "http://127.0.0.1:9",
         },
-        real_codex_script=SANITIZING_FAKE_CODEX,
+        real_codex_script=PROXY_SANITIZING_FAKE_CODEX,
     )
     expect(code == 0, f"standalone Codex sandbox env sanitize: wrapper exited {code}: {stderr}", failures)
+
+    code, _, _, stderr, _, _, _ = run_wrapper(
+        socket_state="live",
+        argv=["hello"],
+        extra_env={
+            "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_AFTER_MARKED": "1",
+            "HTTPS_PROXY": "http://127.0.0.1:9",
+        },
+        real_codex_script=PROXY_SANITIZING_FAKE_CODEX,
+    )
+    expect(code == 0, f"snapshot proxy marker env sanitize: wrapper exited {code}: {stderr}", failures)
+
+
+def test_user_proxy_env_is_preserved_without_codex_network_marker(failures: list[str]) -> None:
+    code, real_argv, _, stderr, _, _, _ = run_wrapper(
+        socket_state="live",
+        argv=["hello"],
+        extra_env={"HTTPS_PROXY": "http://proxy.example:8080"},
+        real_codex_script=USER_PROXY_PRESERVED_FAKE_CODEX,
+    )
+    expect(code == 0, f"user proxy preserve: wrapper exited {code}: {stderr}", failures)
+    expect("--profile-v2" in real_argv, f"user proxy preserve: expected managed profile launch, got {real_argv}", failures)
 
 
 def test_parent_codex_session_env_is_sanitized_on_passthrough_paths(failures: list[str]) -> None:
@@ -1151,6 +1297,11 @@ def test_parent_codex_session_env_is_sanitized_on_passthrough_paths(failures: li
         "CODEX_SANDBOX_NETWORK_DISABLED": "1",
         "CODEX_NETWORK_PROXY_ACTIVE": "1",
         "CODEX_PROXY_GIT_SSH_COMMAND": "ssh -o ProxyCommand=false",
+        "CODEX_SNAPSHOT_PROXY_ENV_SET": "1",
+        "HTTP_PROXY": "http://127.0.0.1:9",
+        "HTTPS_PROXY": "http://127.0.0.1:9",
+        "ALL_PROXY": "socks5://127.0.0.1:9",
+        "NO_PROXY": "*",
     }
     cases = [
         ("stale socket", "stale", ["hello"], {}),
@@ -1162,7 +1313,7 @@ def test_parent_codex_session_env_is_sanitized_on_passthrough_paths(failures: li
             socket_state=socket_state,
             argv=argv,
             extra_env={**parent_env, **env_extra},
-            real_codex_script=SANITIZING_FAKE_CODEX,
+            real_codex_script=PROXY_SANITIZING_FAKE_CODEX,
         )
         expect(code == 0, f"{label}: parent Codex env sanitize exited {code}: {stderr}", failures)
 
@@ -1367,6 +1518,8 @@ def main() -> int:
     test_profile_layer_refreshes_config_and_auth(failures)
     test_profile_layer_removes_stale_auth_when_real_auth_missing(failures)
     test_profile_layer_replaces_hardlinked_seed_files(failures)
+    test_profile_layer_seeds_incomplete_plugin_cache_overlay(failures)
+    test_profile_layer_rejects_symlinked_plugin_cache(failures)
     test_profile_layer_ignores_unmanaged_overlay_override(failures)
     test_legacy_resume_last_uses_real_codex_home(failures)
     test_plain_interactive_codex_does_not_mark_running(failures)
@@ -1383,6 +1536,7 @@ def main() -> int:
     test_stale_socket_skips_hook_injection(failures)
     test_disabled_env_skips_socket_probe_and_hook_injection(failures)
     test_parent_codex_session_env_is_sanitized(failures)
+    test_user_proxy_env_is_preserved_without_codex_network_marker(failures)
     test_parent_codex_session_env_is_sanitized_on_passthrough_paths(failures)
     test_live_socket_injects_pane_cwd_when_absent(failures)
     test_existing_cd_arg_is_preserved(failures)

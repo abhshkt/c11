@@ -21,6 +21,9 @@
 # includes an initial prompt, the wrapper also marks the workspace Running until
 # Codex's notify bridge marks it Idle. Outside c11 (or when the socket is
 # unreachable), it passes through to the real codex binary unchanged.
+# In c11, every exec path first strips private parent-Codex session,
+# sandbox, and network/proxy markers so a Codex-launched c11 process does not
+# poison later c11 Codex panes or remote MCP startup.
 #
 # Codex lifecycle hooks are discovered from real config layers such as
 # `$CODEX_HOME/config.toml`, `--profile-v2 <name>`, or `<repo>/.codex/config.toml`;
@@ -247,6 +250,47 @@ copy_codex_home_seed_dir_if_missing() {
     }
 }
 
+copy_codex_openai_bundled_plugin_cache_if_missing() {
+    local real_home="$1"
+    local overlay="$2"
+    local source="$real_home/plugins/cache/openai-bundled"
+    local plugins_dir="$overlay/plugins"
+    local cache_dir="$overlay/plugins/cache"
+    local target="$overlay/plugins/cache/openai-bundled"
+
+    local component
+    for component in "$plugins_dir" "$cache_dir" "$target"; do
+        if [[ -L "$component" ]]; then
+            return 1
+        fi
+        if [[ -e "$component" && ! -d "$component" ]]; then
+            return 1
+        fi
+    done
+
+    [[ -d "$source" && ! -L "$source" ]] || return 0
+
+    if [[ -d "$target" ]]; then
+        return 0
+    fi
+
+    mkdir -p "$cache_dir" || return 1
+    [[ -d "$plugins_dir" && ! -L "$plugins_dir" ]] || return 1
+    [[ -d "$cache_dir" && ! -L "$cache_dir" ]] || return 1
+
+    local tmp
+    tmp="$(mktemp -d "$cache_dir/.openai-bundled.tmp.XXXXXX")" || return 1
+    if ! (cd "$source" && tar -cf - .) | (cd "$tmp" && tar -xf -); then
+        rm -rf "$tmp" 2>/dev/null || true
+        return 1
+    fi
+    chmod 700 "$tmp" 2>/dev/null || true
+    mv "$tmp" "$target" || {
+        rm -rf "$tmp" 2>/dev/null || true
+        return 1
+    }
+}
+
 prune_legacy_codex_home_overlay_symlinks() {
     local overlay="$1"
     local entry name
@@ -303,15 +347,16 @@ prepare_c11_codex_home_overlay() {
     #
     # Mutable Codex runtime data such as state_5.sqlite, sessions, history,
     # logs, profile state, and generated profile files is not mirrored from the
-    # tenant home. The local plugin cache is copied once when missing so the
-    # managed overlay does not start as a fresh, pluginless Codex install when
-    # network refresh is unavailable. Codex may update that copy inside c11's
-    # runtime without writing back to the tenant home.
+    # tenant home. The local OpenAI-bundled plugin cache is copied into
+    # c11-owned runtime storage when missing so the managed overlay does not
+    # start as a fresh, pluginless Codex install when network refresh is
+    # unavailable. Codex may update that copy inside c11's runtime without
+    # writing back to the tenant home.
     copy_codex_home_seed_file "$real_home" "$overlay" "config.toml" "1" || return 1
     copy_codex_home_seed_file "$real_home" "$overlay" "auth.json" "1" || return 1
     copy_codex_home_seed_file "$real_home" "$overlay" "AGENTS.md" "0" || return 1
     copy_codex_home_seed_file "$real_home" "$overlay" "instructions.md" "0" || return 1
-    copy_codex_home_seed_dir_if_missing "$real_home" "$overlay" "plugins" || return 1
+    copy_codex_openai_bundled_plugin_cache_if_missing "$real_home" "$overlay" || return 1
 
     session_start_command="$(codex_hook_command_toml_string "session-start")" || return 1
     prompt_submit_command="$(codex_hook_command_toml_string "prompt-submit")" || return 1
@@ -879,7 +924,21 @@ codex_args_have_initial_prompt() {
 sanitize_codex_parent_environment() {
     # c11 is often launched from an agent-owned shell. Do not let a parent
     # Codex process's private session routing, sandbox, or network proxy state
-    # leak into a fresh c11 pane.
+    # leak into a fresh c11 pane. Standard proxy variables are scrubbed only
+    # when a Codex-private network/proxy marker proves they belong to that
+    # parent Codex sandbox/proxy context; user/corporate proxies remain intact
+    # for normal launches.
+    local codex_private_network_env_present=0
+    if [[ -n "${CODEX_SANDBOX_NETWORK_DISABLED:-}" \
+        || -n "${CODEX_NETWORK_PROXY_ACTIVE:-}" \
+        || -n "${CODEX_SNAPSHOT_PROXY_ENV_SET:-}" \
+        || -n "${CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_SET:-}" \
+        || -n "${CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_AFTER_MARKED:-}" \
+        || -n "${CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_LIVE_MARKED:-}" \
+        || -n "${CODEX_PROXY_GIT_SSH_COMMAND:-}" ]]; then
+        codex_private_network_env_present=1
+    fi
+
     unset CODEX_THREAD_ID
     unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE
     unset CODEX_SHELL
@@ -894,6 +953,17 @@ sanitize_codex_parent_environment() {
     unset CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_AFTER_MARKED
     unset CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_LIVE_MARKED
     unset CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_SET
+
+    if [[ "$codex_private_network_env_present" == "1" ]]; then
+        unset HTTP_PROXY
+        unset HTTPS_PROXY
+        unset ALL_PROXY
+        unset NO_PROXY
+        unset http_proxy
+        unset https_proxy
+        unset all_proxy
+        unset no_proxy
+    fi
 }
 
 exec_real_codex_clean() {
