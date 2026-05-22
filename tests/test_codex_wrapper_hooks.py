@@ -224,14 +224,20 @@ profile="$(cat "$CODEX_HOME/c11.config.toml")"
 for expected in \
   "hooks = true" \
   "codex-hook session-start" \
-  "codex-hook prompt-submit" \
-  "codex-hook permission-request" \
-  "codex-hook pre-tool-use" \
-  "codex-hook post-tool-use" \
-  "codex-hook stop --status-only"; do
+  "codex-hook permission-request"; do
   if [[ "$profile" != *"$expected"* ]]; then
     echo "missing $expected in c11 profile config" >&2
     exit 55
+  fi
+done
+for noisy_hook in \
+  "codex-hook prompt-submit" \
+  "codex-hook pre-tool-use" \
+  "codex-hook post-tool-use" \
+  "codex-hook stop --status-only"; do
+  if [[ "$profile" == *"$noisy_hook"* ]]; then
+    echo "per-turn hook should not be in c11 profile config: $noisy_hook" >&2
+    exit 94
   fi
 done
 if [[ "$profile" != *"--context-json"* || "$profile" != *"c11_context"* ]]; then

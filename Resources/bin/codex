@@ -315,8 +315,7 @@ prepare_c11_codex_home_overlay() {
     local real_home="$1"
     local base="$HOME/Library/Application Support/c11/codex-home"
     local key overlay profile_tmp
-    local session_start_command prompt_submit_command permission_request_command
-    local pre_tool_command post_tool_command stop_command
+    local session_start_command permission_request_command
     if [[ "${CMUX_CODEX_ALLOW_TEST_HOME_OVERLAY_DIR:-}" == "1" && -n "${CMUX_CODEX_HOME_OVERLAY_DIR:-}" ]]; then
         base="$CMUX_CODEX_HOME_OVERLAY_DIR"
     fi
@@ -359,11 +358,7 @@ prepare_c11_codex_home_overlay() {
     copy_codex_openai_bundled_plugin_cache_if_missing "$real_home" "$overlay" || return 1
 
     session_start_command="$(codex_hook_command_toml_string "session-start")" || return 1
-    prompt_submit_command="$(codex_hook_command_toml_string "prompt-submit")" || return 1
     permission_request_command="$(codex_hook_command_toml_string "permission-request")" || return 1
-    pre_tool_command="$(codex_hook_command_toml_string "pre-tool-use")" || return 1
-    post_tool_command="$(codex_hook_command_toml_string "post-tool-use")" || return 1
-    stop_command="$(codex_hook_command_toml_string "stop --status-only")" || return 1
 
     profile_tmp="$(mktemp "$overlay/c11.config.toml.tmp.XXXXXX")" || return 1
     chmod 600 "$profile_tmp" 2>/dev/null || return 1
@@ -380,14 +375,6 @@ command = ${session_start_command}
 timeout = 10
 statusMessage = "Connecting Codex to c11"
 
-[[hooks.UserPromptSubmit]]
-
-[[hooks.UserPromptSubmit.hooks]]
-type = "command"
-command = ${prompt_submit_command}
-timeout = 10
-statusMessage = "Updating c11 status"
-
 [[hooks.PermissionRequest]]
 matcher = "*"
 
@@ -396,32 +383,6 @@ type = "command"
 command = ${permission_request_command}
 timeout = 10
 statusMessage = "Notifying c11"
-
-[[hooks.PreToolUse]]
-matcher = "*"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = ${pre_tool_command}
-timeout = 5
-statusMessage = "Updating c11 status"
-
-[[hooks.PostToolUse]]
-matcher = "*"
-
-[[hooks.PostToolUse.hooks]]
-type = "command"
-command = ${post_tool_command}
-timeout = 5
-statusMessage = "Updating c11 status"
-
-[[hooks.Stop]]
-
-[[hooks.Stop.hooks]]
-type = "command"
-command = ${stop_command}
-timeout = 10
-statusMessage = "Updating c11 status"
 EOF
     chmod 600 "$profile_tmp" 2>/dev/null || return 1
     mv "$profile_tmp" "$overlay/c11.config.toml" || return 1
