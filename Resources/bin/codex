@@ -5,10 +5,10 @@
 # this wrapper marks the surface as terminal_type=codex, injects Codex's
 # `notify` command for the no-trust turn-complete path, and starts Codex with a
 # c11-owned `--profile-v2 c11` hook layer. That layer lives under c11's runtime
-# state, refreshes the operator's Codex config/auth seed, and is reviewed by
-# Codex's own hook-trust UI. The operator's `config.toml` is copied into the
-# c11-owned overlay rather than symlinked, so Codex hook-trust writes cannot
-# mutate `~/.codex/config.toml`. c11 never writes tenant-owned project
+# state, refreshes the operator's Codex auth seed, and is reviewed by Codex's
+# own hook-trust UI. The operator's `config.toml` is copied into the c11-owned
+# overlay only when missing, so Codex hook-trust writes persist locally without
+# mutating `~/.codex/config.toml`. c11 never writes tenant-owned project
 # `.codex/` files or shell rc files. c11 captures codex.session_id from trusted
 # hook payloads, from explicit `codex resume <id>` invocations, or from a
 # guarded local Codex state lookup when exactly one fresh session exists. It also
@@ -219,37 +219,6 @@ copy_codex_home_seed_file() {
     chmod 600 "$target" 2>/dev/null || return 1
 }
 
-copy_codex_home_seed_dir_if_missing() {
-    local real_home="$1"
-    local overlay="$2"
-    local name="$3"
-    local source="$real_home/$name"
-    local target="$overlay/$name"
-
-    [[ -d "$source" && ! -L "$source" ]] || return 0
-    if [[ -L "$target" ]]; then
-        rm -f "$target" || return 1
-    fi
-    if [[ -e "$target" ]]; then
-        [[ -d "$target" && ! -L "$target" ]] || return 1
-        return 0
-    fi
-
-    local parent tmp
-    parent="$(dirname "$target")" || return 1
-    mkdir -p "$parent" || return 1
-    tmp="$(mktemp -d "$parent/.$(basename "$name").tmp.XXXXXX")" || return 1
-    if ! (cd "$source" && tar -cf - .) | (cd "$tmp" && tar -xf -); then
-        rm -rf "$tmp" 2>/dev/null || true
-        return 1
-    fi
-    chmod 700 "$tmp" 2>/dev/null || true
-    mv "$tmp" "$target" || {
-        rm -rf "$tmp" 2>/dev/null || true
-        return 1
-    }
-}
-
 copy_codex_openai_bundled_plugin_cache_if_missing() {
     local real_home="$1"
     local overlay="$2"
@@ -271,6 +240,9 @@ copy_codex_openai_bundled_plugin_cache_if_missing() {
     [[ -d "$source" && ! -L "$source" ]] || return 0
 
     if [[ -d "$target" ]]; then
+        local target_symlink
+        target_symlink="$(find "$target" -type l -print -quit 2>/dev/null)" || return 1
+        [[ -z "$target_symlink" ]] || return 1
         return 0
     fi
 
@@ -278,7 +250,10 @@ copy_codex_openai_bundled_plugin_cache_if_missing() {
     [[ -d "$plugins_dir" && ! -L "$plugins_dir" ]] || return 1
     [[ -d "$cache_dir" && ! -L "$cache_dir" ]] || return 1
 
-    local tmp
+    local source_symlink tmp
+    source_symlink="$(find "$source" -type l -print -quit 2>/dev/null)" || return 1
+    [[ -z "$source_symlink" ]] || return 1
+
     tmp="$(mktemp -d "$cache_dir/.openai-bundled.tmp.XXXXXX")" || return 1
     if ! (cd "$source" && tar -cf - .) | (cd "$tmp" && tar -xf -); then
         rm -rf "$tmp" 2>/dev/null || true
@@ -337,8 +312,8 @@ prepare_c11_codex_home_overlay() {
 
     # Explicit seed allowlist, copied into c11-owned storage rather than
     # symlinked:
-    #   config.toml     - refreshed operator Codex settings; c11 hook trust is
-    #                     stored in c11.config.toml, not the real config.
+    #   config.toml     - one-time baseline operator Codex settings; Codex
+    #                     hook-trust writes must stay inside the overlay copy.
     #   auth.json       - account credentials needed for Codex to start;
     #                     refreshed from the real home on each launch.
     #   AGENTS.md       - optional global operator instructions.
@@ -351,7 +326,7 @@ prepare_c11_codex_home_overlay() {
     # start as a fresh, pluginless Codex install when network refresh is
     # unavailable. Codex may update that copy inside c11's runtime without
     # writing back to the tenant home.
-    copy_codex_home_seed_file "$real_home" "$overlay" "config.toml" "1" || return 1
+    copy_codex_home_seed_file "$real_home" "$overlay" "config.toml" "0" || return 1
     copy_codex_home_seed_file "$real_home" "$overlay" "auth.json" "1" || return 1
     copy_codex_home_seed_file "$real_home" "$overlay" "AGENTS.md" "0" || return 1
     copy_codex_home_seed_file "$real_home" "$overlay" "instructions.md" "0" || return 1

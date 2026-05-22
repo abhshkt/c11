@@ -201,6 +201,10 @@ if [[ -L "$CODEX_HOME/plugins" || -L "$CODEX_HOME/plugins/cache" ]]; then
   echo "overlay plugin cache must be c11-owned, not a symlink" >&2
   exit 85
 fi
+if [[ -n "$(find "$CODEX_HOME/plugins/cache/openai-bundled" -type l -print -quit 2>/dev/null)" ]]; then
+  echo "overlay plugin cache must not contain nested symlinks" >&2
+  exit 95
+fi
 if [[ "$(cat "$CODEX_HOME/plugins/cache/openai-bundled/browser/plugin.txt")" != *"real plugin cache"* ]]; then
   echo "overlay plugin cache did not preserve the real plugin cache contents" >&2
   exit 86
@@ -261,14 +265,18 @@ if [[ -n "${CMUX_CODEX_HOME_OVERLAY_DIR-}" || -n "${CMUX_CODEX_ALLOW_TEST_HOME_O
 fi
 """
 
-AUTH_REFRESH_CHECKING_FAKE_CODEX = DEFAULT_FAKE_CODEX + """
+AUTH_REFRESH_PRESERVES_CONFIG_FAKE_CODEX = DEFAULT_FAKE_CODEX + """
 if [[ "$(cat "$CODEX_HOME/auth.json")" != *"real-auth-token"* ]]; then
   echo "overlay auth.json was not refreshed from the real Codex home" >&2
   exit 72
 fi
-if [[ "$(cat "$CODEX_HOME/config.toml")" != *"# real Codex config"* ]]; then
-  echo "overlay config.toml was not refreshed from the real Codex home" >&2
+if [[ "$(cat "$CODEX_HOME/config.toml")" != *"trusted-session-start"* ]]; then
+  echo "overlay config.toml should preserve c11-local hook trust state" >&2
   exit 73
+fi
+if [[ "$(cat "$CODEX_HOME/config.toml")" == *"# real Codex config"* ]]; then
+  echo "overlay config.toml should not overwrite local hook trust with real-home config" >&2
+  exit 96
 fi
 """
 
@@ -277,9 +285,13 @@ if [[ -e "$CODEX_HOME/auth.json" || -L "$CODEX_HOME/auth.json" ]]; then
   echo "stale overlay auth.json must be removed when real Codex auth.json is absent" >&2
   exit 75
 fi
-if [[ "$(cat "$CODEX_HOME/config.toml")" != *"# real Codex config"* ]]; then
-  echo "overlay config.toml should still refresh from the real Codex home" >&2
+if [[ "$(cat "$CODEX_HOME/config.toml")" != *"trusted-session-start"* ]]; then
+  echo "overlay config.toml should preserve c11-local hook trust state" >&2
   exit 76
+fi
+if [[ "$(cat "$CODEX_HOME/config.toml")" == *"# real Codex config"* ]]; then
+  echo "overlay config.toml should not overwrite local hook trust when auth is absent" >&2
+  exit 97
 fi
 """
 
@@ -469,13 +481,19 @@ def run_wrapper(
             overlay_dir.mkdir(parents=True, exist_ok=True)
             overlay = overlay_dir / overlay_key
             overlay.mkdir(parents=True, exist_ok=True)
-            (overlay / "config.toml").write_text("# overlay-local config with trust\n", encoding="utf-8")
+            (overlay / "config.toml").write_text(
+                '# overlay-local config with trust\n[hooks.state."c11-session-start"]\ntrusted_hash = "trusted-session-start"\n',
+                encoding="utf-8",
+            )
             (overlay / "auth.json").write_text('{"token":"stale-auth-token"}\n', encoding="utf-8")
         elif overlay_setup == "stale-auth-source-missing":
             overlay_dir.mkdir(parents=True, exist_ok=True)
             overlay = overlay_dir / overlay_key
             overlay.mkdir(parents=True, exist_ok=True)
-            (overlay / "config.toml").write_text("# overlay-local config with trust\n", encoding="utf-8")
+            (overlay / "config.toml").write_text(
+                '# overlay-local config with trust\n[hooks.state."c11-session-start"]\ntrusted_hash = "trusted-session-start"\n',
+                encoding="utf-8",
+            )
             (overlay / "auth.json").write_text('{"token":"stale-auth-token"}\n', encoding="utf-8")
             (real_codex_home / "auth.json").unlink()
         elif overlay_setup == "hardlinked-seed":
@@ -503,6 +521,19 @@ def run_wrapper(
             plugin_target = tmp / "external-plugin-cache-target"
             plugin_target.mkdir(parents=True, exist_ok=True)
             (overlay / "plugins" / "cache" / "openai-bundled").symlink_to(plugin_target, target_is_directory=True)
+        elif overlay_setup == "nested-symlink-plugin-cache-source":
+            external_target = tmp / "external-plugin-cache-target"
+            external_target.mkdir(parents=True, exist_ok=True)
+            (plugin_cache / "link-out").symlink_to(external_target, target_is_directory=True)
+        elif overlay_setup == "nested-symlink-plugin-cache-overlay":
+            overlay_dir.mkdir(parents=True, exist_ok=True)
+            overlay = overlay_dir / overlay_key
+            target_cache = overlay / "plugins" / "cache" / "openai-bundled" / "browser"
+            target_cache.mkdir(parents=True, exist_ok=True)
+            (target_cache / "plugin.txt").write_text("overlay plugin cache\n", encoding="utf-8")
+            external_target = tmp / "external-plugin-cache-target"
+            external_target.mkdir(parents=True, exist_ok=True)
+            (target_cache / "link-out").symlink_to(external_target, target_is_directory=True)
         elif overlay_setup == "symlink-base":
             overlay_target = tmp / "overlay-target"
             overlay_target.mkdir(parents=True, exist_ok=True)
@@ -751,11 +782,11 @@ def test_profile_layer_prunes_legacy_mirror_symlinks(failures: list[str]) -> Non
     expect("--profile-v2" in real_argv, f"legacy profile mirror: expected managed c11 profile, got {real_argv}", failures)
 
 
-def test_profile_layer_refreshes_config_and_auth(failures: list[str]) -> None:
+def test_profile_layer_refreshes_auth_without_replacing_hook_trust(failures: list[str]) -> None:
     code, real_argv, _, stderr, _, _, _ = run_wrapper(
         socket_state="live",
         argv=["hello"],
-        real_codex_script=AUTH_REFRESH_CHECKING_FAKE_CODEX,
+        real_codex_script=AUTH_REFRESH_PRESERVES_CONFIG_FAKE_CODEX,
         overlay_setup="stale-auth",
     )
     expect(code == 0, f"stale auth seed: wrapper exited {code}: {stderr}", failures)
@@ -796,7 +827,12 @@ def test_profile_layer_seeds_incomplete_plugin_cache_overlay(failures: list[str]
 
 
 def test_profile_layer_rejects_symlinked_plugin_cache(failures: list[str]) -> None:
-    for setup in ("symlink-plugin-cache", "symlink-plugin-cache-source-missing"):
+    for setup in (
+        "symlink-plugin-cache",
+        "symlink-plugin-cache-source-missing",
+        "nested-symlink-plugin-cache-source",
+        "nested-symlink-plugin-cache-overlay",
+    ):
         code, real_argv, _, stderr, _, _, _ = run_wrapper(
             socket_state="live",
             argv=["hello"],
@@ -805,7 +841,7 @@ def test_profile_layer_rejects_symlinked_plugin_cache(failures: list[str]) -> No
         expect(code == 0, f"{setup}: wrapper should fall through without profile overlay, exited {code}: {stderr}", failures)
         expect(
             "--profile-v2" not in real_argv,
-            f"{setup}: unsafe bundled plugin cache target must not receive a managed profile layer: {real_argv}",
+            f"{setup}: unsafe bundled plugin cache must not receive a managed profile layer: {real_argv}",
             failures,
         )
 
@@ -1521,7 +1557,7 @@ def main() -> int:
     test_live_socket_uses_c11_owned_profile_layer(failures)
     test_profile_layer_rejects_symlinked_overlay_paths(failures)
     test_profile_layer_prunes_legacy_mirror_symlinks(failures)
-    test_profile_layer_refreshes_config_and_auth(failures)
+    test_profile_layer_refreshes_auth_without_replacing_hook_trust(failures)
     test_profile_layer_removes_stale_auth_when_real_auth_missing(failures)
     test_profile_layer_replaces_hardlinked_seed_files(failures)
     test_profile_layer_seeds_incomplete_plugin_cache_overlay(failures)
