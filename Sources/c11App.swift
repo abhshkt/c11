@@ -124,6 +124,80 @@ enum UITestLaunchManifest {
     }
 }
 
+enum CodexParentEnvironmentSanitizer {
+    private static let codexPrivateKeys: Set<String> = [
+        "CODEX_THREAD_ID",
+        "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+        "CODEX_SHELL",
+        "CODEX_CI",
+        "CODEX_SANDBOX",
+        "CODEX_SANDBOX_NETWORK_DISABLED",
+        "CODEX_NETWORK_PROXY_ACTIVE",
+        "CODEX_NETWORK_ALLOW_LOCAL_BINDING",
+        "CODEX_PROXY_GIT_SSH_COMMAND",
+        "CODEX_SNAPSHOT_PROXY_ENV_SET",
+        "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND",
+        "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_AFTER_MARKED",
+        "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_LIVE_MARKED",
+        "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_SET"
+    ]
+
+    private static let codexNetworkMarkerKeys: Set<String> = [
+        "CODEX_SANDBOX_NETWORK_DISABLED",
+        "CODEX_NETWORK_PROXY_ACTIVE",
+        "CODEX_PROXY_GIT_SSH_COMMAND",
+        "CODEX_SNAPSHOT_PROXY_ENV_SET",
+        "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_SET",
+        "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_AFTER_MARKED",
+        "CODEX_SNAPSHOT_PROXY_GIT_SSH_COMMAND_LIVE_MARKED"
+    ]
+
+    private static let proxyKeys: Set<String> = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy"
+    ]
+
+    static func sanitizedTerminalLaunchEnvironment(_ environment: [String: String]) -> [String: String] {
+        let shouldScrubProxy = environment.contains { entry in
+            codexNetworkMarkerKeys.contains(entry.key) && !entry.value.isEmpty
+        }
+
+        return environment.filter { entry in
+            if codexPrivateKeys.contains(entry.key) {
+                return false
+            }
+
+            if shouldScrubProxy && proxyKeys.contains(entry.key) {
+                return false
+            }
+
+            return true
+        }
+    }
+
+    static func scrubProcessEnvironment() {
+        let shouldScrubProxy = codexNetworkMarkerKeys.contains { key in
+            guard let value = getenv(key) else { return false }
+            return String(cString: value).isEmpty == false
+        }
+
+        for key in codexPrivateKeys {
+            unsetenv(key)
+        }
+
+        guard shouldScrubProxy else { return }
+        for key in proxyKeys {
+            unsetenv(key)
+        }
+    }
+}
+
 @main
 struct cmuxApp: App {
     @StateObject private var tabManager: TabManager
@@ -192,6 +266,7 @@ struct cmuxApp: App {
 
     init() {
         UITestLaunchManifest.applyIfPresent()
+        CodexParentEnvironmentSanitizer.scrubProcessEnvironment()
 
         if SocketControlSettings.shouldBlockUntaggedDebugLaunch() {
             Self.terminateForMissingLaunchTag()

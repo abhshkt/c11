@@ -3189,6 +3189,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
                 }
             }
         }
+        env = CodexParentEnvironmentSanitizer.sanitizedTerminalLaunchEnvironment(env)
 
         var protectedStartupEnvironmentKeys: Set<String> = []
         func setManagedEnvironmentValue(_ key: String, _ value: String) {

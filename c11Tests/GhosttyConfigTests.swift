@@ -1216,6 +1216,38 @@ final class GhosttyTerminalStartupEnvironmentTests: XCTestCase {
         XCTAssertEqual(env["CMUX_CODEX_HOOKS_DISABLED"], "1")
     }
 
+    func testCodexParentEnvironmentSanitizerRemovesPrivateSandboxAndProxyState() {
+        let sanitized = CodexParentEnvironmentSanitizer.sanitizedTerminalLaunchEnvironment([
+            "PATH": "/usr/bin",
+            "CUSTOM_FLAG": "1",
+            "CODEX_THREAD_ID": "thread-123",
+            "CODEX_SANDBOX": "seatbelt",
+            "CODEX_SANDBOX_NETWORK_DISABLED": "1",
+            "HTTPS_PROXY": "http://127.0.0.1:9000",
+            "http_proxy": "http://127.0.0.1:9000"
+        ])
+
+        XCTAssertEqual(sanitized["PATH"], "/usr/bin")
+        XCTAssertEqual(sanitized["CUSTOM_FLAG"], "1")
+        XCTAssertNil(sanitized["CODEX_THREAD_ID"])
+        XCTAssertNil(sanitized["CODEX_SANDBOX"])
+        XCTAssertNil(sanitized["CODEX_SANDBOX_NETWORK_DISABLED"])
+        XCTAssertNil(sanitized["HTTPS_PROXY"])
+        XCTAssertNil(sanitized["http_proxy"])
+    }
+
+    func testCodexParentEnvironmentSanitizerPreservesUserProxyWithoutCodexNetworkMarker() {
+        let sanitized = CodexParentEnvironmentSanitizer.sanitizedTerminalLaunchEnvironment([
+            "PATH": "/usr/bin",
+            "CODEX_THREAD_ID": "thread-123",
+            "HTTPS_PROXY": "http://proxy.example:8080"
+        ])
+
+        XCTAssertEqual(sanitized["PATH"], "/usr/bin")
+        XCTAssertNil(sanitized["CODEX_THREAD_ID"])
+        XCTAssertEqual(sanitized["HTTPS_PROXY"], "http://proxy.example:8080")
+    }
+
     func testMergedStartupEnvironmentAllowsSessionReplayAndInitialEnvCMUXKeys() {
         let replayPath = "/tmp/cmux-replay-\(UUID().uuidString)"
         let merged = TerminalSurface.mergedStartupEnvironment(
