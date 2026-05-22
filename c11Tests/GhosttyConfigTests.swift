@@ -1186,6 +1186,48 @@ final class RemoteLoopbackHTTPRequestRewriterTests: XCTestCase {
 }
 
 final class GhosttyTerminalStartupEnvironmentTests: XCTestCase {
+    func testScrubProcessEnvironmentRemovesCurrentProcessPoison() {
+        let keys = [
+            "CODEX_THREAD_ID",
+            "CODEX_SANDBOX",
+            "CODEX_SANDBOX_NETWORK_DISABLED",
+            "CODEX_NETWORK_PROXY_ACTIVE",
+            "HTTPS_PROXY",
+            "http_proxy"
+        ]
+        let originalValues = keys.reduce(into: [String: String]()) { result, key in
+            if let value = getenv(key).map({ String(cString: $0) }) {
+                result[key] = value
+            }
+        }
+        defer {
+            for key in keys {
+                if let value = originalValues[key] {
+                    setenv(key, value, 1)
+                } else {
+                    unsetenv(key)
+                }
+            }
+        }
+
+        setenv("CODEX_THREAD_ID", "thread-123", 1)
+        setenv("CODEX_SANDBOX", "seatbelt", 1)
+        setenv("CODEX_SANDBOX_NETWORK_DISABLED", "1", 1)
+        setenv("CODEX_NETWORK_PROXY_ACTIVE", "1", 1)
+        setenv("HTTPS_PROXY", "http://127.0.0.1:9000", 1)
+        setenv("http_proxy", "http://127.0.0.1:9000", 1)
+
+        CodexParentEnvironmentSanitizer.scrubProcessEnvironment()
+        let env = ProcessInfo.processInfo.environment
+
+        XCTAssertNil(env["CODEX_THREAD_ID"])
+        XCTAssertNil(env["CODEX_SANDBOX"])
+        XCTAssertNil(env["CODEX_SANDBOX_NETWORK_DISABLED"])
+        XCTAssertNil(env["CODEX_NETWORK_PROXY_ACTIVE"])
+        XCTAssertNil(env["HTTPS_PROXY"])
+        XCTAssertNil(env["http_proxy"])
+    }
+
     func testAgentIntegrationHookEnvironmentOmitsDisabledFlagsWhenEnabled() {
         let env = TerminalSurface.agentIntegrationHookEnvironment(
             claudeHooksEnabled: true,
@@ -1246,6 +1288,37 @@ final class GhosttyTerminalStartupEnvironmentTests: XCTestCase {
         XCTAssertEqual(sanitized["PATH"], "/usr/bin")
         XCTAssertNil(sanitized["CODEX_THREAD_ID"])
         XCTAssertEqual(sanitized["HTTPS_PROXY"], "http://proxy.example:8080")
+    }
+
+    func testMergedStartupEnvironmentScrubsInheritedCodexSandboxAndProxyState() {
+        let merged = TerminalSurface.mergedStartupEnvironment(
+            base: [
+                "PATH": "/usr/bin",
+                "CUSTOM_FLAG": "1",
+                "CODEX_THREAD_ID": "thread-123",
+                "CODEX_SANDBOX": "seatbelt",
+                "CODEX_SANDBOX_NETWORK_DISABLED": "1",
+                "HTTPS_PROXY": "http://127.0.0.1:9000",
+                "http_proxy": "http://127.0.0.1:9000"
+            ],
+            protectedKeys: ["PATH"],
+            additionalEnvironment: [
+                SessionScrollbackReplayStore.environmentKey: "/tmp/cmux-replay"
+            ],
+            initialEnvironmentOverrides: [
+                "CUSTOM_OVERRIDE": "1"
+            ]
+        )
+
+        XCTAssertEqual(merged["PATH"], "/usr/bin")
+        XCTAssertEqual(merged["CUSTOM_FLAG"], "1")
+        XCTAssertEqual(merged["CUSTOM_OVERRIDE"], "1")
+        XCTAssertEqual(merged[SessionScrollbackReplayStore.environmentKey], "/tmp/cmux-replay")
+        XCTAssertNil(merged["CODEX_THREAD_ID"])
+        XCTAssertNil(merged["CODEX_SANDBOX"])
+        XCTAssertNil(merged["CODEX_SANDBOX_NETWORK_DISABLED"])
+        XCTAssertNil(merged["HTTPS_PROXY"])
+        XCTAssertNil(merged["http_proxy"])
     }
 
     func testMergedStartupEnvironmentAllowsSessionReplayAndInitialEnvCMUXKeys() {

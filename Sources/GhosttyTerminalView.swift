@@ -2753,7 +2753,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
         additionalEnvironment: [String: String],
         initialEnvironmentOverrides: [String: String]
     ) -> [String: String] {
-        var merged = base
+        var merged = CodexParentEnvironmentSanitizer.sanitizedTerminalLaunchEnvironment(base)
         for (key, value) in additionalEnvironment where !key.isEmpty && !value.isEmpty && !protectedKeys.contains(key) {
             merged[key] = value
         }
@@ -3189,8 +3189,6 @@ final class TerminalSurface: Identifiable, ObservableObject {
                 }
             }
         }
-        env = CodexParentEnvironmentSanitizer.sanitizedTerminalLaunchEnvironment(env)
-
         var protectedStartupEnvironmentKeys: Set<String> = []
         func setManagedEnvironmentValue(_ key: String, _ value: String) {
             env[key] = value

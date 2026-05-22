@@ -28,7 +28,17 @@ sleep 1
 
 # --- Launch the app directly (not via `open`, which can silently fail on CI) ---
 echo "Launching app..."
-C11_SOCKET_MODE=allowAll CMUX_SOCKET_MODE=allowAll C11_UI_TEST_MODE=1 CMUX_UI_TEST_MODE=1 "$BINARY" > /tmp/c11-smoke-stdout.log 2>&1 &
+C11_SOCKET_MODE=allowAll \
+CMUX_SOCKET_MODE=allowAll \
+C11_UI_TEST_MODE=1 \
+CMUX_UI_TEST_MODE=1 \
+CODEX_THREAD_ID=ci-poison \
+CODEX_SANDBOX=seatbelt \
+CODEX_SANDBOX_NETWORK_DISABLED=1 \
+CODEX_NETWORK_PROXY_ACTIVE=1 \
+HTTPS_PROXY=http://127.0.0.1:9 \
+http_proxy=http://127.0.0.1:9 \
+"$BINARY" > /tmp/c11-smoke-stdout.log 2>&1 &
 APP_PID=$!
 echo "App PID: $APP_PID"
 
@@ -93,6 +103,50 @@ if [ "$PING_RESPONSE" != "PONG" ]; then
   echo "ERROR: Expected PONG, got: $PING_RESPONSE"
   exit 1
 fi
+
+# --- Verify poisoned parent Codex env does not reach the terminal child ---
+echo "Checking terminal launch environment sanitizer..."
+python3 - "$SOCKET_PATH" <<'PY'
+import socket
+import sys
+import time
+
+socket_path = sys.argv[1]
+marker = "C11_ENV_PROBE_DONE"
+
+def request(command: str, timeout: float = 5.0) -> str:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.connect(socket_path)
+        s.settimeout(timeout)
+        s.sendall((command + "\n").encode())
+        return s.recv(65536).decode(errors="replace")
+
+request("send stty -echo\\n")
+time.sleep(0.5)
+probe = (
+    "env | awk -F= '/^(CODEX_|HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|"
+    "ALL_PROXY|NO_PROXY|all_proxy|no_proxy)=/ { print \"C11_ENV_LEAK:\" $1 }'; "
+    f"echo {marker}; stty echo"
+)
+request("send " + probe + "\\n")
+
+deadline = time.time() + 10
+last_screen = ""
+while time.time() < deadline:
+    time.sleep(0.5)
+    last_screen = request("read_screen --scrollback --lines 200")
+    if "C11_ENV_LEAK:" in last_screen:
+        print("ERROR: terminal inherited poisoned Codex/proxy environment", file=sys.stderr)
+        print(last_screen, file=sys.stderr)
+        sys.exit(1)
+    if marker in last_screen:
+        print("Environment probe passed")
+        sys.exit(0)
+
+print("ERROR: environment probe marker did not appear", file=sys.stderr)
+print(last_screen, file=sys.stderr)
+sys.exit(1)
+PY
 
 # --- Send a command to the terminal ---
 echo "Sending 'time' command to terminal..."
