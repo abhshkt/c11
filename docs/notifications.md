@@ -71,7 +71,7 @@ Codex is integrated through c11's PATH-scoped `Resources/bin/codex` wrapper. Ins
 - passes the pane's effective project directory to Codex with `--cd` when needed, and honors an explicit `--cd` / `-C` when the operator supplied one
 - never writes to `~/.codex/config.toml`, project `.codex` files, shell rc files, or other tenant-owned persistent state
 
-Codex lifecycle hooks are discovered from real Codex config layers such as `$CODEX_HOME/config.toml`, `--profile-v2 <name>`, or `<repo>/.codex/config.toml`. The c11 wrapper deliberately does not use `-c hooks.*=...`, because current Codex releases parse those runtime overrides but do not treat them as executable hook sources. Instead, the wrapper creates an overlay Codex home at `~/Library/Application Support/c11/codex-home/<hash>/`, links the operator's real Codex auth/state entries into that overlay for continuity, copies `config.toml` into a c11-owned regular file, writes `c11.config.toml`, exports `CODEX_HOME` only for the launched Codex process, and adds `--profile-v2 c11`. This keeps the hook source and Codex's hook-trust writes in a real Codex config layer while leaving tenant-owned Codex files untouched.
+Codex lifecycle hooks are discovered from real Codex config layers such as `$CODEX_HOME/config.toml`, `--profile-v2 <name>`, or `<repo>/.codex/config.toml`. The c11 wrapper deliberately does not use `-c hooks.*=...`, because current Codex releases parse those runtime overrides but do not treat them as executable hook sources. Instead, the wrapper creates an overlay Codex home at `~/Library/Application Support/c11/codex-home/<hash>/`, copies `config.toml` into the overlay when missing, refreshes the copied `auth.json` regular file, seeds a missing local plugin cache into the overlay, writes `c11.config.toml`, exports `CODEX_HOME` only for the launched Codex process, and adds `--profile-v2 c11`. This keeps the hook source and Codex's hook-trust writes in a real Codex config layer while leaving tenant-owned Codex files untouched.
 
 The generated c11 profile contains these bridge commands:
 
@@ -85,40 +85,16 @@ matcher = "startup|resume|clear"
 type = "command"
 command = "command -v c11 >/dev/null && c11 codex-hook session-start || true"
 
-[[hooks.UserPromptSubmit]]
-
-[[hooks.UserPromptSubmit.hooks]]
-type = "command"
-command = "command -v c11 >/dev/null && c11 codex-hook prompt-submit || true"
-
 [[hooks.PermissionRequest]]
 matcher = "*"
 [[hooks.PermissionRequest.hooks]]
 type = "command"
 command = "command -v c11 >/dev/null && c11 codex-hook permission-request || true"
-
-[[hooks.PreToolUse]]
-matcher = "*"
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "command -v c11 >/dev/null && c11 codex-hook pre-tool-use || true"
-
-[[hooks.PostToolUse]]
-matcher = "*"
-[[hooks.PostToolUse.hooks]]
-type = "command"
-command = "command -v c11 >/dev/null && c11 codex-hook post-tool-use || true"
-
-[[hooks.Stop]]
-
-[[hooks.Stop.hooks]]
-type = "command"
-command = "command -v c11 >/dev/null && c11 codex-hook stop --status-only || true"
 ```
 
-Official Codex docs make the trust boundary explicit: non-managed command hooks require review and trust before they run. c11 does not use `--dangerously-bypass-hook-trust`, because that flag would trust every enabled non-managed hook source for the invocation, not only c11's bridge commands. On first use, Codex may show its hook-review UI; after the operator trusts the c11 commands, `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `PreToolUse`, `PostToolUse`, and `Stop` payloads provide high-confidence lifecycle data. Before hook trust is accepted, completion notifications still flow through the wrapper's injected `notify` path. When a notification arrives without a payload session id, c11 only writes `codex.session_id` if the local Codex state DB yields exactly one fresh session after first preferring the launch cwd and then falling back to the global Codex thread set. The global fallback waits briefly so a same-pane cwd row can appear before c11 accepts a weaker one-candidate global match. Ambiguous candidates intentionally keep the older `codex resume --last` fallback instead of guessing. When a valid `codex.session_id` exists but the project-dir hint is missing or malformed, restore still uses `codex resume <id>`; Codex's explicit UUID argument is the session identity, while the project dir only restores the original cwd before launching.
+Official Codex docs make the trust boundary explicit: non-managed command hooks require review and trust before they run. c11 does not use `--dangerously-bypass-hook-trust`, because that flag would trust every enabled non-managed hook source for the invocation, not only c11's bridge commands. On first use, Codex may show its hook-review UI; after the operator trusts the c11 commands, `SessionStart` provides high-confidence lifecycle metadata and `PermissionRequest` marks the workspace as needing input. c11 deliberately does not install default `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, or `Stop` hooks, because Codex renders hook execution inline in the terminal and those events fire on every normal turn/tool cycle. Before hook trust is accepted, completion notifications still flow through the wrapper's injected `notify` path, and that same notify bridge owns normal completion/idle updates after trust as well. When a notification arrives without a payload session id, c11 only writes `codex.session_id` if the local Codex state DB yields exactly one fresh session after first preferring the launch cwd and then falling back to the global Codex thread set. The global fallback waits briefly so a same-pane cwd row can appear before c11 accepts a weaker one-candidate global match. Ambiguous candidates intentionally keep the older `codex resume --last` fallback instead of guessing. When a valid `codex.session_id` exists but the project-dir hint is missing or malformed, restore still uses `codex resume <id>`; Codex's explicit UUID argument is the session identity, while the project dir only restores the original cwd before launching.
 
-The default `Stop` hook is status-only because the c11 wrapper already injects Codex's `notify` command for completion notifications. Use plain `c11 codex-hook stop` only for a custom Codex launch path that does not also use the wrapper's notification bridge.
+`c11 codex-hook prompt-submit`, `pre-tool-use`, `post-tool-use`, and `stop` remain supported for custom launch paths, but they are opt-in. Use plain `c11 codex-hook stop` only for a custom Codex launch path that does not also use the wrapper's notification bridge.
 
 ### OpenCode Plugin
 
