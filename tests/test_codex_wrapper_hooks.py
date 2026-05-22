@@ -46,9 +46,21 @@ if [[ -n "${CODEX_CI+x}" ]]; then
   echo "CODEX_CI leaked into nested Codex" >&2
   exit 45
 fi
+if [[ -n "${CODEX_SANDBOX+x}" ]]; then
+  echo "CODEX_SANDBOX leaked into nested Codex" >&2
+  exit 81
+fi
 if [[ -n "${CODEX_SANDBOX_NETWORK_DISABLED+x}" ]]; then
   echo "CODEX_SANDBOX_NETWORK_DISABLED leaked into nested Codex" >&2
   exit 46
+fi
+if [[ -n "${CODEX_NETWORK_PROXY_ACTIVE+x}" ]]; then
+  echo "CODEX_NETWORK_PROXY_ACTIVE leaked into nested Codex" >&2
+  exit 82
+fi
+if [[ -n "${CODEX_PROXY_GIT_SSH_COMMAND+x}" ]]; then
+  echo "CODEX_PROXY_GIT_SSH_COMMAND leaked into nested Codex" >&2
+  exit 83
 fi
 """
 
@@ -149,6 +161,18 @@ if [[ "$(cat "$CODEX_HOME/auth.json")" != *"real-auth-token"* ]]; then
   echo "overlay auth.json did not preserve the real auth seed contents" >&2
   exit 60
 fi
+if [[ ! -d "$CODEX_HOME/plugins/cache/openai-bundled/browser" ]]; then
+  echo "expected local plugin cache copy in overlay" >&2
+  exit 84
+fi
+if [[ -L "$CODEX_HOME/plugins" || -L "$CODEX_HOME/plugins/cache" ]]; then
+  echo "overlay plugin cache must be c11-owned, not a symlink" >&2
+  exit 85
+fi
+if [[ "$(cat "$CODEX_HOME/plugins/cache/openai-bundled/browser/plugin.txt")" != *"real plugin cache"* ]]; then
+  echo "overlay plugin cache did not preserve the real plugin cache contents" >&2
+  exit 86
+fi
 for non_seed in state_5.sqlite history.jsonl sessions skills logs_2.sqlite; do
   if [[ -e "$CODEX_HOME/$non_seed" || -L "$CODEX_HOME/$non_seed" ]]; then
     echo "non-allowlisted Codex home entry should not be mirrored into overlay: $non_seed" >&2
@@ -200,8 +224,8 @@ if [[ "$(cat "$CODEX_HOME/auth.json")" != *"real-auth-token"* ]]; then
   echo "overlay auth.json was not refreshed from the real Codex home" >&2
   exit 72
 fi
-if [[ "$(cat "$CODEX_HOME/config.toml")" != *"overlay-local config with trust"* ]]; then
-  echo "overlay config.toml should preserve c11-local trust/config state" >&2
+if [[ "$(cat "$CODEX_HOME/config.toml")" != *"# real Codex config"* ]]; then
+  echo "overlay config.toml was not refreshed from the real Codex home" >&2
   exit 73
 fi
 """
@@ -211,8 +235,8 @@ if [[ -e "$CODEX_HOME/auth.json" || -L "$CODEX_HOME/auth.json" ]]; then
   echo "stale overlay auth.json must be removed when real Codex auth.json is absent" >&2
   exit 75
 fi
-if [[ "$(cat "$CODEX_HOME/config.toml")" != *"overlay-local config with trust"* ]]; then
-  echo "overlay config.toml should preserve c11-local trust/config state" >&2
+if [[ "$(cat "$CODEX_HOME/config.toml")" != *"# real Codex config"* ]]; then
+  echo "overlay config.toml should still refresh from the real Codex home" >&2
   exit 76
 fi
 """
@@ -383,6 +407,9 @@ def run_wrapper(
         (real_codex_home / "sessions" / "tenant-session.jsonl").write_text("tenant session\n", encoding="utf-8")
         (real_codex_home / "skills").mkdir()
         (real_codex_home / "skills" / "tenant-skill.md").write_text("tenant skill\n", encoding="utf-8")
+        plugin_cache = real_codex_home / "plugins" / "cache" / "openai-bundled" / "browser"
+        plugin_cache.mkdir(parents=True)
+        (plugin_cache / "plugin.txt").write_text("real plugin cache\n", encoding="utf-8")
         overlay_dir = tmp / "c11-codex-home-overlays"
         overlay_key = hashlib.md5(str(real_codex_home).encode("utf-8")).hexdigest()
         if overlay_setup == "dir":
@@ -632,7 +659,7 @@ def test_profile_layer_prunes_legacy_mirror_symlinks(failures: list[str]) -> Non
     expect("--profile-v2" in real_argv, f"legacy profile mirror: expected managed c11 profile, got {real_argv}", failures)
 
 
-def test_profile_layer_refreshes_auth_without_replacing_config(failures: list[str]) -> None:
+def test_profile_layer_refreshes_config_and_auth(failures: list[str]) -> None:
     code, real_argv, _, stderr, _, _, _ = run_wrapper(
         socket_state="live",
         argv=["hello"],
@@ -1092,11 +1119,26 @@ def test_parent_codex_session_env_is_sanitized(failures: list[str]) -> None:
             "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex Desktop",
             "CODEX_SHELL": "1",
             "CODEX_CI": "1",
+            "CODEX_SANDBOX": "seatbelt",
             "CODEX_SANDBOX_NETWORK_DISABLED": "1",
+            "CODEX_NETWORK_PROXY_ACTIVE": "1",
+            "CODEX_PROXY_GIT_SSH_COMMAND": "ssh -o ProxyCommand=false",
         },
         real_codex_script=SANITIZING_FAKE_CODEX,
     )
     expect(code == 0, f"parent Codex env sanitize: wrapper exited {code}: {stderr}", failures)
+
+    code, _, _, stderr, _, _, _ = run_wrapper(
+        socket_state="live",
+        argv=["hello"],
+        extra_env={
+            "CODEX_SANDBOX": "seatbelt",
+            "CODEX_SANDBOX_NETWORK_DISABLED": "1",
+            "CODEX_NETWORK_PROXY_ACTIVE": "1",
+        },
+        real_codex_script=SANITIZING_FAKE_CODEX,
+    )
+    expect(code == 0, f"standalone Codex sandbox env sanitize: wrapper exited {code}: {stderr}", failures)
 
 
 def test_parent_codex_session_env_is_sanitized_on_passthrough_paths(failures: list[str]) -> None:
@@ -1105,7 +1147,10 @@ def test_parent_codex_session_env_is_sanitized_on_passthrough_paths(failures: li
         "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex Desktop",
         "CODEX_SHELL": "1",
         "CODEX_CI": "1",
+        "CODEX_SANDBOX": "seatbelt",
         "CODEX_SANDBOX_NETWORK_DISABLED": "1",
+        "CODEX_NETWORK_PROXY_ACTIVE": "1",
+        "CODEX_PROXY_GIT_SSH_COMMAND": "ssh -o ProxyCommand=false",
     }
     cases = [
         ("stale socket", "stale", ["hello"], {}),
@@ -1319,7 +1364,7 @@ def main() -> int:
     test_live_socket_uses_c11_owned_profile_layer(failures)
     test_profile_layer_rejects_symlinked_overlay_paths(failures)
     test_profile_layer_prunes_legacy_mirror_symlinks(failures)
-    test_profile_layer_refreshes_auth_without_replacing_config(failures)
+    test_profile_layer_refreshes_config_and_auth(failures)
     test_profile_layer_removes_stale_auth_when_real_auth_missing(failures)
     test_profile_layer_replaces_hardlinked_seed_files(failures)
     test_profile_layer_ignores_unmanaged_overlay_override(failures)
