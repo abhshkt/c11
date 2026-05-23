@@ -107,12 +107,14 @@ fi
 # --- Verify poisoned parent Codex env does not reach the terminal child ---
 echo "Checking terminal launch environment sanitizer..."
 python3 - "$SOCKET_PATH" <<'PY'
+import json
 import socket
 import sys
 import time
 
 socket_path = sys.argv[1]
 marker = "C11_ENV_PROBE_DONE"
+next_request_id = 1
 
 def request(command: str, timeout: float = 5.0) -> str:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
@@ -121,14 +123,36 @@ def request(command: str, timeout: float = 5.0) -> str:
         s.sendall((command + "\n").encode())
         return s.recv(65536).decode(errors="replace")
 
-request("send stty -echo\\n")
+def request_v2(method: str, params: dict, timeout: float = 5.0) -> dict:
+    global next_request_id
+    request_id = next_request_id
+    next_request_id += 1
+    payload = {
+        "id": request_id,
+        "method": method,
+        "params": params,
+    }
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.connect(socket_path)
+        s.settimeout(timeout)
+        s.sendall((json.dumps(payload, separators=(",", ":")) + "\n").encode())
+        response = s.recv(65536).decode(errors="replace").strip()
+    try:
+        decoded = json.loads(response)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid v2 response for {method}: {response!r}") from exc
+    if decoded.get("id") != request_id or "error" in decoded:
+        raise RuntimeError(f"v2 {method} failed: {decoded!r}")
+    return decoded
+
+request_v2("surface.send_text", {"text": "stty -echo"})
 time.sleep(0.5)
 probe = (
     "env | awk -F= '/^(CODEX_|HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|"
     "ALL_PROXY|NO_PROXY|all_proxy|no_proxy)=/ { print \"C11_ENV_LEAK:\" $1 }'; "
     f"echo {marker}; stty echo"
 )
-request("send " + probe + "\\n")
+request_v2("surface.send_text", {"text": probe})
 
 deadline = time.time() + 10
 last_screen = ""
