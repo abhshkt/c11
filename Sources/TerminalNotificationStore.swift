@@ -868,7 +868,15 @@ final class TerminalNotificationStore: ObservableObject {
         indexes.latestUnreadByTabId[tabId] ?? indexes.latestByTabId[tabId]
     }
 
-    func addNotification(tabId: UUID, surfaceId: UUID?, title: String, subtitle: String, body: String) {
+    @discardableResult
+    func addNotification(
+        tabId: UUID,
+        surfaceId: UUID?,
+        title: String,
+        subtitle: String,
+        body: String,
+        suppressIfFocused: Bool = false
+    ) -> Bool {
         var updated = notifications
         var idsToClear: [String] = []
         updated.removeAll { existing in
@@ -883,6 +891,15 @@ final class TerminalNotificationStore: ObservableObject {
         let isFocusedPanel = isActiveTab && isFocusedSurface
         let isAppFocused = AppFocusState.isAppFocused()
         let shouldSuppressExternalDelivery = isAppFocused && isFocusedPanel
+
+        if suppressIfFocused && shouldSuppressExternalDelivery {
+            if !idsToClear.isEmpty {
+                notifications = updated
+                center.removeDeliveredNotificationsOffMain(withIdentifiers: idsToClear)
+                center.removePendingNotificationRequestsOffMain(withIdentifiers: idsToClear)
+            }
+            return false
+        }
 
         if WorkspaceAutoReorderSettings.isEnabled() {
             AppDelegate.shared?.tabManager?.moveTabToTopForNotification(tabId)
@@ -907,6 +924,7 @@ final class TerminalNotificationStore: ObservableObject {
         if !shouldSuppressExternalDelivery {
             notificationDeliveryHandler(self, notification)
         }
+        return true
     }
 
     func markRead(id: UUID) {

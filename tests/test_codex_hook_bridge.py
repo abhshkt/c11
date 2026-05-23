@@ -943,6 +943,7 @@ def main() -> int:
             ["set-metadata", "--key", "terminal_type", "--value", "codex", "--workspace", workspace_id, "--surface", surface_id],
         )
 
+        run_cli(cli_path, socket_path, ["set-app-focus", "inactive"])
         run_cli(
             cli_path,
             socket_path,
@@ -985,8 +986,60 @@ def main() -> int:
         status = run_cli(cli_path, socket_path, ["list-status", "--workspace", workspace_id])
         expect("codex=Running" in status, f"Expected Running status after PostToolUse, got {status!r}")
 
+        run_cli(cli_path, socket_path, ["set-app-focus", "active"])
+        run_cli(cli_path, socket_path, ["select-workspace", "--workspace", workspace_id])
+        run_cli(cli_path, socket_path, ["focus-panel", "--workspace", workspace_id, "--panel", surface_id])
+        run_cli(cli_path, socket_path, ["clear-notifications", "--workspace", workspace_id])
+        focused_notify_session_id = "75757575-8585-9595-a5a5-b5b5b5b5b5b5"
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "notify"],
+            payload={
+                "hook_event_name": "Stop",
+                "session_id": focused_notify_session_id,
+                "cwd": str(project_dir),
+                "last_assistant_message": "Focused Codex completion",
+            },
+            env=hook_env,
+        )
+        focused_notify_items = list_notifications(cli_path, socket_path, workspace_uuid)
+        expect(
+            all("Focused Codex completion" not in item["body"] for item in focused_notify_items),
+            f"Focused Codex notify hook must not store a visible notification: {focused_notify_items!r}",
+        )
+        focused_notify_status = run_cli(cli_path, socket_path, ["list-status", "--workspace", workspace_id])
+        expect(
+            "codex=Idle" in focused_notify_status,
+            f"Focused Codex notify hook should still mark Codex idle: {focused_notify_status!r}",
+        )
+
         other_workspace_id = parse_ok_id(run_cli(cli_path, socket_path, ["new-workspace"]))
         extra_workspace_ids.append(other_workspace_id)
+        run_cli(cli_path, socket_path, ["select-workspace", "--workspace", other_workspace_id])
+        other_workspace_notify_count = len(list_notifications(cli_path, socket_path, workspace_uuid))
+        run_cli(
+            cli_path,
+            socket_path,
+            ["codex-hook", "notify"],
+            payload={
+                "hook_event_name": "Stop",
+                "session_id": "85858585-9595-a5a5-b5b5-c5c5c5c5c5c5",
+                "cwd": str(project_dir),
+                "last_assistant_message": "Other workspace Codex completion",
+            },
+            env=hook_env,
+        )
+        other_workspace_notify_items = wait_for_notifications(
+            cli_path,
+            socket_path,
+            workspace_uuid,
+            minimum=other_workspace_notify_count + 1,
+        )
+        expect(
+            any(item["title"] == "Codex" and "Other workspace Codex completion" in item["body"] for item in other_workspace_notify_items),
+            f"Codex notify hook should still notify when the target workspace is not selected: {other_workspace_notify_items!r}",
+        )
         run_cli(
             cli_path,
             socket_path,
@@ -1221,6 +1274,10 @@ def main() -> int:
         print(f"FAIL: {exc}")
         return 1
     finally:
+        try:
+            run_cli(cli_path, socket_path, ["set-app-focus", "clear"])
+        except Exception:
+            pass
         for extra_workspace_id in reversed(extra_workspace_ids):
             try:
                 run_cli(cli_path, socket_path, ["close-workspace", "--workspace", extra_workspace_id])
