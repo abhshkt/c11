@@ -40,6 +40,7 @@ enum SkillInstallerTarget: String, CaseIterable {
 struct SkillInstallerPackage: Equatable {
     let name: String
     let version: String
+    let description: String?
     let sourceDir: URL
 }
 
@@ -218,13 +219,21 @@ enum SkillInstaller {
             return SkillInstallerPackage(
                 name: name,
                 version: try readSkillVersion(from: skillMd, fileManager: fileManager) ?? "0",
+                description: try readSkillDescription(from: skillMd, fileManager: fileManager),
                 sourceDir: url.standardizedFileURL
             )
         }
         return packages.sorted { $0.name < $1.name }
     }
 
-    private static func readSkillVersion(from skillFile: URL, fileManager: FileManager) throws -> String? {
+    /// Read a YAML frontmatter scalar value by key from a SKILL.md file while
+    /// validating the whole frontmatter block. Folded/literal scalars are
+    /// accepted but not returned by this single-line scalar reader.
+    private static func readFrontmatterValue(
+        for key: String,
+        from skillFile: URL,
+        fileManager: FileManager
+    ) throws -> String? {
         guard let data = fileManager.contents(atPath: skillFile.path),
               let text = String(data: data, encoding: .utf8) else {
             return nil
@@ -235,7 +244,7 @@ enum SkillInstaller {
         }
         lines.removeFirst()
         var inBlockScalar = false
-        var discoveredVersion: String?
+        var discoveredValue: String?
         for (index, line) in lines.enumerated() {
             let lineNumber = index + 2
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -249,8 +258,8 @@ enum SkillInstaller {
             guard let colon = line.firstIndex(of: ":") else {
                 throw skillMetadataError(skillFile: skillFile, line: lineNumber, reason: "expected a key/value pair")
             }
-            let key = String(line[..<colon]).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !key.isEmpty, key.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
+            let frontmatterKey = String(line[..<colon]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !frontmatterKey.isEmpty, frontmatterKey.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
                 throw skillMetadataError(skillFile: skillFile, line: lineNumber, reason: "invalid key")
             }
             let rawValue = String(line[line.index(after: colon)...])
@@ -266,13 +275,13 @@ enum SkillInstaller {
                     reason: "plain scalar contains ': '; quote it or use a block scalar"
                 )
             }
-            guard key == "version" else { continue }
+            guard frontmatterKey == key else { continue }
             let cleanValue = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
             if !cleanValue.isEmpty {
-                discoveredVersion = cleanValue
+                discoveredValue = cleanValue
             }
         }
-        return discoveredVersion
+        return discoveredValue
     }
 
     private static func isQuotedYAMLScalar(_ value: String) -> Bool {
@@ -299,6 +308,14 @@ enum SkillInstaller {
             message: "\(skillFile.path) has malformed skill front matter at line \(line): \(reason).",
             path: skillFile.path
         )
+    }
+
+    private static func readSkillVersion(from skillFile: URL, fileManager: FileManager) throws -> String? {
+        try readFrontmatterValue(for: "version", from: skillFile, fileManager: fileManager)
+    }
+
+    private static func readSkillDescription(from skillFile: URL, fileManager: FileManager) throws -> String? {
+        try readFrontmatterValue(for: "description", from: skillFile, fileManager: fileManager)
     }
 
     /// Returns the `installable` allowlist from `MANIFEST.json`, or nil if the

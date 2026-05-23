@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "name": "six-terminal",
-  "description": "Six terminals in a 3x2 grid",
+  "name": "two-by-three",
+  "description": "Six terminals in 2 columns, 3 rows",
   "plan": {
     "version": 1,
     "workspace": {},
@@ -9,41 +9,41 @@
       "type": "split",
       "split": {
         "orientation": "vertical",
-        "dividerPosition": 0.5,
+        "dividerPosition": 0.3333333333333333,
         "first": {
           "type": "split",
           "split": {
             "orientation": "horizontal",
-            "dividerPosition": 0.3333333333333333,
+            "dividerPosition": 0.5,
             "first": {
               "type": "pane",
               "pane": { "surfaceIds": ["s1"] }
             },
             "second": {
-              "type": "split",
-              "split": {
-                "orientation": "horizontal",
-                "dividerPosition": 0.5,
-                "first": {
-                  "type": "pane",
-                  "pane": { "surfaceIds": ["s2"] }
-                },
-                "second": {
-                  "type": "pane",
-                  "pane": { "surfaceIds": ["s3"] }
-                }
-              }
+              "type": "pane",
+              "pane": { "surfaceIds": ["s2"] }
             }
           }
         },
         "second": {
           "type": "split",
           "split": {
-            "orientation": "horizontal",
-            "dividerPosition": 0.3333333333333333,
+            "orientation": "vertical",
+            "dividerPosition": 0.5,
             "first": {
-              "type": "pane",
-              "pane": { "surfaceIds": ["s4"] }
+              "type": "split",
+              "split": {
+                "orientation": "horizontal",
+                "dividerPosition": 0.5,
+                "first": {
+                  "type": "pane",
+                  "pane": { "surfaceIds": ["s3"] }
+                },
+                "second": {
+                  "type": "pane",
+                  "pane": { "surfaceIds": ["s4"] }
+                }
+              }
             },
             "second": {
               "type": "split",
