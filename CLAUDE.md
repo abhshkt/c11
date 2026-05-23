@@ -81,7 +81,7 @@ When in doubt: c11's job stops at the edge of its surfaces, save for the narrow 
 
 ## Default workflow for Lattice tickets: lattice-orchestrator
 
-When the operator hands you a Lattice ticket to execute (or asks to "run", "delegate", "walk through" a ticket), the default is the **Lattice Orchestrator Workflow** at `/Users/atin/Projects/Stage11/.claude/skills/lattice-orchestrator/SKILL.md`. Do not attack the ticket inline from the orchestrator pane.
+When the operator hands you a Lattice ticket to execute (or asks to "run", "delegate", "walk through" a ticket), the default is the **Lattice Orchestrator Workflow**, shipped in this repo at `skills/lattice-orchestrator/SKILL.md` and exposed as an installable skill via c11's `skills/MANIFEST.json`. Do not attack the ticket inline from the orchestrator pane.
 
 Why this is the default here:
 - c11 tickets routinely involve typing-latency hot paths, tagged builds, localization passes, and submodule discipline. One worktree per delegator carves blast-radius cleanly so build artifacts and submodule state cannot bleed across parallel work.

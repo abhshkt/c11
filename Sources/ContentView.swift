@@ -10089,6 +10089,7 @@ private enum SidebarHelpMenuAction {
     case checkForUpdates
     case sendFeedback
     case welcome
+    case reEnableSkillPrompts
 }
 
 private struct SidebarFeedbackComposerSheet: View {
@@ -10685,6 +10686,18 @@ private struct SidebarHelpMenuButton: View {
                 accessibilityIdentifier: "SidebarHelpMenuOptionCheckForUpdates",
                 isExternalLink: false
             )
+            // Visible only when the operator has either explicitly opted
+            // out of the agent-skills sheet ("Don't ask again") or has
+            // dismissed individual (target, skill) rows. No clutter for
+            // operators who have never silenced anything.
+            if AgentSkillsOnboarding.hasSilencedState() {
+                helpOptionButton(
+                    title: String(localized: "sidebar.help.reEnableSkillPrompts", defaultValue: "Re-enable agent skills install prompts"),
+                    action: .reEnableSkillPrompts,
+                    accessibilityIdentifier: "SidebarHelpMenuOptionReEnableSkillPrompts",
+                    isExternalLink: false
+                )
+            }
         }
         .padding(8)
         .frame(minWidth: 200)
@@ -10784,6 +10797,16 @@ private struct SidebarHelpMenuButton: View {
                 if let appDelegate = AppDelegate.shared {
                     appDelegate.openWelcomeWorkspace()
                 }
+            }
+        case .reEnableSkillPrompts:
+            isPopoverPresented = false
+            AgentSkillsOnboarding.clearAllSilencing()
+            Task { @MainActor in
+                // Unconditional present (not the IfNeeded variant): when
+                // everything is current, the celebratory branch renders
+                // confirmation instead of leaving the operator with a
+                // silent no-op.
+                AppDelegate.shared?.presentAgentSkillsOnboarding(onCompletion: nil)
             }
         }
     }
