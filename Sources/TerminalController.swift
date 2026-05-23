@@ -9595,6 +9595,7 @@ class TerminalController {
         let title = (params["title"] as? String) ?? "Notification"
         let subtitle = (params["subtitle"] as? String) ?? ""
         let body = (params["body"] as? String) ?? ""
+        let suppressIfFocused = v2Bool(params, "suppress_if_focused") ?? false
 
         var result: V2CallResult = .err(code: "internal_error", message: "Failed to notify", data: nil)
         v2MainSync {
@@ -9606,14 +9607,15 @@ class TerminalController {
                 result = .err(code: "not_found", message: "Surface not found", data: ["surface_id": surfaceId.uuidString])
                 return
             }
-            TerminalNotificationStore.shared.addNotification(
+            let created = TerminalNotificationStore.shared.addNotification(
                 tabId: ws.id,
                 surfaceId: surfaceId,
                 title: title,
                 subtitle: subtitle,
-                body: body
+                body: body,
+                suppressIfFocused: suppressIfFocused
             )
-            result = .ok(["workspace_id": ws.id.uuidString, "workspace_ref": v2Ref(kind: .workspace, uuid: ws.id), "surface_id": surfaceId.uuidString, "surface_ref": v2Ref(kind: .surface, uuid: surfaceId), "window_id": v2OrNull(v2ResolveWindowId(tabManager: tabManager)?.uuidString), "window_ref": v2Ref(kind: .window, uuid: v2ResolveWindowId(tabManager: tabManager))])
+            result = .ok(["workspace_id": ws.id.uuidString, "workspace_ref": v2Ref(kind: .workspace, uuid: ws.id), "surface_id": surfaceId.uuidString, "surface_ref": v2Ref(kind: .surface, uuid: surfaceId), "window_id": v2OrNull(v2ResolveWindowId(tabManager: tabManager)?.uuidString), "window_ref": v2Ref(kind: .window, uuid: v2ResolveWindowId(tabManager: tabManager)), "created": created])
         }
         return result
     }

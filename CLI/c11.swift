@@ -14617,12 +14617,13 @@ struct CMUXCLI {
             )
             if !statusOnly {
                 let completion = summarizeCodexHookStop(parsedInput: parsedInput)
-                let payload = [
-                    "Codex",
-                    sanitizeNotificationField(completion.subtitle),
-                    sanitizeNotificationField(completion.body)
-                ].joined(separator: "|")
-                _ = try? sendV1Command("notify_target \(workspaceId) \(surfaceId) \(payload)", client: client)
+                try? sendCodexHookNotification(
+                    client: client,
+                    workspaceId: workspaceId,
+                    surfaceId: surfaceId,
+                    subtitle: sanitizeNotificationField(completion.subtitle),
+                    body: sanitizeNotificationField(completion.body)
+                )
             }
             _ = try? setCodexStatus(
                 client: client,
@@ -14655,12 +14656,13 @@ struct CMUXCLI {
                 parsedInput: parsedInput,
                 cwdFallback: cwdFallback
             )
-            let payload = [
-                "Codex",
-                sanitizeNotificationField(completion.subtitle),
-                sanitizeNotificationField(completion.body)
-            ].joined(separator: "|")
-            _ = try? sendV1Command("notify_target \(workspaceId) \(surfaceId) \(payload)", client: client)
+            try? sendCodexHookNotification(
+                client: client,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                subtitle: sanitizeNotificationField(completion.subtitle),
+                body: sanitizeNotificationField(completion.body)
+            )
             _ = try? setCodexStatus(
                 client: client,
                 workspaceId: workspaceId,
@@ -14692,12 +14694,13 @@ struct CMUXCLI {
                 telemetry: telemetry
             ) else { return }
             let body = describeCodexPermissionRequest(parsedInput.object)
-            let payload = [
-                "Codex",
-                "Permission",
-                sanitizeNotificationField(body)
-            ].joined(separator: "|")
-            _ = try? sendV1Command("notify_target \(workspaceId) \(surfaceId) \(payload)", client: client)
+            try? sendCodexHookNotification(
+                client: client,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                subtitle: "Permission",
+                body: sanitizeNotificationField(body)
+            )
             _ = try? setCodexStatus(
                 client: client,
                 workspaceId: workspaceId,
@@ -14740,6 +14743,26 @@ struct CMUXCLI {
         default:
             throw CLIError(message: "Unknown codex-hook subcommand: \(subcommand)")
         }
+    }
+
+    private func sendCodexHookNotification(
+        client: SocketClient,
+        workspaceId: String,
+        surfaceId: String,
+        subtitle: String,
+        body: String
+    ) throws {
+        _ = try client.sendV2(
+            method: "notification.create_for_target",
+            params: [
+                "workspace_id": workspaceId,
+                "surface_id": surfaceId,
+                "title": "Codex",
+                "subtitle": subtitle,
+                "body": body,
+                "suppress_if_focused": true
+            ]
+        )
     }
 
     private struct CodexLifecycleArgInputs {
