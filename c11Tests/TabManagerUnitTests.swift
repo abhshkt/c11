@@ -235,6 +235,7 @@ final class TabManagerCloseWorkspacesWithConfirmationTests: XCTestCase {
         let manager = TabManager()
         let foreground = manager.tabs[0]
         _ = manager.addWorkspace()
+        manager.selectWorkspace(foreground)
         XCTAssertEqual(manager.selectedTabId, foreground.id)
 
         var promptCount = 0
