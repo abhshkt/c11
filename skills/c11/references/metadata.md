@@ -38,7 +38,7 @@ These keys have a defined shape and render in the sidebar or title bar. Any writ
 
 **Sidebar rendering order** when present: `model` → `terminal_type` → `role` → `status` → `task` → `progress` → `worktree` + `branch` chips row. `title` and `description` render in the title bar, not the sidebar — the sidebar tab label is a truncated projection of `title`.
 
-**Worktree + branch chips (C11-104).** Both keys are projections of `cwd` + gitfs state — agents should not write them directly. They are computed off-main by `GitContextDeriver` on cwd updates (the `report_pwd` socket path) and rendered automatically. Inside a submodule, both the superproject context and the submodule context render as two stacked rows. Settings → Sidebar → "Show worktree + branch chips in sidebar" (preserved `sidebarShowBranchDirectory` AppStorage key — the legacy text branch+directory row was retired in C11-104 v2) gates the entire row (default on, live-toggleable). The branch chip carries a `*` suffix when the working tree is dirty.
+**Worktree + branch chips.** Both keys are projections of `cwd` + gitfs state — agents should not write them directly. They are computed off-main by `GitContextDeriver` on cwd updates (the `report_pwd` socket path) and rendered automatically. Inside a submodule, both the superproject context and the submodule context render as two stacked rows. Settings → Sidebar → "Show worktree + branch chips in sidebar" gates the entire row (default on, live-toggleable). The branch chip carries a `*` suffix when the working tree is dirty.
 
 ### `MetadataDeriver` seam
 
@@ -100,7 +100,7 @@ c11 clear-metadata --key task
 c11 clear-metadata                   # clear everything (requires explicit source)
 ```
 
-### Agent-declaration sugar (M1)
+### Agent-declaration sugar
 
 `c11 set-agent` is a wrapper over `set-metadata` with `source: declare`:
 
@@ -111,7 +111,7 @@ c11 set-agent --type codex --task lat-412 --role reviewer
 
 Writes `terminal_type`, and optionally `model`, `task`, `role` with `source: declare`. Declaration overrides heuristic auto-detection but not user-explicit writes. Clear with `c11 clear-metadata --key terminal_type`.
 
-### Title & description sugar (M7)
+### Title & description sugar
 
 ```bash
 c11 set-title "My Surface Title"
@@ -206,9 +206,9 @@ Every canonical key's value carries a parallel `metadata_sources[key]` record de
 
 | Value | Writer | Notes |
 |-------|--------|-------|
-| `heuristic` | c11 internal process-tree scan (M1) | Best-effort auto-detection. Never overwrites higher-precedence values. |
-| `derived` | c11 internal projections of ground-truth state (M-C11-104) | System-computed from cwd, gitfs, or other ambient state. Agents do not write `derived` keys directly; they're recomputed on state change. Ranks above `heuristic`, below `osc`. |
-| `osc` | Terminal emulator OSC 0/1/2 sequence (M7) | Writes `title` only. Newer OSC writes overwrite older `osc` writes. |
+| `heuristic` | c11 internal process-tree scan | Best-effort auto-detection. Never overwrites higher-precedence values. |
+| `derived` | c11 internal projections of ground-truth state | System-computed from cwd, gitfs, or other ambient state. Agents do not write `derived` keys directly; they're recomputed on state change. Ranks above `heuristic`, below `osc`. |
+| `osc` | Terminal emulator OSC 0/1/2 sequence | Writes `title` only. Newer OSC writes overwrite older `osc` writes. |
 | `declare` | Agent declaration (`c11 set-agent`, env vars) | Explicit agent self-identification. |
 | `explicit` | User CLI (`c11 set-metadata`, `c11 set-title`, inline edit) | Highest precedence; user intent wins. |
 
@@ -221,7 +221,7 @@ explicit > declare > osc > derived > heuristic
 - **`explicit` always wins.** `c11 set-metadata` overwrites any prior value.
 - **`declare` overwrites `osc`, `derived`, and `heuristic`**, not `explicit`.
 - **`osc` overwrites `derived` and `heuristic`** and older `osc`, not `declare` or `explicit`.
-- **`derived` overwrites `heuristic`**, not `osc`/`declare`/`explicit`. Used for worktree/branch chips (C11-104).
+- **`derived` overwrites `heuristic`**, not `osc`/`declare`/`explicit`. Used for worktree/branch chips.
 - **`heuristic` only writes when the key is unset or current source is `heuristic`.**
 
 A write that fails the precedence check returns `ok: true` with `result.applied[key]: false` and `result.reasons[key]: "lower_precedence"`. The current value is left untouched.

@@ -7657,6 +7657,13 @@ struct CMUXCLI {
     }
 
     private func resolveWorkspaceId(_ raw: String?, client: SocketClient) throws -> String {
+        // An explicit empty value almost always means an unset env var leaked
+        // into `--workspace ""`. Refuse to fall back to the focused workspace —
+        // that silent fallback has landed agent work on the wrong tab. Pass a
+        // real ref or omit the flag.
+        if let raw, raw.isEmpty {
+            throw CLIError(message: "--workspace received an empty value (likely from an unset shell variable). Pass a real ref or omit the flag.")
+        }
         if let raw, isUUID(raw) {
             return raw
         }
@@ -7690,6 +7697,12 @@ struct CMUXCLI {
     }
 
     private func resolveSurfaceId(_ raw: String?, workspaceId: String, client: SocketClient) throws -> String {
+        // See resolveWorkspaceId — same hazard. Empty string is a programming
+        // error, not a request for "focused surface". Fall through to focused
+        // is reserved for the nil case where no flag was passed at all.
+        if let raw, raw.isEmpty {
+            throw CLIError(message: "--surface received an empty value (likely from an unset shell variable, e.g. $C11_SURFACE_ID). Pass a real ref or omit the flag.")
+        }
         if let raw, isUUID(raw) {
             return raw
         }
