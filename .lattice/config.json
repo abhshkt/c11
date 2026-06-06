@@ -1,7 +1,7 @@
 {
   "dashboard": {
-    "column_width": 170,
-    "font_size": 6
+    "column_width": 260,
+    "font_size": 8
   },
   "default_actor": "human:atin",
   "default_priority": "medium",
@@ -11,10 +11,11 @@
   "plan_approval": "auto",
   "plan_review_mode": "triple",
   "project_code": "C11",
-  "project_name": "cmux",
+  "project_name": "c11",
   "review_mode": "inline",
   "review_timeout_seconds": 600,
   "schema_version": 1,
+  "status_preset": "stage11",
   "task_types": [
     "task",
     "bug",
@@ -27,23 +28,30 @@
         "require_roles": [
           "review"
         ]
+      },
+      "pr_open": {
+        "require_roles": [
+          "validation"
+        ]
       }
     },
     "descriptions": {
       "backlog": "Task is captured but no work has started. No planning, no implementation.",
       "blocked": "Work cannot proceed due to an external dependency or unresolved issue.",
       "cancelled": "Work has been abandoned. No further action will be taken.",
-      "done": "Work is reviewed and shipped. No further action needed.",
+      "done": "Work is reviewed, merged, and shipped. No further action needed.",
       "in_planning": "Design, dialogue, and scoping underway. No implementation code should be written yet.",
       "in_progress": "Implementation is actively underway. Code is being written, tested, or integrated.",
-      "needs_human": "A human decision, approval, or input is required before work can continue.",
+      "in_validation": "End-to-end validation is underway. The change is being exercised against a running system \u2014 browser automation, simulator flows, curl \u2014 before the PR opens. The bar: 'I saw it work,' not 'I think it should work.'",
       "planned": "Plan is written and approved. Ready for implementation but work has not started.",
-      "review": "Implementation is complete. Work is being reviewed before it can ship."
+      "pr_open": "PR is open and awaiting human review, CI, or merge. Local review and validation artifacts are recorded.",
+      "review": "Local review is underway. A review sub-agent is examining the diff before validation begins."
     },
     "roles": [
       "review",
       "plan-review",
-      "review-individual"
+      "review-individual",
+      "validation"
     ],
     "statuses": [
       "backlog",
@@ -51,9 +59,10 @@
       "planned",
       "in_progress",
       "review",
+      "in_validation",
+      "pr_open",
       "done",
       "blocked",
-      "needs_human",
       "cancelled"
     ],
     "transitions": {
@@ -66,49 +75,57 @@
         "in_planning",
         "planned",
         "in_progress",
+        "in_validation",
+        "pr_open",
         "cancelled"
       ],
       "cancelled": [],
       "done": [],
       "in_planning": [
         "planned",
-        "needs_human",
         "cancelled"
       ],
       "in_progress": [
         "review",
         "blocked",
-        "needs_human",
         "cancelled"
       ],
-      "needs_human": [
-        "in_planning",
-        "planned",
+      "in_validation": [
+        "pr_open",
         "in_progress",
-        "review",
+        "in_planning",
+        "blocked",
         "cancelled"
       ],
       "planned": [
         "in_progress",
         "review",
         "blocked",
-        "needs_human",
+        "cancelled"
+      ],
+      "pr_open": [
+        "done",
+        "in_progress",
+        "review",
+        "blocked",
         "cancelled"
       ],
       "review": [
+        "in_validation",
+        "pr_open",
         "done",
         "in_progress",
         "in_planning",
-        "needs_human",
         "cancelled"
       ]
     },
     "universal_targets": [
-      "needs_human",
       "cancelled"
     ],
     "wip_limits": {
       "in_progress": 10,
+      "in_validation": 5,
+      "pr_open": 10,
       "review": 5
     }
   },

@@ -10,14 +10,14 @@
   "done_at": null,
   "evidence_refs": [],
   "id": "task_01KPHK5GG9P33X0KRETTKZNW0W",
-  "last_event_id": "ev_01KPHK5GGBM25YTMSK35P4JJWP",
+  "last_event_id": "ev_01KT9WSYQRYFM828EHVAZV4H7D",
   "last_status_changed_at": "2026-04-19T00:45:05Z",
   "linked_files": [],
   "priority": "medium",
   "relationships_out": [],
   "reopened_count": 0,
   "schema_version": 1,
-  "short_id": "CMUX-18",
+  "short_id": "C11-127",
   "status": "backlog",
   "tags": [
     "markdown",
@@ -26,6 +26,6 @@
   ],
   "title": "Markdown surface: user-configurable light/dark theme",
   "type": "task",
-  "updated_at": "2026-04-19T00:45:05Z",
+  "updated_at": "2026-06-04T18:02:24Z",
   "urgency": null
 }

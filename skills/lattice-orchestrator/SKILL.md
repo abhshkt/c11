@@ -14,13 +14,13 @@ Each ticket in a wave gets a workflow mode picked in Phase 2 and recorded in `ru
 
 ### 1. Fast-track — single session, inline self-review
 
-One delegator session runs the whole arc `backlog → planned → in_progress → review → pr_open → done`. No sub-agents spawned. No `lattice plan-review` / `lattice code-review` CLI invocations. The same session wears planner / implementer / reviewer hats with distinct actor IDs in the event log (`agent:<id>-planner`, `-impl`, `-reviewer`) so the audit trail shows who did what. Code-review is attached inline against the diff:
+One delegator session runs the whole arc `backlog → planned → in_progress → review → in_validation → pr_open → done`. No sub-agents spawned. No `lattice plan-review` / `lattice code-review` CLI invocations. The same session wears planner / implementer / reviewer hats with distinct actor IDs in the event log (`agent:<id>-planner`, `-impl`, `-reviewer`) so the audit trail shows who did what. Code-review is attached inline against the diff:
 
 ```
 lattice attach <task> --type note --role review --inline "<review markdown>" --actor agent:<id>-reviewer
 ```
 
-The `--role review` artifact satisfies the default `done` completion policy. `lattice code-review --mode inline` is a guidance-printer — use `lattice attach` directly.
+The `--role review` artifact satisfies the default `done` completion policy. `lattice code-review --mode inline` is a guidance-printer — use `lattice attach` directly. Likewise, entering `pr_open` requires a `--role validation` artifact: after self-review, exercise the change end-to-end (browser, simulator, curl — whatever fits) and attach the evidence, or a one-line N/A justification, before bumping to `pr_open`. The `lattice` skill owns the full validation-gate discipline.
 
 **Use for:** clear root cause; single file or a tight cluster of closely-related files; bug fixes, CLI flag additions, doc updates, single-function refactors, config tweaks, test additions — anywhere the implementer can plausibly catch their own bugs because the surface is small enough to hold in one head.
 
@@ -223,7 +223,8 @@ Then the dispatch loop:
 
 - Orchestrator reads the ticket list from `run-state.md` and the dependency graph in Lattice.
 - Spawns up to **N delegators** in parallel (N = configured cap, default 5).
-- Each delegator runs in its own git worktree, in its own pane, driving plan → impl → review → fix → open PR (with `pr_open` as its terminal Lattice status — the new workflow puts `pr_open` between `review` and `done`).
+- Each delegator runs in its own git worktree, in its own pane, driving plan → impl → review → validate → fix → open PR (with `pr_open` as its terminal Lattice status — the stage11 workflow runs `review → in_validation → pr_open → done`, and `pr_open` is gated on a `--role validation` artifact).
+- At boot, each delegator binds its ticket to its surface with `lattice claim <TICKET-ID> --surface "$MY_SURF"` — the ticket snapshot then carries `c11_surface`, so the Orchestrator, Master Validator, and board can answer "which pane is this ticket running in?" mechanically. See `references/orchestrator.md` HARD RULE 0.
 - Orchestrator runs a `/loop` (Claude's native recurring-task primitive) — 4-min tick while delegators are in flight, longer when quiescent. Each tick surfaces `needs_human` / `blocked` tickets, advances dependency-unblocked work, reports state. **Never use shell `watch` / `sleep` / `lattice watch --exec` as the cadence engine.** See `references/orchestrator.md` `## Cadence`.
 - **Press-ahead discipline** — the moment a ticket hits `review` (local code-review running) or `pr_open` (PR up), downstream tickets whose work can be designed against the in-flight feature branch become claimable. Branch dependent worktrees off the parent's feature branch, NOT main — see `references/orchestrator.md` `### Branch off the in-review parent`.
 - Run completes when every ticket is in `pr_open` or `done`.
@@ -291,7 +292,7 @@ The 99.9% rule: if you're tempted to ask, you almost certainly shouldn't. Find t
 
 - **Architect** — Phases 1–2. Produces SPEC.md, project CLAUDE.md, BUILDPLAN.md, run-state.md, Lattice tickets, and the validation plan. Hands off to Orchestrator at the Phase 2→3 boundary, then steps aside.
 - **Orchestrator** — singleton during Phase 3. Human↔LLM channel. Dispatches delegators, never implements.
-- **Delegator** — one per Lattice ticket. Drives plan → impl → review → fix → PR in its own worktree + pane. Terminal state: open PR.
+- **Delegator** — one per Lattice ticket. Drives plan → impl → review → validate → fix → PR in its own worktree + pane. Terminal state: open PR.
 - **Captain** — one-shot recovery agent for cross-cutting batch work (e.g., Merge Captain rebases a stack). Naming: `<Scope> Captain`.
 - **Master Validator** — singleton during Phase 3. Continuously audits global build/test/PR state in-flight, reports up to the Orchestrator. Lives in the Main View Area (full-height left column) alongside the Orchestrator, both as singleton tabs the operator can glance at any time.
 - **Result Validator** — Phase 4. Fresh agent, terminal audit executing the Phase-2 validation plan. Produces the Validation Report. One-shot.
@@ -327,7 +328,7 @@ Three named regions. Each region is a c11 pane (titled via `c11 set-metadata --p
       Delegators 1..N<br/>
       (default N=5, set in Phase 2)<br/>
       each in own worktree + pane,<br/>
-      plan → impl → review → fix → PR
+      plan → impl → review → validate → fix → PR
     </td>
   </tr>
 </table>

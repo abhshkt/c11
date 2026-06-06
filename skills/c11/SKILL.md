@@ -184,11 +184,13 @@ c11 new-pane --cwd <path>                      # New terminal pane that starts i
 c11 new-surface --pane <pane-ref>              # Add a tab to an existing pane
 c11 new-surface --no-focus                     # Create without stealing focus (safe for background agents)
 c11 new-workspace                              # Create a new workspace
+c11 new-workspace --title "Auth refactor"      # Create with an inline title (no follow-up rename)
 c11 new-workspace --layout <path|name>         # Create a workspace from a blueprint plan
 ```
 
 - **`new-split` clarified.** Source can be a pane of any surface type — terminal, browser, or markdown. Only the *new* pane is constrained to terminal. Use `new-pane` when the new pane should be a browser or markdown viewer.
 - **`--no-focus` on `new-surface`.** Pass `--no-focus` to create a terminal, browser, or markdown surface without the workspace switching focus to it. Useful when an agent is building out a layout in the background.
+- **`--title` on `new-workspace`.** Set the workspace title at creation in one call instead of creating then issuing a follow-up rename. It writes the same `customTitle` field a rename sets, so the title is durable (survives snapshot/restore) and wins over the auto/process title. The success envelope echoes `title`. An explicit `--title` also wins over a blueprint's title when combined with `--layout`.
 - **`--layout` on `new-workspace`.** Pass a blueprint file path or blueprint name to create a workspace pre-populated with the plan's pane/surface topology. Response includes `workspace_id`, `workspace_ref`, `window_id`, and `window_ref` (same envelope as a plain `new-workspace`), plus a `layout_result` field with apply details.
 - **`--cwd` sets the new shell's directory.** Both `new-split` and `new-pane` accept `--cwd <path>` to start the spawned terminal in a given directory instead of inheriting the parent's. The path is resolved against your cwd (so `--cwd .` works) and validated server-side — a bad path errors instead of silently landing in `$HOME`. Omitting it (or `--cwd inherit`) keeps the inherit-from-parent default. Use this instead of prefixing the launch command with `cd /path && …` when spawning a sub-agent in a specific repo.
 - **Direction is relative to the focused pane.** `new-pane` has no `--pane` flag; it operates on the currently focused pane. Call `c11 focus-pane --pane <ref> --workspace <ref>` first if you need to target a different one.

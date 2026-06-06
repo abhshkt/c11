@@ -43,3 +43,5 @@ Historical data inside `c11/.lattice/` (artifacts payloads, old event jsonls, ol
 
 Source: workspace `C11 improvements`, surface:113, claude-opus-4-7 planning session 2026-05-17.
 Parent: C11-1 (c11mux → c11 rebrand pass — c11 repo slice, already partly landed in commit `7e0e0b282`).
+
+## Reset 2026-06-03 by agent:claude

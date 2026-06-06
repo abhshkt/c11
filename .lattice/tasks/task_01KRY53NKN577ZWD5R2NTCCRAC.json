@@ -1,5 +1,5 @@
 {
-  "assigned_to": null,
+  "assigned_to": "agent:claude",
   "branch_links": [],
   "comment_count": 0,
   "complexity": "medium",
@@ -10,8 +10,8 @@
   "done_at": null,
   "evidence_refs": [],
   "id": "task_01KRY53NKN577ZWD5R2NTCCRAC",
-  "last_event_id": "ev_01KRY555E3NV832D4E7MPK7DP9",
-  "last_status_changed_at": "2026-05-18T18:20:56Z",
+  "last_event_id": "ev_01KT9WX9NV201SPCGE8RET9F4R",
+  "last_status_changed_at": "2026-06-03T19:41:50Z",
   "linked_files": [],
   "priority": "medium",
   "relationships_out": [
@@ -23,13 +23,13 @@
       "type": "related_to"
     }
   ],
-  "reopened_count": 0,
+  "reopened_count": 1,
   "schema_version": 1,
   "short_id": "C11-28",
   "status": "backlog",
   "tags": null,
-  "title": "Strip cmux/c11mux from Lattice repo + fix c11 dashboard project_name",
+  "title": "Lattice repo: finish the c11 rename (modules, identifiers, env vars)",
   "type": "chore",
-  "updated_at": "2026-05-18T18:21:45Z",
+  "updated_at": "2026-06-04T18:04:14Z",
   "urgency": null
 }

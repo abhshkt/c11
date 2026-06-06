@@ -32,6 +32,14 @@ c11 set-metadata    --surface "$MY_SURF" --key task --value "<ticket-or-scope>" 
 
 The preamble runs before any other c11 write. If the resolution fails (empty `$MY_SURF`), the boot aborts with exit 99 rather than risk stomping the focused surface.
 
+**Ticket-bound roles (delegators, captains working a specific ticket) additionally bind the ticket to their surface** as part of the same preamble:
+
+```bash
+(cd "$REPO_ROOT" && lattice claim <TICKET-ID> --surface "$MY_SURF" --actor agent:<id>)
+```
+
+Run `claim` BEFORE `rename-tab`/`set-title` — claim auto-renames the tab to the ticket's short code + title, and the explicit role-title lines then override it. Always pass `--surface "$MY_SURF"` explicitly (claim's env-var default has the same empty-`$C11_SURFACE_ID` failure mode this HARD RULE exists to prevent). The binding lands on the ticket snapshot as `c11_surface`/`c11_workspace`, so the Orchestrator, Master Validator, and the board can answer "which pane is this ticket running in?" mechanically. Treat it as a liveness hint, not truth — surface IDs don't survive c11 restarts. `lattice unclaim <TICKET-ID>` releases the binding if the pane is being dissolved before the ticket reaches a terminal state.
+
 Apply this rule to: orchestrator boot, master validator boot, delegator boot, every sub-agent boot, captain boot. Anywhere a fresh c11 surface starts a fresh shell and needs to set its own identity.
 
 ### Protected operator surfaces
@@ -377,6 +385,7 @@ export LATTICE_ROOT=<absolute-repo-root>
 MY_SURF=\$(c11 identify --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["caller"]["surface_ref"])')
 test -n "\$MY_SURF" || { echo "FATAL: could not resolve own surface ref"; exit 99; }
 c11 set-agent       --surface "\$MY_SURF" --type claude-code --model claude-opus-4-7
+(cd \$REPO_ROOT && lattice claim <TICKET-ID> --surface "\$MY_SURF" --actor agent:<id>)   # bind ticket↔surface; BEFORE rename-tab (claim auto-renames, role-title below wins)
 c11 rename-tab      --surface "\$MY_SURF" "<TICKET-ID> Delegator"
 c11 set-title       --surface "\$MY_SURF" "<TICKET-ID> Delegator"
 c11 set-description --surface "\$MY_SURF" "Fast-track delegator for <TICKET-ID>. <one-line scope>."
@@ -385,7 +394,8 @@ c11 set-description --surface "\$MY_SURF" "Fast-track delegator for <TICKET-ID>.
 1. Plan:  lattice status <TICKET-ID> in_planning --actor agent:<id>-planner ; write plan to \$REPO_ROOT/.lattice/plans/<task_uuid>.md ; lattice status <TICKET-ID> planned --actor agent:<id>-planner
 2. Impl:  lattice status <TICKET-ID> in_progress --actor agent:<id>-impl ; git fetch && (rebase if needed); edits + tests; commit
 3. Self-review:  lattice status <TICKET-ID> review --actor agent:<id>-reviewer ; lattice attach <TICKET-ID> --type note --role review --inline "<markdown verdict>" --actor agent:<id>-reviewer
-4. PR: git push -u origin <branch> ; create PR via Forgejo REST or gh ; lattice attach <TICKET-ID> <pr_url> --type reference --title "PR #N" --actor agent:<id>-impl ; lattice status <TICKET-ID> pr_open --actor agent:<id>-impl
+4. Validate: lattice status <TICKET-ID> in_validation --actor agent:<id>-impl ; exercise the change e2e (browser / simulator / curl — whatever fits the ticket) ; lattice attach <TICKET-ID> --type note --role validation --inline "<evidence, or one-line N/A justification>" --actor agent:<id>-impl   # pr_open is gated on this artifact
+5. PR: git push -u origin <branch> ; create PR via Forgejo REST or gh ; lattice attach <TICKET-ID> <pr_url> --type reference --title "PR #N" --actor agent:<id>-impl ; lattice status <TICKET-ID> pr_open --actor agent:<id>-impl
 
 Stop after pr_open. Orchestrator merges + completes per auto-merge policy.
 EOF
@@ -394,7 +404,7 @@ c11 send --workspace \$WS --surface \$NEW_DELEGATOR_SURF "cd <worktree> && claud
 c11 send-key --workspace \$WS --surface \$NEW_DELEGATOR_SURF enter
 ```
 
-The delegator runs synchronously — no `/loop`. It completes plan → impl → review → PR → stop in one continuous session and reports a final completion comment. The Orchestrator's next tick picks it up at `pr_open` and merges.
+The delegator runs synchronously — no `/loop`. It completes plan → impl → review → validate → PR → stop in one continuous session and reports a final completion comment. The Orchestrator's next tick picks it up at `pr_open` and merges.
 
 ### Inline-full boot prompt template (default for medium work)
 
@@ -417,6 +427,7 @@ export LATTICE_ROOT=<absolute-repo-root>
 MY_SURF=\$(c11 identify --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["caller"]["surface_ref"])')
 test -n "\$MY_SURF" || { echo "FATAL"; exit 99; }
 c11 set-agent       --surface "\$MY_SURF" --type claude-code --model claude-opus-4-7
+(cd \$REPO_ROOT && lattice claim <TICKET-ID> --surface "\$MY_SURF" --actor agent:<id>)   # bind ticket↔surface; BEFORE rename-tab (claim auto-renames, role-title below wins)
 c11 rename-tab      --surface "\$MY_SURF" "<TICKET-ID> Delegator"
 c11 set-title       --surface "\$MY_SURF" "<TICKET-ID> Delegator"
 c11 set-description --surface "\$MY_SURF" "Inline-full delegator for <TICKET-ID>. <one-line scope>. Headless lattice reviews."
@@ -427,7 +438,8 @@ c11 set-description --surface "\$MY_SURF" "Inline-full delegator for <TICKET-ID>
 3. Impl:        lattice status <TICKET-ID> in_progress --actor agent:<id>-impl ; git fetch && rebase if needed ; edits + tests ; commit
 4. Code-Review: lattice status <TICKET-ID> review --actor agent:<id>-reviewer ; **MUST wrap with `timeout 600`** — `(cd <WORKTREE> && timeout 600 bash -c "LATTICE_SPAWN_BACKEND=headless lattice code-review <TICKET-ID> --mode single --base origin/main --actor agent:<id>-reviewer")`. **HARD RULE — see § "HARD RULE: `lattice code-review` 600-second timeout → own-reviewer fallback".** On RC=124 (timeout) OR empty artifact OR vacuous review: kill the subprocess and pivot to the own-reviewer fallback immediately, in this same Claude session — do NOT wait for orchestrator nudge. Restore tab title after.
 5. Fix (if review surfaces Critical/Major): lattice status <TICKET-ID> in_progress --actor agent:<id>-impl ; edits + tests + commit ; lattice status <TICKET-ID> review --actor agent:<id>-reviewer ; re-run code-review or own-reviewer.
-6. PR: git push ; create PR ; lattice attach <TICKET-ID> <pr_url> --type reference ; lattice status <TICKET-ID> pr_open --actor agent:<id>-impl
+6. Validate: lattice status <TICKET-ID> in_validation --actor agent:<id>-impl ; exercise the change e2e (browser / simulator / curl) ; lattice attach <TICKET-ID> --type note --role validation --inline "<evidence, or one-line N/A justification>" --actor agent:<id>-impl   # pr_open is gated on this artifact ; validation failure routes back to in_progress
+7. PR: git push ; create PR ; lattice attach <TICKET-ID> <pr_url> --type reference ; lattice status <TICKET-ID> pr_open --actor agent:<id>-impl
 
 Stop after pr_open. Orchestrator merges + completes. Distinct actor IDs per phase keep the audit trail clean.
 
@@ -489,6 +501,7 @@ You are the Delegator for <TICKET-ID> — <title>.
 Identity:
   - c11 set-agent --type claude-code --model claude-opus-4-7
   - Resolve surface ref: `MY_SURF=\$(c11 identify --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["caller"]["surface_ref"])')` (see HARD RULE 0)
+  - Bind ticket↔surface: `(cd <REPO_ROOT> && lattice claim <TICKET-ID> --surface "\$MY_SURF" --actor agent:<id>)` — BEFORE rename-tab (claim auto-renames; your role-title wins)
   - c11 rename-tab --surface "\$MY_SURF" "<TICKET-ID> Delegator" + c11 set-title --surface "\$MY_SURF" "<TICKET-ID> Delegator"
   - 3-line description: parent context / this ticket / current phase.
 
@@ -506,7 +519,8 @@ Run phases sequentially in YOUR OWN PANE. **Status discipline is a HARD RULE —
   3. Implement — BEFORE spawning the impl sub-agent, bump \`lattice status <TICKET-ID> in_progress\` AND scan in-flight PRs for cross-ticket constraints: run \`mcp__forgejo__list_pull_requests --state=open\` (or \`gh pr list --state=open\` for GitHub-hosted projects) and read any PR body that mentions your ticket's BUILDPLAN label or its Lattice short ID. Honor anything flagged "open contract", "lock in before X", or in an "Open contracts" section. If unclear, ask the Orchestrator on its surface (visible in \`agents.md\` / \`run-state.md\`). Then spawn the impl sub-agent as a NEW TAB on this pane **using the atomic-cwd-binding launch pattern in \`## Spawning a sub-agent\` below.**
   4. Code-Review — bump \`lattice status <TICKET-ID> review\` (new Lattice meaning: "local review is underway, examining the diff before a PR is opened"). Run \`(cd <WORKTREE> && timeout 600 bash -c "LATTICE_SPAWN_BACKEND=headless lattice code-review <TICKET-ID> --mode single --base <remote>/main --actor agent:<id>-reviewer")\` as a bash subshell. **HEADLESS — NOT a new c11 surface.** **HARD RULE — 600-second timeout; on RC=124 (timeout) OR empty/vacuous artifact, kill the subprocess and pivot to the own-reviewer fallback immediately without waiting for orchestrator nudge.** See § "HARD RULE: \`lattice code-review\` 600-second timeout → own-reviewer fallback" for the full fallback procedure.
   5. Fix — if review found issues, bump status back to \`in_progress\`, spawn a fix sub-agent as a NEW TAB on this pane **using the atomic-cwd-binding launch pattern in \`## Spawning a sub-agent\` below**, then bump back to \`review\` when fix completes. (If you skip the re-bump, the board lies — see HARD RULE on status discipline.)
-  6. Open PR — write the PR body, push the branch, then run \`mcp__forgejo__create_pull_request\` (or \`gh pr create\`) AND \`lattice status <TICKET-ID> pr_open\` as PARALLEL calls in the same tool-call batch. Never sequence them. \`pr_open\` is the delegator's terminal state (the new Lattice workflow puts \`pr_open\` between \`review\` and \`done\`; the merger moves the ticket to \`done\`, not the delegator).
+  6. Validate — bump \`lattice status <TICKET-ID> in_validation\`, then exercise the change end-to-end against a running system (browser automation, simulator MCP, curl flows — whatever fits the ticket). Record the evidence with \`lattice attach <TICKET-ID> --type note --role validation --inline "<evidence>"\` — or a one-line N/A justification if e2e genuinely doesn't apply (explicit, never silent). **The \`pr_open\` transition is blocked until this artifact exists.** Validation failure routes back to \`in_progress\`.
+  7. Open PR — write the PR body, push the branch, then run \`mcp__forgejo__create_pull_request\` (or \`gh pr create\`) AND \`lattice status <TICKET-ID> pr_open\` as PARALLEL calls in the same tool-call batch. Never sequence them. \`pr_open\` is the delegator's terminal state (the stage11 workflow runs \`review → in_validation → pr_open → done\`; the merger moves the ticket to \`done\`, not the delegator).
 
 Sub-agent boilerplate is at the bottom of references/orchestrator.md — bake it into every sub-agent prompt.
 
@@ -805,10 +819,11 @@ When the Orchestrator surfaces to the operator, lead with an unmistakable header
 
 | Transition | Lead with | Tone |
 |---|---|---|
-| `→ needs_human` | **🛑 NEEDS YOUR INPUT — `<TICKET>`** | Action required. Don't bury it. |
+| `needs_human` flag set | **🛑 NEEDS YOUR INPUT — `<TICKET>`** | Action required. Don't bury it. (`needs_human` is an orthogonal flag — `lattice needs-human <task>` — not a status; the ticket keeps its lane.) |
 | `→ blocked` | **⛔ BLOCKED — `<TICKET>`** | External dependency; usually action required. |
 | `→ pr_open` | **✅ READY FOR REVIEW — `<TICKET>`** | PR up; operator's call to merge. |
 | `→ review` | (informational, no banner) | Local code-review running; transient — not yet PR-up. Surface in run-state log, don't escalate to operator. |
+| `→ in_validation` | (informational, no banner) | E2e validation running; transient — not yet PR-up. Surface in run-state log, don't escalate to operator. |
 | `→ done` | **🎉 DONE — `<TICKET>`** | Final ceremony complete; informational. |
 | Signal-phrase comment, no status change | **📋 UPDATE — `<TICKET>`** | Progress checkpoint; informational. |
 
