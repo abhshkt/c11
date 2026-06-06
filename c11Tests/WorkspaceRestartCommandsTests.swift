@@ -674,6 +674,7 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
             type: type,
             title: nil,
             customTitle: nil,
+            customColor: nil,
             directory: nil,
             isPinned: false,
             isManuallyUnread: false,
@@ -684,7 +685,8 @@ final class WorkspaceRestartCommandsTests: XCTestCase {
             browser: nil,
             markdown: nil,
             metadata: metadata,
-            metadataSources: nil
+            metadataSources: nil,
+            surfaceConversations: nil
         )
     }
 }

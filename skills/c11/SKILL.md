@@ -40,10 +40,12 @@ At session start — always, in this order:
 ```bash
 c11 identify                                                        # Your workspace/surface/pane refs (JSON)
 c11 tree                                                            # Spatial layout of the current workspace + hierarchical listing
-c11 set-agent --type claude-code --model claude-opus-4-7            # Declare terminal_type + model (mandatory)
+c11 set-agent --type "$C11_AGENT_TYPE" --model "$C11_AGENT_MODEL"   # Persist agent identity (env vars pre-seeded by c11's spawn path; trust them)
 c11 rename-tab       --surface "$C11_SURFACE_ID" "<your role>"      # Title — what this surface is (mandatory)
 c11 set-description  --surface "$C11_SURFACE_ID" "<why it's open>"  # Description — what you're doing right now (mandatory)
 ```
+
+**On `$C11_AGENT_TYPE` and `$C11_AGENT_MODEL`.** c11's spawn path pre-seeds these env vars with the agent it thinks it's launching — `claude-code`, `codex`, `kimi`, `opencode`, `github-copilot`, or any kebab-case custom value the operator configured. The `c11 set-agent` call above persists them to surface metadata, which is what the sidebar chip and orchestration filters actually read from. **If either env var is empty** you were launched outside the c11 wrapper path (or the operator's shell didn't pre-seed); substitute your own values — e.g. `--type github-copilot --model <your-current-model>` — and do not guess. Read your model name from your runtime's own status banner, not from this skill's examples.
 
 > **Binary bug (as of 2026-04-18):** `C11_TAB_ID` is exported equal to the workspace UUID, not the tab UUID. Bare `c11 rename-tab "<role>"` (and any other tab-scoped command that defaults to `C11_TAB_ID`) errors with `not_found: Tab not found`. Always pass `--surface "$C11_SURFACE_ID"` for tab-scoped commands (`rename-tab`, `set-title`, `set-description`) until this is fixed — `C11_SURFACE_ID` itself is correct.
 
@@ -101,13 +103,16 @@ The rule is intentionally narrow. It does **not** cover `"read /path/to/X and fo
 
 **Titling is not a one-shot.** After the first real titling, proactively refresh both fields as the work pivots: new ticket, new file, new sub-task, scope change of any meaningful kind. Don't wait for the operator to ask, and don't batch it for the end of the session. The *Keep them current when scope shifts* section below covers the broader discipline; the deferral case above is just the first moment where it matters.
 
+> When inside Claude Code, the SessionStart hook automatically pushes the session id into c11's **conversation store** (`c11 conversation push --kind claude-code --id <id> --source hook`). c11 reads that ref at workspace-restore time and types `claude --dangerously-skip-permissions --resume <id>` into the panel — no agent action required. See [Conversation primitives](#conversation-primitives) below.
+
 ### Declaring your agent
 
 `c11 set-agent` writes `terminal_type` and `model` to the surface manifest:
 
 ```bash
-c11 set-agent --type claude-code --model claude-opus-4-7
-c11 set-agent --type codex --task lat-412
+c11 set-agent --type "$C11_AGENT_TYPE" --model "$C11_AGENT_MODEL"   # canonical: trust the env vars c11 pre-seeded
+c11 set-agent --task lat-412                                        # partial write: just update the task ID
+c11 set-agent --type <your-terminal-type> --model <your-model>      # explicit override when env vars are empty/wrong
 ```
 
 Common types: `claude-code`, `codex`, `kimi`, `opencode`. Any kebab-case string is accepted. Inside Claude Code, `claude.session_id` is populated automatically by the wrapper. Inside Codex, the wrapper starts interactive sessions with a c11-owned `--profile-v2 c11` hook layer under c11 Application Support; after Codex's hook-review UI trusts those commands, `codex.session_id` is populated from `SessionStart` hook payloads. c11 also captures explicit `codex resume <id>` invocations, or a guarded local-state lookup that prefers the effective project dir (`--cd` when supplied, otherwise the launch cwd) and otherwise accepts only one fresh global Codex session after a short delay. The Codex wrapper clears stale notifications and marks Codex `Running` when the invocation includes an initial command-line prompt; plain `codex` sessions wait for trusted hooks, the wrapper's notification bridge, or self-reporting. Codex hook payloads with a different `cwd` than the wrapper's effective project dir are ignored so nested/background Codex work does not overwrite the pane. The generated Codex profile intentionally avoids per-turn/tool hooks (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`) because Codex renders hook execution inline in the terminal; the wrapper-injected `notify` bridge owns normal completion notifications and idle updates.
@@ -173,7 +178,9 @@ c11 read-screen --scrollback --lines 200        # include scrollback buffer
 
 ```bash
 c11 new-split <left|right|up|down>             # Split any pane; the NEW pane is always a terminal
+c11 new-split right --cwd <path>               # ...and start its shell in <path> (no `cd` needed)
 c11 new-pane --type browser --url <url>        # New pane of any surface type; --direction is relative to focus
+c11 new-pane --cwd <path>                      # New terminal pane that starts in <path>
 c11 new-surface --pane <pane-ref>              # Add a tab to an existing pane
 c11 new-surface --no-focus                     # Create without stealing focus (safe for background agents)
 c11 new-workspace                              # Create a new workspace
@@ -183,6 +190,7 @@ c11 new-workspace --layout <path|name>         # Create a workspace from a bluep
 - **`new-split` clarified.** Source can be a pane of any surface type — terminal, browser, or markdown. Only the *new* pane is constrained to terminal. Use `new-pane` when the new pane should be a browser or markdown viewer.
 - **`--no-focus` on `new-surface`.** Pass `--no-focus` to create a terminal, browser, or markdown surface without the workspace switching focus to it. Useful when an agent is building out a layout in the background.
 - **`--layout` on `new-workspace`.** Pass a blueprint file path or blueprint name to create a workspace pre-populated with the plan's pane/surface topology. Response includes `workspace_id`, `workspace_ref`, `window_id`, and `window_ref` (same envelope as a plain `new-workspace`), plus a `layout_result` field with apply details.
+- **`--cwd` sets the new shell's directory.** Both `new-split` and `new-pane` accept `--cwd <path>` to start the spawned terminal in a given directory instead of inheriting the parent's. The path is resolved against your cwd (so `--cwd .` works) and validated server-side — a bad path errors instead of silently landing in `$HOME`. Omitting it (or `--cwd inherit`) keeps the inherit-from-parent default. Use this instead of prefixing the launch command with `cd /path && …` when spawning a sub-agent in a specific repo.
 - **Direction is relative to the focused pane.** `new-pane` has no `--pane` flag; it operates on the currently focused pane. Call `c11 focus-pane --pane <ref> --workspace <ref>` first if you need to target a different one.
 - **`new-split` does NOT return the new pane ref** — output is `OK surface:<N> workspace:<M>` only. Follow with `c11 tree --no-layout` (or `--json`) to discover the newly created pane. `new-pane` *does* return the pane ref (`OK surface:<N> pane:<P> workspace:<M>`).
 - **Default targets differ.** `new-split` defaults to the **caller's** pane; `new-surface` defaults to the **focused** pane (often different). To add a tab to your own pane, read `caller.pane_ref` from `c11 identify` and pass it via `--pane`.
@@ -563,6 +571,14 @@ When in c11, prefer the embedded browser over Chrome MCP (`mcp__claude-in-chrome
 
 Reach for Chrome MCP only when **not** in c11 or when a Chrome-specific feature is required. See the `c11-browser` sibling skill for the full automation API.
 
+### Iterate in place — one surface per artifact
+
+When you re-render or edit a document you're previewing, **reload the existing surface** instead of running `open` again. Inside c11, repeated `open <file>` on the same path stacks a new browser surface each time (and can split a new pane), so an edit-render-review loop quietly piles up duplicate panes.
+
+- Capture the surface ref once (`c11 tree --no-layout`, or the `surface:<n>` the first open returns).
+- After each change, `c11 browser reload --surface <ref>`.
+- Keep one surface per artifact; close strays with `c11 close-surface --surface <ref>`, and leave terminal surfaces (often peer agents) alone.
+
 ### Opening a browser pane on a local service
 
 If the browser pane targets a local daemon (e.g. `lattice dashboard`, a dev server), start the daemon **before** creating the browser pane — otherwise the browser loads an error page and won't auto-refresh when the service comes up later. If you do have to open the pane first, reload it once the listener is live:
@@ -580,7 +596,7 @@ disown
 
 ## Workspace persistence
 
-c11 can snapshot a workspace to disk and restore it later with the layout, surface titles, metadata (including `mailbox.*` pane metadata), and — when opted-in — resumed Claude Code sessions.
+c11 can snapshot a workspace to disk and restore it later with the layout, surface titles, metadata (including `mailbox.*` pane metadata), and — for any surface that captured a `ConversationRef` — the agent conversation, resumed via the per-TUI strategy.
 
 ```bash
 # Capture the current workspace to ~/.c11-snapshots/<ulid>.json
@@ -589,18 +605,49 @@ c11 snapshot
 # List what's on disk (newest first)
 c11 list-snapshots
 
-# Restore by id (fresh shells)
+# Restore by id. Surfaces with a captured ConversationRef resume via
+# the per-TUI strategy (e.g., Claude Code re-spawns as `cc --resume
+# <session_id>`); surfaces without one launch fresh.
 c11 restore 01KQ0XYZ…
-
-# Restore with agent session resume: Claude Code surfaces re-spawn as
-# `claude --dangerously-skip-permissions --resume <claude.session_id>` and
-# Codex surfaces re-spawn as `codex resume <codex.session_id>` when the
-# wrapper captured one unambiguous session id; older or ambiguous Codex
-# snapshots fall back to `codex resume --last`.
-C11_SESSION_RESUME=1 c11 restore 01KQ0XYZ…
 ```
 
-The snapshot wraps a `WorkspaceApplyPlan`; the same shape Blueprints and the debug `c11 workspace apply` use. Explicit `SurfaceSpec.command` always wins over any registry synthesis — the registry only fires when a terminal surface has no command and its metadata declares a known `terminal_type`. See [`references/claude-resume.md`](references/claude-resume.md) for the full wire-up (the SessionStart hook operators paste into `~/.claude/settings.json`, the `C11_SESSION_RESUME` gate, troubleshooting).
+Conversation resume is on by default in 0.44.0+. The legacy `C11_SESSION_RESUME=1` opt-in and the standalone `AgentRestartRegistry` path remain in tree as the kill-switch fallback (`CMUX_DISABLE_CONVERSATION_STORE=1`); both are scheduled for removal in 0.46.0/v1.1. See the **Conversation primitives** section below for the live behaviour.
+
+The snapshot wraps a `WorkspaceApplyPlan`; the same shape Blueprints and the debug `c11 workspace apply` use. Explicit `SurfaceSpec.command` always wins over any registry synthesis — the registry only fires when a terminal surface has no command and its metadata declares a known `terminal_type`.
+
+## Conversation primitives
+
+c11 0.44.0+ owns a first-class **conversation store**: each surface hosts at most one active `ConversationRef` keyed by an opaque, per-kind id, persisted across c11 restarts. Per-TUI strategies (Claude Code, Codex, Opencode, Kimi today) capture and resume conversations using whatever signals each TUI exposes — hooks where available, on-disk file scrape as fallback.
+
+```bash
+# Read the active ref + can_resume + diagnostic_reason for the current surface
+c11 conversation get
+c11 conversation get --json
+
+# List captured conversations (process-wide; v1 has no per-workspace
+# partitioning — filter with --surface)
+c11 conversation list
+
+# Operator escape hatch: wipe the surface's conversations
+c11 conversation clear
+
+# Manual operator push (rarely used outside debugging)
+c11 conversation push --kind claude-code --id <uuid> --source manual
+
+# End the current conversation (operator-confirmed)
+c11 conversation tombstone --kind claude-code --id <uuid> --reason "ended"
+```
+
+**Surface resolution.** Every verb resolves `--surface` from `CMUX_SURFACE_ID` if unset. There is **no focused-surface fallback** — that path was the silent-misroute footgun the new architecture exists to fix. If the env var is missing and no flag was given, the command errors out cleanly.
+
+**When to reach for this.** Two main cases:
+
+1. *Debugging "why did this pane resume that session?"* Run `c11 conversation get` — `diagnostic_reason` explains the strategy's decision (`"matched cwd + mtime after claim"`, `"ambiguous: 3 candidates; chose newest"`, `"lifted from legacy claude.session_id metadata"`, etc).
+2. *Forcing a fresh launch on next restore.* `c11 conversation clear` wipes the surface's refs. The next workspace open won't auto-resume.
+
+**Explicit `/exit` does not auto-resume.** When Claude Code's SessionEnd hook fires (e.g., user typed `/exit`), the conversation transitions to `state=ended` which the store maps to `.unknown`; the resume strategy then `.skip`s on next launch. This is by design: explicit user exit is treated as "done with this conversation," distinct from `.suspended` (clean app shutdown) or a crash. To resume after `/exit`, restart the session manually and let the new conversation capture take over.
+
+For wrappers, hooks, and CLI authors: see [references/conversation.md](references/conversation.md) for the full verb table, lifecycle states, capture sources, ambiguity behaviour for hookless TUIs, and examples.
 
 ## Troubleshooting
 
@@ -611,7 +658,8 @@ If `c11` on your PATH does not resolve to the active bundle's CLI, run `c11 doct
 - **[references/api.md](references/api.md)** — full command surface: addressing, discovery, workspace/pane/surface management, surface initialization quirks, sidebar metadata, notifications, troubleshooting
 - **[references/orchestration.md](references/orchestration.md)** — multi-agent patterns: layout, tab naming, launching Claude Code sub-agents, agent-to-agent communication, sidebar reporting, writing c11-aware prompts
 - **[references/metadata.md](references/metadata.md)** — metadata deep dive: socket methods, precedence table, all canonical keys, sidecar sources, consumer patterns
-- **[references/claude-resume.md](references/claude-resume.md)** — agent session resume: Claude/Codex metadata and the `C11_SESSION_RESUME` gate
+- **[references/claude-resume.md](references/claude-resume.md)** — legacy Claude session resume: operator-installed SessionStart hook and the `C11_SESSION_RESUME` gate
+- **[references/conversation.md](references/conversation.md)** — conversation store: `c11 conversation` CLI surface, lifecycle states (alive | suspended | tombstoned | unknown | unsupported), capture sources, ambiguity policy for hookless TUIs (Codex), strategies, the wrapper-claim flow
 - **[../c11-browser/SKILL.md](../c11-browser/SKILL.md)** — c11 embedded browser automation
 - **[../c11-markdown/SKILL.md](../c11-markdown/SKILL.md)** — markdown surface viewer
 

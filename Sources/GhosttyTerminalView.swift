@@ -3769,6 +3769,12 @@ final class TerminalSurface: Identifiable, ObservableObject {
 
     func sendText(_ text: String) {
         guard let data = text.data(using: .utf8), !data.isEmpty else { return }
+        // C11-24: bump the per-surface activity timestamp. Off-main and
+        // debounced; safe to call from this entry point because sendText
+        // itself is not the per-keystroke typing-hot path
+        // (`forceRefresh`/`hitTest`/`TabItemView` are — sendText handles
+        // bigger composed input and synthesised pastes).
+        SurfaceActivityTracker.shared.recordActivity(surfaceId: id.uuidString)
         guard let surface = surface else {
             enqueuePendingText(data)
             return
@@ -9576,7 +9582,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
         // the current layout turn. Re-entrant syncs here can wedge window resize
         // handling and leave the app spinning on the wait cursor.
         guard let window else { return }
-        TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: window)
+        TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: window, trigger: "hostGeometryRevision")
     }
 
     func makeNSView(context: Context) -> NSView {

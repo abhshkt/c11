@@ -13,6 +13,57 @@ extension Notification.Name {
     static let browserDownloadEventDidArrive = Notification.Name("cmux.browserDownloadEventDidArrive")
 }
 
+/// Pure validation for the `--cwd` flag on `new-split` / `new-pane`
+/// (socket methods `surface.split` / `pane.create`).
+///
+/// Kept free of any TerminalController/AppKit state so it is exercisable from
+/// `c11LogicTests` without launching the app. The socket handler adapts the
+/// `Outcome` onto its result envelope.
+enum CwdParamResolution {
+    /// The result of validating a raw `cwd` param value.
+    enum Outcome: Equatable {
+        /// No cwd supplied (or the `inherit` keyword): use the default
+        /// inheritance chain (parent panel cwd → workspace cwd → $HOME).
+        case inherit
+        /// A validated, absolute, existing directory path to spawn the shell in.
+        case path(String)
+        /// The supplied value is unusable; `code`/`message` map to the socket
+        /// error envelope, `path` is the offending standardized path when known.
+        case invalid(code: String, message: String, path: String?)
+    }
+
+    /// Validate a raw `cwd` param value (as received off the socket / CLI).
+    ///
+    /// - A missing value, a non-string, an empty string, or the literal
+    ///   `"inherit"` (case-insensitive) → `.inherit`.
+    /// - A non-empty string → tilde-expanded + standardized, then required to be
+    ///   absolute, to exist, and to be a directory. Any failure → `.invalid`
+    ///   so the spawn never silently lands in $HOME.
+    static func resolve(_ raw: Any?) -> Outcome {
+        guard let raw else { return .inherit }
+        guard let rawStr = raw as? String else {
+            return .invalid(code: "invalid_params", message: "cwd must be a string", path: nil)
+        }
+        let trimmed = rawStr.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed.lowercased() == "inherit" {
+            return .inherit
+        }
+        let expandedPath = NSString(string: trimmed).expandingTildeInPath
+        let resolvedPath = NSString(string: expandedPath).standardizingPath
+        guard resolvedPath.hasPrefix("/") else {
+            return .invalid(code: "invalid_params", message: "cwd must be an absolute path: \(resolvedPath)", path: resolvedPath)
+        }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: resolvedPath, isDirectory: &isDir) else {
+            return .invalid(code: "not_found", message: "cwd directory not found: \(resolvedPath)", path: resolvedPath)
+        }
+        guard isDir.boolValue else {
+            return .invalid(code: "invalid_params", message: "cwd is not a directory: \(resolvedPath)", path: resolvedPath)
+        }
+        return .path(resolvedPath)
+    }
+}
+
 /// Unix socket-based controller for programmatic terminal control
 /// Allows automated testing and external control of terminal tabs
 @MainActor
@@ -2572,13 +2623,15 @@ class TerminalController {
         return withSocketCommandPolicy(commandKey: method, isV2: true) {
             switch method {
         case "system.ping":
-            // `is_terminating_app` is the SessionEnd-during-shutdown signal —
-            // the `c11 claude-hook session-end` CLI reads it to skip the
-            // metadata clear that would otherwise race the snapshot capture
-            // in `applicationShouldTerminate`. See `SessionEndShutdownPolicy`.
+            // is_terminating_app: C11-24 — exposed so the claude-hook
+            // CLI can query "is the app shutting down?" in 250 ms before
+            // deciding whether to skip-clear during SessionEnd. Read off
+            // the AppDelegate (single shared instance, BoolGet semantics
+            // — no synchronisation needed since the field flips once
+            // and never back).
             return v2Ok(id: id, result: [
                 "pong": true,
-                "is_terminating_app": isTerminatingApp
+                "is_terminating_app": (AppDelegate.shared?.isTerminatingApp ?? false)
             ])
         case "system.capabilities":
             return v2Ok(id: id, result: v2Capabilities())
@@ -2754,6 +2807,19 @@ class TerminalController {
         // mis-routed request before it reaches this switch.
         case "surface.trigger_flash":
             return v2Result(id: id, self.v2SurfaceTriggerFlash(params: params))
+        // C11-24 conversation store
+        case "conversation.claim":
+            return v2Result(id: id, self.v2ConversationClaim(params: params))
+        case "conversation.push":
+            return v2Result(id: id, self.v2ConversationPush(params: params))
+        case "conversation.tombstone":
+            return v2Result(id: id, self.v2ConversationTombstone(params: params))
+        case "conversation.list":
+            return v2Result(id: id, self.v2ConversationList(params: params))
+        case "conversation.get":
+            return v2Result(id: id, self.v2ConversationGet(params: params))
+        case "conversation.clear":
+            return v2Result(id: id, self.v2ConversationClear(params: params))
         case "surface.cancel_flash":
             return v2Result(id: id, self.v2SurfaceCancelFlash(params: params))
         case "surface.set_metadata":
@@ -3852,7 +3918,7 @@ class TerminalController {
         ])
     }
 
-    private enum V2CallResult {
+    private enum V2CallResult: Error {
         case ok(Any)
         case err(code: String, message: String, data: Any?)
     }
@@ -4109,6 +4175,35 @@ class TerminalController {
         }
         resolved = resolvedPath
         return nil
+    }
+
+    /// Validate and resolve a `cwd` param for surface.split / pane.create.
+    ///
+    /// Outcomes encoded into `resolved`:
+    /// - No `cwd` param, or the literal `"inherit"` → `resolved = nil`, return
+    ///   `nil` (no error). A nil working directory falls through to the existing
+    ///   inheritance chain (parent panel cwd → workspace cwd → $HOME).
+    /// - A non-empty path → expanded, standardized, and checked: it must be
+    ///   absolute, must exist, and must be a directory. On success `resolved`
+    ///   holds the absolute directory path. On failure returns a `V2CallResult`
+    ///   error so the spawn never silently falls back to $HOME.
+    ///
+    /// The validation logic itself lives in the pure, testable
+    /// `CwdParamResolution.resolve(_:)` enum so it can be exercised from
+    /// `c11LogicTests` without standing up a TerminalController; this method is
+    /// the thin adapter that maps the outcome onto the socket result envelope.
+    private func v2ResolveCwdParam(_ params: [String: Any], resolved: inout String?) -> V2CallResult? {
+        resolved = nil
+        switch CwdParamResolution.resolve(params["cwd"]) {
+        case .inherit:
+            return nil
+        case .path(let dir):
+            resolved = dir
+            return nil
+        case .invalid(let code, let message, let path):
+            let data: [String: Any]? = path.map { ["path": $0] }
+            return .err(code: code, message: message, data: data)
+        }
     }
 
     // MARK: - V2 Context Resolution
@@ -6674,6 +6769,13 @@ class TerminalController {
         }
         let titleSeed = v2String(params, "title")
 
+        // Validate the optional --cwd override server-side before spawning so a
+        // bad path returns a clear error instead of silently landing in $HOME.
+        var cwdOverride: String?
+        if let err = v2ResolveCwdParam(params, resolved: &cwdOverride) {
+            return err
+        }
+
         var result: V2CallResult = .err(code: "internal_error", message: "Failed to create split", data: nil)
         v2MainSync {
             guard let ws = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
@@ -6693,7 +6795,7 @@ class TerminalController {
             v2MaybeFocusWindow(for: tabManager)
             v2MaybeSelectWorkspace(tabManager, workspace: ws)
 
-            if let newId = tabManager.newSplit(tabId: ws.id, surfaceId: targetSurfaceId, direction: direction) {
+            if let newId = tabManager.newSplit(tabId: ws.id, surfaceId: targetSurfaceId, direction: direction, workingDirectory: cwdOverride) {
                 let paneUUID = ws.paneId(forPanelId: newId)?.id
                 // Seed pane title atomic with pane id becoming valid.
                 v2SeedPaneTitle(workspaceId: ws.id, paneUUID: paneUUID, title: titleSeed)
@@ -8631,6 +8733,14 @@ class TerminalController {
             }
         }
 
+        // Validate the optional --cwd override server-side. Only meaningful for
+        // terminal panes (browser/markdown have no shell), but validate
+        // regardless so a bad path is rejected rather than silently ignored.
+        var cwdOverride: String?
+        if let err = v2ResolveCwdParam(params, resolved: &cwdOverride) {
+            return err
+        }
+
         let orientation = direction.orientation
         let insertFirst = direction.insertFirst
 
@@ -8670,7 +8780,8 @@ class TerminalController {
                     from: focusedPanelId,
                     orientation: orientation,
                     insertFirst: insertFirst,
-                    focus: self.v2FocusAllowed()
+                    focus: self.v2FocusAllowed(),
+                    workingDirectory: cwdOverride
                 )?.id
             }
 
@@ -9516,6 +9627,374 @@ class TerminalController {
         case .dismissed:
             return .ok(["result": "dismissed"])
         }
+    }
+
+    // MARK: - V2 Conversation Methods (C11-24)
+
+    /// Strict surface UUID resolution for conversation commands.
+    /// **No focused-fallback** — see plan §"CLI surface" and the env-loss
+    /// footgun the architecture exists to fix.
+    private func v2ResolveSurfaceForConversation(
+        params: [String: Any]
+    ) -> Result<UUID, V2CallResult> {
+        guard let surfaceId = v2UUID(params, "surface_id") else {
+            return .failure(.err(
+                code: "missing_surface",
+                message: "surface_id required (no focused-fallback for conversation commands)",
+                data: nil
+            ))
+        }
+        return .success(surfaceId)
+    }
+
+    /// 64 KiB cap on the serialised payload accepted by v2 conversation
+    /// push. Matches the metadata path. Defends the snapshot file against
+    /// oversized hook input.
+    private static let conversationPayloadMaxBytes: Int = 64 * 1024
+
+    /// Bool detection for payload coercion. Swift `Bool` bridges to
+    /// `NSNumber` on Apple platforms, so a naive `as? NSNumber` cast
+    /// succeeds for booleans and silently coerces them to `.number(1.0)`.
+    /// Use `CFBooleanGetTypeID` to disambiguate.
+    private func conversationBoolValue(_ v: Any) -> Bool? {
+        let cf = v as CFTypeRef
+        if CFGetTypeID(cf) == CFBooleanGetTypeID() {
+            return (v as? Bool)
+        }
+        return nil
+    }
+
+    /// Synchronous bridge into the `ConversationStore` actor. Each call
+    /// hops onto a Task and waits via a semaphore so the v2 dispatch
+    /// thread (off-main) gets a result before returning. The store is
+    /// a Swift actor so internal state-transitions are isolated; we only
+    /// need this bridge because v2 handlers are sync.
+    ///
+    /// Bounded timeout (2 s); the actor never blocks on I/O so a hang
+    /// here would mean a deadlock somewhere unrelated.
+    private func conversationStoreSync<T: Sendable>(
+        _ body: @escaping @Sendable (ConversationStore) async -> T
+    ) -> T? {
+        // C11-24: `Task.detached` so the spawned task does not inherit
+        // `@MainActor` isolation from `TerminalController` (declared
+        // `@MainActor` at line 18). Without this, the task body cannot
+        // run while main is blocked on `sema.wait`, the actor call
+        // never completes, and every `v2ConversationList`,
+        // `v2ConversationGet`, etc. silently returns the `?? [:]`
+        // fallback even when the actor has data. Verified by
+        // reproducer at `notes/c11-24-snapshot-capture-bug.md`.
+        let store = ConversationStore.shared
+        nonisolated(unsafe) var result: T?
+        let sema = DispatchSemaphore(value: 0)
+        Task.detached(priority: .userInitiated) {
+            result = await body(store)
+            sema.signal()
+        }
+        if sema.wait(timeout: .now() + 2.0) == .success {
+            return result
+        }
+        return nil
+    }
+
+    private func v2ConversationClaim(params: [String: Any]) -> V2CallResult {
+        if ConversationStorePolicy.isDisabled {
+            return .ok(["disabled": true, "kill_switch": "CMUX_DISABLE_CONVERSATION_STORE"])
+        }
+        guard let kind = v2String(params, "kind"), !kind.isEmpty else {
+            return .err(code: "invalid_kind", message: "kind required", data: nil)
+        }
+        let surfaceResult = v2ResolveSurfaceForConversation(params: params)
+        guard case .success(let surfaceId) = surfaceResult else {
+            if case .failure(let err) = surfaceResult { return err }
+            return .err(code: "internal_error", message: "surface resolution", data: nil)
+        }
+        let cwd = v2String(params, "cwd")
+        let placeholder = v2String(params, "placeholder_id")
+            ?? "wrapper-claim:\(surfaceId.uuidString):\(Int(Date().timeIntervalSince1970))"
+
+        let result = conversationStoreSync { store in
+            await store.claim(
+                surfaceId: surfaceId.uuidString,
+                kind: kind,
+                cwd: cwd,
+                placeholderId: placeholder
+            )
+        }
+        // Bump the surface activity timestamp; the wrapper-claim establishes
+        // the lower bound used by the Codex scrape filter.
+        SurfaceActivityTracker.shared.recordActivity(surfaceId: surfaceId.uuidString)
+        guard let ref = result else {
+            return .err(code: "internal_error", message: "store timeout", data: nil)
+        }
+        return .ok([
+            "surface_id": surfaceId.uuidString,
+            "kind": ref.kind,
+            "id": ref.id,
+            "placeholder": ref.placeholder,
+            "captured_via": ref.capturedVia.rawValue,
+            "state": ref.state.rawValue
+        ])
+    }
+
+    private func v2ConversationPush(params: [String: Any]) -> V2CallResult {
+        if ConversationStorePolicy.isDisabled {
+            return .ok(["disabled": true, "kill_switch": "CMUX_DISABLE_CONVERSATION_STORE"])
+        }
+        guard let kind = v2String(params, "kind"), !kind.isEmpty else {
+            return .err(code: "invalid_kind", message: "kind required", data: nil)
+        }
+        guard let id = v2String(params, "id"), !id.isEmpty else {
+            return .err(code: "invalid_id", message: "id required", data: nil)
+        }
+        guard let sourceStr = v2String(params, "source"),
+              let source = CaptureSource(rawValue: sourceStr) else {
+            return .err(code: "invalid_source",
+                        message: "source must be one of hook, scrape, manual, wrapperClaim",
+                        data: nil)
+        }
+        // Validate id grammar against the strategy if registered.
+        let registry = ConversationStrategyRegistry.v1
+        if let strategy = registry.strategy(forKind: kind), !strategy.isValidId(id) {
+            return .err(code: "invalid_id_grammar",
+                        message: "id does not match the \(kind) strategy's grammar",
+                        data: ["kind": kind])
+        }
+        let surfaceResult = v2ResolveSurfaceForConversation(params: params)
+        guard case .success(let surfaceId) = surfaceResult else {
+            if case .failure(let err) = surfaceResult { return err }
+            return .err(code: "internal_error", message: "surface resolution", data: nil)
+        }
+        let cwd = v2String(params, "cwd")
+        let reason = v2String(params, "diagnostic_reason")
+        let stateRaw = (v2String(params, "state") ?? "alive").lowercased()
+        // C11-24 review (I2): strict validation. Silent fallthrough to
+        // .alive swallowed typos ("susended" → .alive) and corrupted the
+        // state machine.
+        let state: ConversationState
+        switch stateRaw {
+        case "ended": state = .unknown // SessionEnd → unknown; next-launch scrape reclassifies
+        case "alive": state = .alive
+        case "suspended": state = .suspended
+        case "tombstoned": state = .tombstoned
+        case "unknown": state = .unknown
+        case "unsupported": state = .unsupported
+        default:
+            return .err(code: "invalid_state",
+                        message: "state must be one of alive, suspended, ended, tombstoned, unknown, unsupported",
+                        data: ["state": stateRaw])
+        }
+        // C11-24 review (I1): payload coercion + size cap.
+        // - Bool bridges to NSNumber on Apple platforms; the previous
+        //   ordering (NSNumber before Bool) silently coerced
+        //   `{"is_async": true}` to `.number(1.0)`. Check Bool first via
+        //   CFBoolean type id.
+        // - The else-branch is now an explicit reject so nested
+        //   objects/arrays/null don't disappear.
+        // - Cap the total serialised payload at 64 KiB to match the
+        //   metadata path; oversized hook input shouldn't be allowed to
+        //   land in the snapshot.
+        let payload: [String: PersistedJSONValue]?
+        if let dict = params["payload"] as? [String: Any] {
+            var out: [String: PersistedJSONValue] = [:]
+            out.reserveCapacity(dict.count)
+            for (k, v) in dict {
+                if let b = conversationBoolValue(v) {
+                    out[k] = .bool(b)
+                } else if let s = v as? String {
+                    out[k] = .string(s)
+                } else if let n = v as? NSNumber {
+                    out[k] = .number(n.doubleValue)
+                } else {
+                    return .err(code: "invalid_payload",
+                                message: "payload values must be string, number, or bool",
+                                data: ["key": k])
+                }
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: dict),
+               data.count > Self.conversationPayloadMaxBytes {
+                return .err(code: "payload_too_large",
+                            message: "payload exceeds 64 KiB cap",
+                            data: ["bytes": data.count])
+            }
+            payload = out
+        } else if params["payload"] != nil {
+            return .err(code: "invalid_payload",
+                        message: "payload must be an object",
+                        data: nil)
+        } else {
+            payload = nil
+        }
+
+        let ref = conversationStoreSync { store in
+            await store.push(
+                surfaceId: surfaceId.uuidString,
+                kind: kind,
+                id: id,
+                source: source,
+                cwd: cwd,
+                state: state,
+                diagnosticReason: reason,
+                payload: payload
+            )
+        }
+        SurfaceActivityTracker.shared.recordActivity(surfaceId: surfaceId.uuidString)
+        guard let ref else {
+            return .err(code: "internal_error", message: "store timeout", data: nil)
+        }
+        return .ok([
+            "surface_id": surfaceId.uuidString,
+            "kind": ref.kind,
+            "id": ref.id,
+            "captured_via": ref.capturedVia.rawValue,
+            "state": ref.state.rawValue
+        ])
+    }
+
+    private func v2ConversationTombstone(params: [String: Any]) -> V2CallResult {
+        // C11-24 review (B4): the CLI requires --kind and --id and the
+        // operator typically targets a specific stale ref. Tombstoning
+        // the active ref unconditionally is a footgun: typing
+        // `c11 conversation tombstone --kind codex --id <old>` from a
+        // surface whose active ref is now a different conversation used
+        // to wipe the current one. Validate kind+id against the active
+        // ref before mutating.
+        guard let kind = v2String(params, "kind"), !kind.isEmpty else {
+            return .err(code: "invalid_kind", message: "kind required", data: nil)
+        }
+        guard let id = v2String(params, "id"), !id.isEmpty else {
+            return .err(code: "invalid_id", message: "id required", data: nil)
+        }
+        let surfaceResult = v2ResolveSurfaceForConversation(params: params)
+        guard case .success(let surfaceId) = surfaceResult else {
+            if case .failure(let err) = surfaceResult { return err }
+            return .err(code: "internal_error", message: "surface resolution", data: nil)
+        }
+        let reason = v2String(params, "reason")
+        // The bridge wraps each result in Optional (nil = store timeout),
+        // and `active(for:)` itself returns Optional. Unwrap both.
+        let activeOpt: ConversationRef?? = conversationStoreSync { store in
+            await store.active(for: surfaceId.uuidString)
+        }
+        guard case .some(let maybeActive) = activeOpt else {
+            return .err(code: "internal_error", message: "store timeout", data: nil)
+        }
+        guard let active = maybeActive else {
+            return .err(code: "not_found",
+                        message: "no active conversation for surface",
+                        data: ["surface_id": surfaceId.uuidString])
+        }
+        if active.kind != kind || active.id != id {
+            return .err(code: "id_mismatch",
+                        message: "active ref kind/id does not match request",
+                        data: [
+                            "surface_id": surfaceId.uuidString,
+                            "active_kind": active.kind,
+                            "active_id": active.id,
+                            "requested_kind": kind,
+                            "requested_id": id
+                        ])
+        }
+        _ = conversationStoreSync { store -> Void in
+            await store.tombstone(surfaceId: surfaceId.uuidString, reason: reason)
+        }
+        return .ok([
+            "surface_id": surfaceId.uuidString,
+            "kind": kind,
+            "id": id,
+            "result": "tombstoned"
+        ])
+    }
+
+    private func v2ConversationList(params: [String: Any]) -> V2CallResult {
+        let snap = conversationStoreSync { store in
+            await store.snapshot()
+        } ?? [:]
+        let surfaceFilter = v2UUID(params, "surface_id")
+        var entries: [[String: Any]] = []
+        for (sid, surfaceConv) in snap {
+            if let f = surfaceFilter, sid != f.uuidString { continue }
+            if let active = surfaceConv.active {
+                entries.append([
+                    "surface_id": sid,
+                    "kind": active.kind,
+                    "id": active.id,
+                    "placeholder": active.placeholder,
+                    "captured_via": active.capturedVia.rawValue,
+                    "state": active.state.rawValue,
+                    "captured_at": active.capturedAt.timeIntervalSince1970,
+                    "diagnostic_reason": v2OrNull(active.diagnosticReason),
+                    "cwd": v2OrNull(active.cwd)
+                ])
+            }
+        }
+        // C11-24 review (M3): expose kill-switch state so operators
+        // diagnosing "why isn't my session resuming?" can confirm
+        // whether the store path is even active.
+        return .ok([
+            "conversations": entries,
+            "is_disabled": ConversationStorePolicy.isDisabled
+        ])
+    }
+
+    private func v2ConversationGet(params: [String: Any]) -> V2CallResult {
+        let surfaceResult = v2ResolveSurfaceForConversation(params: params)
+        guard case .success(let surfaceId) = surfaceResult else {
+            if case .failure(let err) = surfaceResult { return err }
+            return .err(code: "internal_error", message: "surface resolution", data: nil)
+        }
+        let surfaceConv = conversationStoreSync { store in
+            await store.conversations(for: surfaceId.uuidString)
+        }
+        guard let surfaceConv else {
+            return .err(code: "internal_error", message: "store timeout", data: nil)
+        }
+        var out: [String: Any] = [
+            "surface_id": surfaceId.uuidString,
+            "active": NSNull(),
+            "can_resume": false,
+            "history": surfaceConv.history.map { conversationRefAsDict($0) }
+        ]
+        if let active = surfaceConv.active {
+            out["active"] = conversationRefAsDict(active)
+            let registry = ConversationStrategyRegistry.v1
+            if let strategy = registry.strategy(forKind: active.kind) {
+                if case .skip = strategy.resume(ref: active) {
+                    out["can_resume"] = false
+                } else {
+                    out["can_resume"] = true
+                }
+            }
+        }
+        return .ok(out)
+    }
+
+    private func v2ConversationClear(params: [String: Any]) -> V2CallResult {
+        let surfaceResult = v2ResolveSurfaceForConversation(params: params)
+        guard case .success(let surfaceId) = surfaceResult else {
+            if case .failure(let err) = surfaceResult { return err }
+            return .err(code: "internal_error", message: "surface resolution", data: nil)
+        }
+        _ = conversationStoreSync { store -> Void in
+            await store.clear(surfaceId: surfaceId.uuidString)
+        }
+        SurfaceActivityTracker.shared.clear(surfaceId: surfaceId.uuidString)
+        return .ok([
+            "surface_id": surfaceId.uuidString,
+            "result": "cleared"
+        ])
+    }
+
+    private func conversationRefAsDict(_ ref: ConversationRef) -> [String: Any] {
+        return [
+            "kind": ref.kind,
+            "id": ref.id,
+            "placeholder": ref.placeholder,
+            "cwd": v2OrNull(ref.cwd),
+            "captured_at": ref.capturedAt.timeIntervalSince1970,
+            "captured_via": ref.capturedVia.rawValue,
+            "state": ref.state.rawValue,
+            "diagnostic_reason": v2OrNull(ref.diagnosticReason)
+        ]
     }
 
     // MARK: - V2 Notification Methods
