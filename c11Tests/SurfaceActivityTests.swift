@@ -30,9 +30,11 @@ final class SurfaceActivityTests: XCTestCase {
         tracker.recordActivity(surfaceId: "S1", at: base.addingTimeInterval(0.05))
         tracker.recordActivity(surfaceId: "S1", at: base.addingTimeInterval(0.10))
         tracker.recordActivity(surfaceId: "S1", at: base.addingTimeInterval(0.20))
-        let read = tracker.lastActivity(for: "S1")
-        XCTAssertNotNil(read)
-        XCTAssertEqual(read?.timeIntervalSince1970, base.timeIntervalSince1970, accuracy: 0.001,
+        guard let read = tracker.lastActivity(for: "S1") else {
+            XCTFail("expected S1 activity to be recorded")
+            return
+        }
+        XCTAssertEqual(read.timeIntervalSince1970, base.timeIntervalSince1970, accuracy: 0.001,
                        "burst inside the debounce window must not advance the timestamp")
     }
 
@@ -42,8 +44,11 @@ final class SurfaceActivityTests: XCTestCase {
         tracker.recordActivity(surfaceId: "S1", at: base)
         let later = base.addingTimeInterval(SurfaceActivityTracker.debounceInterval + 0.1)
         tracker.recordActivity(surfaceId: "S1", at: later)
-        let read = tracker.lastActivity(for: "S1")
-        XCTAssertEqual(read?.timeIntervalSince1970, later.timeIntervalSince1970, accuracy: 0.001)
+        guard let read = tracker.lastActivity(for: "S1") else {
+            XCTFail("expected S1 activity to be recorded")
+            return
+        }
+        XCTAssertEqual(read.timeIntervalSince1970, later.timeIntervalSince1970, accuracy: 0.001)
     }
 
     func testEmptyOrWhitespaceSurfaceIdIgnored() {
@@ -59,9 +64,13 @@ final class SurfaceActivityTests: XCTestCase {
         let now = Date()
         tracker.seed(from: ["S1": now, "S2": now.addingTimeInterval(-60)])
         let snap = tracker.snapshot()
-        XCTAssertEqual(snap["S1"]?.timeIntervalSince1970,
+        guard let s1 = snap["S1"], let s2 = snap["S2"] else {
+            XCTFail("expected seeded activity for S1 and S2")
+            return
+        }
+        XCTAssertEqual(s1.timeIntervalSince1970,
                        now.timeIntervalSince1970, accuracy: 0.001)
-        XCTAssertEqual(snap["S2"]?.timeIntervalSince1970,
+        XCTAssertEqual(s2.timeIntervalSince1970,
                        now.addingTimeInterval(-60).timeIntervalSince1970, accuracy: 0.001)
         XCTAssertEqual(snap.count, 2)
     }

@@ -350,9 +350,13 @@ extension Workspace {
         // state, not a full rollback. Removed in 0.46.0 / v1.1 alongside
         // the legacy claude.session_id metadata bridge.
         if ConversationStorePolicy.isDisabled {
+            let restoredPanelIds = Dictionary(
+                uniqueKeysWithValues: snapshot.panels.map { ($0.id, $0.id) }
+            )
             scheduleAgentRestartLegacy(
                 from: snapshot,
-                registry: .phase1
+                registry: .phase1,
+                oldToNewPanelIds: restoredPanelIds
             )
         } else {
             scheduleAgentRestart(
@@ -446,7 +450,8 @@ extension Workspace {
         ) { [weak self] in
             guard let self else { return }
             for (panelId, command) in commands {
-                guard let terminalPanel = self.panels[panelId] as? TerminalPanel else {
+                let livePanelId = oldToNewPanelIds[panelId] ?? panelId
+                guard let terminalPanel = self.panels[livePanelId] as? TerminalPanel else {
                     continue
                 }
                 TextBoxSubmit.send(command, via: terminalPanel.surface)

@@ -24,6 +24,7 @@
 		16DCD44991BF108A8BA20C3F /* AIUsageHTTP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DA414B88B5E78AC0666402A /* AIUsageHTTP.swift */; };
 		176BB8C7A69033D4F4671809 /* MailboxOutboxWatcherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D710DBF1A1B2C3D4E5F60718 /* MailboxOutboxWatcherTests.swift */; };
 		1916352BB829C966E26F4F51 /* CodexAIProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20DA518806F5512F99AE614C /* CodexAIProvider.swift */; };
+		19B7D5A84F2C91E0D3A6B812 /* CodexAIUsageFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = C926F0AE55EF9C1E27986408 /* CodexAIUsageFetcher.swift */; };
 		1A1EC322E65B74DEDAAD08A5 /* DefaultAgentConfigTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BF9D5EC78046EDA9B54AC68 /* DefaultAgentConfigTests.swift */; };
 		1BA5C5B28E1CE348469E1778 /* MetadataStoreRevisionCounterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7009BF1A1B2C3D4E5F60718 /* MetadataStoreRevisionCounterTests.swift */; };
 		1D57711F82EF7A25FB6FEA23 /* Codex.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE1C8E6BE23CECF1DA9531BA /* Codex.swift */; };
@@ -1728,6 +1729,7 @@
 				FCC39C9A1A7BE832547B413C /* ClaudeAIUsageFetcher.swift in Sources */,
 				52D3E9AA8CD63195DA57EABB /* ClaudeLocalUsageFetcher.swift in Sources */,
 				1916352BB829C966E26F4F51 /* CodexAIProvider.swift in Sources */,
+				19B7D5A84F2C91E0D3A6B812 /* CodexAIUsageFetcher.swift in Sources */,
 				524C728505FB1753AC89BC08 /* CodexLocalUsageFetcher.swift in Sources */,
 				E1730BF1714BA653CAAE8F3E /* AIUsageEditorSheet.swift in Sources */,
 				B6011B221EE2A59F4E8D7A3A /* AIUsageFooterView.swift in Sources */,

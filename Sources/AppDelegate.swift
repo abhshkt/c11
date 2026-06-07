@@ -2202,7 +2202,10 @@ enum StartupLayoutGate {
             action(terminalPanel)
             if let window {
                 DispatchQueue.main.async {
-                    TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: window)
+                    TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(
+                        for: window,
+                        trigger: "terminalPanelReady"
+                    )
                 }
             }
         }

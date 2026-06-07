@@ -1,61 +1,26 @@
 import Foundation
 
-enum CodexAIUsageFetchError: Error, LocalizedError, C11AppOwnedError {
-    case invalidAccessToken
-    case invalidAccountId
-    case httpAuth(Int)
-    case http404
-    case http(Int)
-    case badResponse
-    case decoding
-    case network
+enum CodexAIValidators {
+    static func isValidAccessToken(_ accessToken: String) -> Bool {
+        let token = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return false }
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return false }
+        guard parts[0].hasPrefix("eyJ") else { return false }
+        return parts.allSatisfy { part in
+            guard !part.isEmpty else { return false }
+            return part.unicodeScalars.allSatisfy { scalar in
+                CharacterSet.alphanumerics.contains(scalar) || scalar == "-" || scalar == "_"
+            }
+        }
+    }
 
-    var isAppOwned: Bool { true }
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidAccessToken:
-            return String(
-                localized: "aiusage.codex.error.invalidAccessToken",
-                defaultValue: "Access token is not valid."
-            )
-        case .invalidAccountId:
-            return String(
-                localized: "aiusage.codex.error.invalidAccountId",
-                defaultValue: "Account ID is not valid."
-            )
-        case .httpAuth(let status):
-            let format = String(
-                localized: "aiusage.codex.error.httpAuth",
-                defaultValue: "Sign-in expired (status %lld). Re-enter your access token."
-            )
-            return String(format: format, locale: .current, Int(status))
-        case .http404:
-            return String(
-                localized: "aiusage.codex.error.http404",
-                defaultValue: "Codex usage endpoint not found. The account may not have access."
-            )
-        case .http(let status):
-            let format = String(
-                localized: "aiusage.codex.error.http",
-                defaultValue: "Codex returned status %lld."
-            )
-            return String(format: format, locale: .current, Int(status))
-        case .badResponse:
-            return String(
-                localized: "aiusage.codex.error.badResponse",
-                defaultValue: "Unexpected response from Codex."
-            )
-        case .decoding:
-            return String(
-                localized: "aiusage.codex.error.decoding",
-                defaultValue: "Could not read Codex usage payload."
-            )
-        case .network:
-            return String(
-                localized: "aiusage.codex.error.network",
-                defaultValue: "Network error while contacting Codex."
-            )
+    static func isValidAccountId(_ accountId: String) -> Bool {
+        let value = accountId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty { return true }
+        if value.lowercased() == "null" { return false }
+        return value.unicodeScalars.allSatisfy { scalar in
+            scalar.value >= 0x21 && scalar.value != 0x7F
         }
     }
 }

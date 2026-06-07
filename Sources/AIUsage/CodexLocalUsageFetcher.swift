@@ -2,6 +2,12 @@ import Foundation
 import SQLite3
 
 enum CodexAIUsageFetchError: Error, LocalizedError, C11AppOwnedError {
+    case invalidAccessToken
+    case invalidAccountId
+    case httpAuth(Int)
+    case http404
+    case http(Int)
+    case badResponse
     case network
     case decoding
 
@@ -9,10 +15,42 @@ enum CodexAIUsageFetchError: Error, LocalizedError, C11AppOwnedError {
 
     var errorDescription: String? {
         switch self {
+        case .invalidAccessToken:
+            return String(
+                localized: "aiusage.codex.error.invalidAccessToken",
+                defaultValue: "Access token is not valid."
+            )
+        case .invalidAccountId:
+            return String(
+                localized: "aiusage.codex.error.invalidAccountId",
+                defaultValue: "Account ID is not valid."
+            )
+        case .httpAuth(let status):
+            let format = String(
+                localized: "aiusage.codex.error.httpAuth",
+                defaultValue: "Sign-in expired (status %lld). Re-enter your access token."
+            )
+            return String(format: format, locale: .current, Int(status))
+        case .http404:
+            return String(
+                localized: "aiusage.codex.error.http404",
+                defaultValue: "Codex usage endpoint not found. The account may not have access."
+            )
+        case .http(let status):
+            let format = String(
+                localized: "aiusage.codex.error.http",
+                defaultValue: "Codex returned status %lld."
+            )
+            return String(format: format, locale: .current, Int(status))
+        case .badResponse:
+            return String(
+                localized: "aiusage.codex.error.badResponse",
+                defaultValue: "Unexpected response from Codex."
+            )
         case .network:
             return String(
                 localized: "aiusage.codex.error.network",
-                defaultValue: "Codex local database not found or unreadable."
+                defaultValue: "Codex usage data is not available."
             )
         case .decoding:
             return String(
