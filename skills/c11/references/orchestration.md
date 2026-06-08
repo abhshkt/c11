@@ -15,9 +15,9 @@ Patterns for running multiple agents in parallel panes: layout, tab naming, laun
 
 ## Layout philosophy
 
-**Workspace = project. Panes = concerns. Surfaces = individual agents or views.**
+**By default: workspace ≈ project, panes ≈ concerns, surfaces ≈ individual agents or views.** This is a sensible starting layout, not a law; how the operator maps workspaces to projects overall is their call (see the c11 skill).
 
-Do **not** create one workspace per agent. A workspace is a project; agents are surfaces (tabs) within panes of that workspace.
+Within a single orchestration run, keep the agents as surfaces (tabs) within panes of the run's workspace rather than spawning a fresh workspace per agent. One workspace per agent fragments the run across the sidebar and makes it hard to read; grouping them keeps the whole run legible in one place.
 
 Standard orchestration layout for a single project:
 

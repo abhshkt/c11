@@ -36,6 +36,19 @@ c11's value to an agent is **the skill** — `skills/c11/SKILL.md` plus the peer
 
 **Therefore:** every change to the CLI, socket protocol, metadata schema, or surface model is incomplete until the skill is updated to match. If you add a command, add it to the skill. If you rename a command, rename it in the skill. If you change defaults, update the examples. The skill is the contract; let it rot and agents get worse at using c11. Invest there first, not last.
 
+### Editing a skill source is incomplete until the installed copy is synced (HARD RULE)
+
+c11 installs its skills (Settings → Agent Skills) as **one-time copies** into `~/.claude/skills/<name>/`, each stamped with a `.c11-skill.json` marker. **The app does not track the repo source after install.** So editing — or committing — a skill under `skills/` does *nothing* to the copy an agent actually loads on any machine where that skill is already installed. The committed source and the live skill are two different files; fixing one leaves the other stale. This has bitten us before: a fix lands in `skills/c11/SKILL.md`, the commit is green, and agents keep reading the old wording for weeks because nobody refreshed the install.
+
+**Whenever you edit any installable skill** (`c11`, `c11-browser`, `c11-markdown`, `c11-debug-windows`, `lattice-orchestrator` — see `skills/MANIFEST.json`), the change is not done until you run:
+
+```bash
+scripts/sync-installed-skills.sh            # refresh every installed installable skill from source
+scripts/sync-installed-skills.sh c11        # or just one
+```
+
+The script mirrors `skills/<name>/` → `~/.claude/skills/<name>/` (preserving the app's `.c11-skill.json` marker) and is idempotent. Treat it as the skill-editing equivalent of `reload.sh` after a code change: source edit → commit → **sync** → verify the live copy. A skill PR that updates source without the maintainer syncing their own machine ships a fix that isn't actually live for them.
+
 ## Computer use is a maintainer validation skill, not the c11 operating skill
 
 There are two different genres here; do not blur them:
@@ -102,6 +115,7 @@ The one-liner: after any code change, `./scripts/reload.sh --tag <your-branch-sl
 
 ## Pitfalls
 
+- **`dlog` is DEBUG-only.** It's bonsplit's `DebugEventLog` free function, defined inside `#if DEBUG`. Every call site must be `#if DEBUG`-gated or the Release configuration fails to compile — and CI's `build` job compiles Debug, so an ungated `dlog` sails through PR CI and only breaks at release-staging time (v0.51.0 staging caught four of these from PR #95). Gate the logging, not the surrounding logic.
 - **Custom UTTypes** for drag-and-drop must be declared in `Resources/Info.plist` under `UTExportedTypeDeclarations` (e.g. `com.stage11.c11.tabtransfer`, `com.stage11.c11.sidebar-tab-reorder`).
 - Do not add an app-level display link or manual `ghostty_surface_draw` loop; rely on Ghostty wakeups/renderer to avoid typing lag.
 - **Typing-latency-sensitive paths** (read carefully before touching these areas):

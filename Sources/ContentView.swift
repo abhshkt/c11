@@ -9859,22 +9859,12 @@ private struct SidebarFooter: View {
 
     var body: some View {
 #if DEBUG
-        VStack(alignment: .leading, spacing: 4) {
-            AIUsageFooterView()
-                .padding(.leading, 6)
-                .padding(.trailing, 10)
-            SidebarDevFooter(updateViewModel: updateViewModel, onSendFeedback: onSendFeedback)
-        }
+        SidebarDevFooter(updateViewModel: updateViewModel, onSendFeedback: onSendFeedback)
 #else
-        VStack(alignment: .leading, spacing: 4) {
-            AIUsageFooterView()
-                .padding(.leading, 6)
-                .padding(.trailing, 10)
-            SidebarFooterButtons(updateViewModel: updateViewModel, onSendFeedback: onSendFeedback)
-                .padding(.leading, 6)
-                .padding(.trailing, 10)
-                .padding(.bottom, 6)
-        }
+        SidebarFooterButtons(updateViewModel: updateViewModel, onSendFeedback: onSendFeedback)
+            .padding(.leading, 6)
+            .padding(.trailing, 10)
+            .padding(.bottom, 6)
 #endif
     }
 }
@@ -10888,7 +10878,7 @@ private struct WaitingAgentRow: View {
     private var isLit: Bool { display.isEnabled }
 
     private var label: String {
-        String(localized: "sidebar.waitingAgent.title", defaultValue: "Waiting Agent")
+        String(localized: "statusBar.nextNotification.title", defaultValue: "Next Notification")
     }
 
     private var shortcutText: String {
@@ -10896,15 +10886,29 @@ private struct WaitingAgentRow: View {
     }
 
     private var accessibilityLabel: String {
-        String(localized: "sidebar.waitingAgent.accessibility", defaultValue: "Jump to next waiting agent")
+        String(localized: "statusBar.jumpToUnread.accessibility", defaultValue: "Jump to next unread notification")
     }
 
     var body: some View {
         Button(action: onJump) {
-            HStack(spacing: 0) {
+            HStack(spacing: 6) {
                 Text(label)
                     .font(.system(size: 11, weight: .semibold))
                     .lineLimit(1)
+
+                if let badge = display.badgeText {
+                    Text(badge)
+                        .font(.system(size: 9, weight: .bold))
+                        .monospacedDigit()
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(BrandColors.blackSwiftUI.opacity(0.18))
+                        )
+                        .foregroundColor(BrandColors.blackSwiftUI)
+                        .accessibilityHidden(true)
+                }
 
                 Spacer(minLength: 4)
 
@@ -10921,14 +10925,12 @@ private struct WaitingAgentRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(isLit ? BrandColors.paperFillSwiftUI : BrandColors.surfaceSwiftUI)
+                    .fill(isLit ? cmuxAccentColor() : BrandColors.surfaceSwiftUI)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(
-                        isLit ? BrandColors.goldSwiftUI : BrandColors.ruleSwiftUI,
-                        lineWidth: isLit ? 0.75 : 1
-                    )
+                    .stroke(BrandColors.ruleSwiftUI, lineWidth: 1)
+                    .opacity(isLit ? 0 : 1)
             )
             .foregroundColor(isLit ? BrandColors.blackSwiftUI : BrandColors.whiteSwiftUI.opacity(0.4))
             .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -11637,30 +11639,22 @@ private struct TabItemView: View, Equatable {
         explicitRailColor != nil
     }
 
+    // The selected workspace is conveyed by one consistent signal in every
+    // indicator style: a thick white outline. Custom-colored workspaces keep
+    // their color as a rail (.leftRail) or fill (.solidFill) for identity, but
+    // selection itself is always the white outline.
     private var activeBorderLineWidth: CGFloat {
-        switch activeTabIndicatorStyle {
-        case .leftRail:
-            return 0
-        case .solidFill:
-            guard isActive else { return 0 }
-            return hasActiveCustomColorFill ? 1.5 : 1.0
-        }
+        isActive ? 2.5 : 0
     }
 
     private var activeBorderColor: Color {
-        guard isActive else { return .clear }
-        switch activeTabIndicatorStyle {
-        case .leftRail:
-            return .clear
-        case .solidFill:
-            return hasActiveCustomColorFill ? BrandColors.blackSwiftUI : BrandColors.goldSwiftUI
-        }
+        isActive ? BrandColors.whiteSwiftUI : .clear
     }
 
     // When a workspace has a custom color and is selected in .solidFill mode,
     // the fill stays the workspace color (subconsciously reinforcing which
-    // workspace you're in) and emphasis comes from a black outline instead of
-    // swapping the fill to black.
+    // workspace you're in) and emphasis comes from the white outline above
+    // instead of swapping the fill to black.
     private var hasActiveCustomColorFill: Bool {
         isActive && activeTabIndicatorStyle == .solidFill && resolvedCustomTabColor != nil
     }
@@ -12472,11 +12466,11 @@ private struct TabItemView: View, Equatable {
 
     private var explicitRailColor: Color? {
         guard activeTabIndicatorStyle == .leftRail else { return nil }
+        // The custom color shows as a rail for identity (whether selected or
+        // not). Selection itself is the white outline (see activeBorderColor),
+        // so there is no gold selection rail for uncolored workspaces.
         if let custom = resolvedCustomTabColor {
             return custom.opacity(0.95)
-        }
-        if isActive {
-            return BrandColors.goldSwiftUI
         }
         return nil
     }
