@@ -122,10 +122,14 @@ enum AgentChipResolver {
             return "AgentIcons/claude-code"
         case "codex":
             return "AgentIcons/codex"
+        case "grok":
+            return "AgentIcons/grok"
         case "kimi":
             return "AgentIcons/kimi"
         case "opencode":
             return "AgentIcons/opencode"
+        case "github-copilot":
+            return "AgentIcons/github-copilot"
         case "shell":
             return "AgentIcons/shell"
         case "unknown":
@@ -139,13 +143,15 @@ enum AgentChipResolver {
     /// is missing at runtime.
     static func sfSymbolFallback(forTerminalType terminalType: String) -> String {
         switch terminalType {
-        case "claude-code":  return "sparkles"
-        case "codex":        return "chevron.left.forwardslash.chevron.right"
-        case "kimi":         return "moon.stars"
-        case "opencode":     return "curlybraces"
-        case "shell":        return "terminal.fill"
-        case "unknown":      return "questionmark.square.dashed"
-        default:             return "questionmark.square.dashed"
+        case "claude-code":    return "sparkles"
+        case "codex":          return "chevron.left.forwardslash.chevron.right"
+        case "grok":           return "bolt.fill"
+        case "kimi":           return "moon.stars"
+        case "opencode":       return "curlybraces"
+        case "github-copilot": return "paperplane.fill"
+        case "shell":          return "terminal.fill"
+        case "unknown":        return "questionmark.square.dashed"
+        default:               return "questionmark.square.dashed"
         }
     }
 }

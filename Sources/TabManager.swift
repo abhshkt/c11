@@ -891,9 +891,7 @@ class TabManager: ObservableObject {
         }
         didSet {
             guard selectedTabId != oldValue else { return }
-            sentryBreadcrumb("workspace.switch", data: [
-                "tabCount": tabs.count
-            ])
+            sentryBreadcrumb("workspace.switch", data: surfaceShapeSummary(tabCount: tabs.count))
 
             // Phase 0 instrumentation: open a signpost interval spanning the
             // entire switch (didSet → queued async block) so Instruments.app
@@ -1358,7 +1356,7 @@ class TabManager: ObservableObject {
         let snapshot = workspaceCreationSnapshot()
         let nextTabCount = snapshot.tabs.count + 1
         let defaultTitle = Self.defaultWorkspaceTitle(number: nextTabCount)
-        sentryBreadcrumb("workspace.create", data: ["tabCount": nextTabCount])
+        sentryBreadcrumb("workspace.create", data: surfaceShapeSummary(tabCount: nextTabCount))
         let explicitWorkingDirectory = normalizedWorkingDirectory(overrideWorkingDirectory)
         let workingDirectory = explicitWorkingDirectory ?? preferredWorkingDirectoryForNewTab(snapshot: snapshot)
         let inheritedConfig = inheritedTerminalConfigForNewWorkspace(snapshot: snapshot)
@@ -2465,9 +2463,31 @@ class TabManager: ObservableObject {
         return trimmed
     }
 
+    /// C11-134: global per-type surface counts across all workspaces, merged
+    /// into lifecycle breadcrumbs so Sentry hang reports carry workspace
+    /// shape. Counts only — never titles or URLs.
+    private func surfaceShapeSummary(tabCount: Int) -> [String: Any] {
+        var counts = SurfaceShapeCounts()
+        for workspace in tabs {
+            for panel in workspace.panels.values {
+                switch panel.panelType {
+                case .terminal: counts.terminals += 1
+                case .browser: counts.browsers += 1
+                case .markdown: counts.markdown += 1
+                }
+            }
+        }
+        return [
+            "tabCount": tabCount,
+            "terminals": counts.terminals,
+            "browsers": counts.browsers,
+            "markdown": counts.markdown,
+        ]
+    }
+
     func closeWorkspace(_ workspace: Workspace) {
         guard tabs.count > 1 else { return }
-        sentryBreadcrumb("workspace.close", data: ["tabCount": tabs.count - 1])
+        sentryBreadcrumb("workspace.close", data: surfaceShapeSummary(tabCount: tabs.count - 1))
         clearWorkspaceGitProbes(workspaceId: workspace.id)
         sidebarSelectedWorkspaceIds.remove(workspace.id)
 
@@ -3695,7 +3715,9 @@ class TabManager: ObservableObject {
         guard let tab = tabs.first(where: { $0.id == tabId }),
               tab.panels[surfaceId] != nil else { return nil }
         tab.clearSplitZoom()
-        sentryBreadcrumb("split.create", data: ["direction": String(describing: direction)])
+        var splitCrumbData = surfaceShapeSummary(tabCount: tabs.count)
+        splitCrumbData["direction"] = String(describing: direction)
+        sentryBreadcrumb("split.create", data: splitCrumbData)
         return newSplit(tabId: tabId, surfaceId: surfaceId, direction: direction, focus: focus)
     }
 

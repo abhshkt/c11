@@ -210,6 +210,12 @@ The wrappers at `Resources/bin/claude` and `Resources/bin/codex` are PATH-scoped
 - **Wrapper on PATH.** Inside a c11 surface, `codex` resolves to `Resources/bin/codex`, a PATH-scoped wrapper that marks the surface as Codex, launches with a reviewed c11-owned `--profile-v2 c11` hook layer, injects c11 completion notifications, marks c11-launched initial prompts as `Running`, pins/restores the pane project dir with `--cd`, and captures `codex.session_id` when a trusted hook payload, explicit `codex resume <id>`, or guarded one-candidate state lookup provides one. It does not mutate `~/.codex` or bypass Codex hook trust.
 - **Self-reporting still helps.** Codex can now notify completion through the wrapper, and trusted hooks provide richer lifecycle status. For long orchestrations, explicit `c11 set-status` / `c11 set-metadata` calls are still useful when you want highly specific task/progress wording.
 
+### grok
+
+- **Use `grok --always-approve`.** Grok Build's auto-approve flag (parallel to claude's `--dangerously-skip-permissions` and codex's `--yolo`). TUI alias is `/yolo`. Headless mode is `grok agent` or `grok -p`; do not use either for a visible c11 surface.
+- **Auth gotcha.** OIDC-acquired tokens (`grok login` browser flow) currently 403 at the chat endpoint for non-Heavy SuperGrok tiers. Use an `XAI_API_KEY` from console.x.ai instead; it bypasses the Heavy-only gate.
+- **No PATH wrapper.** Status comes from skill-driven self-reporting, same as codex/opencode/kimi.
+
 ### opencode, kimi, others
 
 - **No PATH wrapper.** Status comes from skill-driven self-reporting. If an agent hasn't been taught to self-report, the sidebar won't show status for it; that is expected, not a bug.

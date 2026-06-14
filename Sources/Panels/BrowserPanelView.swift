@@ -587,6 +587,11 @@ struct BrowserPanelView: View {
             omnibarPillFrame = frame
         }
         .onPreferenceChange(BrowserAddressBarHeightPreferenceKey.self) { height in
+            // Epsilon-guarded: an unguarded @State write re-renders the panel subtree
+            // (and re-runs WebViewRepresentable.updateNSView's portal updates) on every
+            // preference emission, even when the height is unchanged. Sub-half-point
+            // jitter carries no layout meaning for the address bar.
+            guard abs(addressBarHeight - height) > 0.5 else { return }
             addressBarHeight = height
         }
         .onReceive(webViewClickPublisher) { _ in

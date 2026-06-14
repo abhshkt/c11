@@ -6,15 +6,19 @@ import CryptoKit
 enum SkillInstallerTarget: String, CaseIterable {
     case claude
     case codex
+    case grok
     case kimi
     case opencode
+    case copilot
 
     var displayName: String {
         switch self {
         case .claude: return "Claude Code"
         case .codex: return "Codex"
+        case .grok: return "Grok Build"
         case .kimi: return "Kimi"
         case .opencode: return "OpenCode"
+        case .copilot: return "GitHub Copilot"
         }
     }
 

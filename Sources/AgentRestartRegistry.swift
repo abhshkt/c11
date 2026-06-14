@@ -84,7 +84,7 @@ struct AgentRestartRegistry: Sendable {
         }
     }
 
-    /// Phase 1 ships claude resume. Phase 5 added codex / opencode / kimi rows.
+    /// Phase 1 ships claude resume. Phase 5 added codex / grok / opencode / kimi rows.
     ///
     /// The claude closure re-validates `sessionId` against the UUIDv4 grammar
     /// even though `SurfaceMetadataStore` already rejects non-UUID writes for
@@ -122,8 +122,9 @@ struct AgentRestartRegistry: Sendable {
     /// store provenance fail closed rather than guessing with `--last` or the
     /// managed overlay. Like Claude, a malformed project_dir hint is dropped
     /// while the valid session id is still resumed.
-    /// Opencode and kimi have no verified resume flag and launch fresh —
-    /// best-effort is preferable to a broken flag.
+    /// Grok supports `--resume` without an id to attach to the most recent
+    /// session. Opencode and kimi have no verified resume flag and launch
+    /// fresh — best-effort is preferable to a broken flag.
     static let phase1: AgentRestartRegistry = .init(name: "phase1", rows: [
         Row(terminalType: "claude-code") { sessionId, metadata in
             guard let raw = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -206,6 +207,11 @@ struct AgentRestartRegistry: Sendable {
                 return "cd \(shellSingleQuote(rawDir)) 2>/dev/null || true; \(resume)\n"
             }
             return "\(resume)\n"
+        },
+        Row(terminalType: "grok") { _, _ in
+            // grok --resume (no id) attaches to the most recent session.
+            // Best-effort: may not match the exact session in the snapshot.
+            "grok --always-approve --resume\n"
         },
         Row(terminalType: "opencode") { _, _ in
             // no stable resume flag known; launches fresh.

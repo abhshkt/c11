@@ -5205,6 +5205,13 @@ struct ClosedBrowserPanelRestoreSnapshot {
     let fallbackAnchorPaneId: UUID?
 }
 
+/// C11-134: per-type surface counts carried by `surface.shape` breadcrumbs.
+struct SurfaceShapeCounts: Equatable {
+    var terminals = 0
+    var browsers = 0
+    var markdown = 0
+}
+
 /// Workspace represents a sidebar tab.
 /// Each workspace contains one BonsplitController that manages split panes and nested surfaces.
 @MainActor
@@ -5898,6 +5905,35 @@ final class Workspace: Identifiable, ObservableObject {
             }
             bonsplitController.selectTab(initialTabId)
         }
+
+        // C11-134: breadcrumb this workspace's surface shape (per-type panel
+        // counts) whenever it changes, so Sentry hang reports can answer "how
+        // many browser surfaces were open?". Counts only — never titles or
+        // URLs. removeDuplicates keeps it to genuine state changes; debounce
+        // coalesces bulk transitions like session restore.
+        surfaceShapeBreadcrumbCancellable = $panels
+            .map { panels -> SurfaceShapeCounts in
+                var counts = SurfaceShapeCounts()
+                for panel in panels.values {
+                    switch panel.panelType {
+                    case .terminal: counts.terminals += 1
+                    case .browser: counts.browsers += 1
+                    case .markdown: counts.markdown += 1
+                    }
+                }
+                return counts
+            }
+            .removeDuplicates()
+            .debounce(for: .milliseconds(500), scheduler: DispatchQueue.main)
+            .sink { [weak self] counts in
+                guard let self else { return }
+                sentryBreadcrumb("surface.shape", category: "shape", data: [
+                    "workspace": String(self.id.uuidString.prefix(8)),
+                    "terminals": counts.terminals,
+                    "browsers": counts.browsers,
+                    "markdown": counts.markdown,
+                ])
+            }
     }
 
     deinit {
@@ -6038,6 +6074,7 @@ final class Workspace: Identifiable, ObservableObject {
 #endif
     private var layoutFollowUpObservers: [NSObjectProtocol] = []
     private var layoutFollowUpPanelsCancellable: AnyCancellable?
+    private var surfaceShapeBreadcrumbCancellable: AnyCancellable?
     private var layoutFollowUpTimeoutWorkItem: DispatchWorkItem?
     private var layoutFollowUpReason: String?
     private var layoutFollowUpTerminalFocusPanelId: UUID?

@@ -569,8 +569,10 @@ struct AgentSkillsOnboardingSheet: View {
 
     @State private var claudeOptIn: Bool = false
     @State private var codexOptIn: Bool = false
+    @State private var grokOptIn: Bool = false
     @State private var kimiOptIn: Bool = false
     @State private var opencodeOptIn: Bool = false
+    @State private var copilotOptIn: Bool = false
     @State private var initializedDefaultOptIns: Bool = false
     @State private var selectedAction: AgentSkillsOnboardingAction = .install
 
@@ -615,7 +617,7 @@ struct AgentSkillsOnboardingSheet: View {
     }
 
     private var anySelected: Bool {
-        initializedDefaultOptIns && (claudeOptIn || codexOptIn || kimiOptIn || opencodeOptIn)
+        initializedDefaultOptIns && (claudeOptIn || codexOptIn || grokOptIn || kimiOptIn || opencodeOptIn || copilotOptIn)
     }
 
     private var hasActionNeeded: Bool {
@@ -917,8 +919,10 @@ struct AgentSkillsOnboardingSheet: View {
         switch target {
         case .claude: return $claudeOptIn
         case .codex: return $codexOptIn
+        case .grok: return $grokOptIn
         case .kimi: return $kimiOptIn
         case .opencode: return $opencodeOptIn
+        case .copilot: return $copilotOptIn
         }
     }
 
@@ -926,8 +930,10 @@ struct AgentSkillsOnboardingSheet: View {
         let selections: [(SkillInstallerTarget, Bool)] = [
             (.claude, claudeOptIn),
             (.codex, codexOptIn),
+            (.grok, grokOptIn),
             (.kimi, kimiOptIn),
             (.opencode, opencodeOptIn),
+            (.copilot, copilotOptIn),
         ]
         var selectedKeys: Set<String> = []
         for (target, _) in selections.filter({ $0.1 }) {
@@ -994,8 +1000,10 @@ struct AgentSkillsOnboardingSheet: View {
         let defaults = AgentSkillsOnboarding.defaultOptIns(for: rows)
         claudeOptIn = defaults[.claude] ?? false
         codexOptIn = defaults[.codex] ?? false
+        grokOptIn = defaults[.grok] ?? false
         kimiOptIn = defaults[.kimi] ?? false
         opencodeOptIn = defaults[.opencode] ?? false
+        copilotOptIn = defaults[.copilot] ?? false
     }
 }
 

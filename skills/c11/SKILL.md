@@ -115,7 +115,7 @@ c11 set-agent --task lat-412                                        # partial wr
 c11 set-agent --type <your-terminal-type> --model <your-model>      # explicit override when env vars are empty/wrong
 ```
 
-Common types: `claude-code`, `codex`, `kimi`, `opencode`. Any kebab-case string is accepted. Inside Claude Code, `claude.session_id` is populated automatically by the wrapper. Inside Codex, the wrapper starts interactive sessions with a c11-owned `--profile-v2 c11` hook layer under c11 Application Support; after Codex's hook-review UI trusts those commands, `codex.session_id` is populated from `SessionStart` hook payloads. c11 also captures explicit `codex resume <id>` invocations, or a guarded local-state lookup that prefers the effective project dir (`--cd` when supplied, otherwise the launch cwd) and otherwise accepts only one fresh global Codex session after a short delay. The Codex wrapper clears stale notifications and marks Codex `Running` when the invocation includes an initial command-line prompt; plain `codex` sessions wait for trusted hooks, the wrapper's notification bridge, or self-reporting. Codex hook payloads with a different `cwd` than the wrapper's effective project dir are ignored so nested/background Codex work does not overwrite the pane. The generated Codex profile intentionally avoids per-turn/tool hooks (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`) because Codex renders hook execution inline in the terminal; the wrapper-injected `notify` bridge owns normal completion notifications and idle updates.
+Common types: `claude-code`, `codex`, `grok`, `kimi`, `opencode`. Any kebab-case string is accepted. Inside Claude Code, `claude.session_id` is populated automatically by the wrapper. Inside Codex, the wrapper starts interactive sessions with a c11-owned `--profile-v2 c11` hook layer under c11 Application Support; after Codex's hook-review UI trusts those commands, `codex.session_id` is populated from `SessionStart` hook payloads. c11 also captures explicit `codex resume <id>` invocations, or a guarded local-state lookup that prefers the effective project dir (`--cd` when supplied, otherwise the launch cwd) and otherwise accepts only one fresh global Codex session after a short delay. The Codex wrapper clears stale notifications and marks Codex `Running` when the invocation includes an initial command-line prompt; plain `codex` sessions wait for trusted hooks, the wrapper's notification bridge, or self-reporting. Codex hook payloads with a different `cwd` than the wrapper's effective project dir are ignored so nested/background Codex work does not overwrite the pane. The generated Codex profile intentionally avoids per-turn/tool hooks (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`) because Codex renders hook execution inline in the terminal; the wrapper-injected `notify` bridge owns normal completion notifications and idle updates.
 
 ## Targeting
 
@@ -405,7 +405,7 @@ Treat `flash_state` as a forward-compatible enum — future c11 versions may add
 
 When you spawn a sub-agent, give it its own c11 surface (`c11 new-split` or `c11 new-pane`) and launch the agent inside that surface. The operator gets full observability through c11 (sidebar status, title and description, screen content), and the sub-agent runs as a full-fledged interactive instance instead of a headless detached process.
 
-**Use `c11 default-agent launch --in-surface <ref>` to do the launch.** It is the canonical programmatic path: c11 owns the per-TUI prompt-delivery contract (claude-code positional, post-ready sendText for codex/opencode/kimi), so the same call works regardless of which agent the operator has configured. No shell interpolation, no per-TUI branching in caller code.
+**Use `c11 default-agent launch --in-surface <ref>` to do the launch.** It is the canonical programmatic path: c11 owns the per-TUI prompt-delivery contract (claude-code positional, post-ready sendText for codex/grok/opencode/kimi), so the same call works regardless of which agent the operator has configured. No shell interpolation, no per-TUI branching in caller code.
 
 ```bash
 cat > /tmp/lat-xxx-prompt.md <<'EOF'
@@ -616,6 +616,35 @@ c11 restore 01KQ0XYZ…
 Conversation resume is on by default in 0.44.0+. The legacy `C11_SESSION_RESUME=1` opt-in and the standalone `AgentRestartRegistry` path remain in tree as the kill-switch fallback (`CMUX_DISABLE_CONVERSATION_STORE=1`); both are scheduled for removal in 0.46.0/v1.1. See the **Conversation primitives** section below for the live behaviour.
 
 The snapshot wraps a `WorkspaceApplyPlan`; the same shape Blueprints and the debug `c11 workspace apply` use. Explicit `SurfaceSpec.command` always wins over any registry synthesis — the registry only fires when a terminal surface has no command and its metadata declares a known `terminal_type`.
+
+### Whole-app state: save, verify, restart
+
+Beyond per-workspace snapshots, c11 exposes operator-grade verbs for the entire app's session (every window, workspace, pane) plus its conversation-resume state.
+
+```bash
+# Checkpoint the full app session to disk right now, synchronously, while
+# c11 keeps running. Prints the snapshot path + counts.
+c11 state save                       # no scrollback (fast)
+c11 state save --scrollback          # include scrollback buffers
+c11 state save --out /tmp/snap.json  # also write a copy (archival / fixtures)
+
+# Read-only dry run of the resume decision. Per terminal panel: kind, session
+# id, persisted state, whether the transcript is on disk, and the exact resume
+# action. Exits 0 iff every panel with a conversation would resume. Needs NO
+# running app — point it at any snapshot, or omit the path for the live one.
+c11 state verify
+c11 state verify /tmp/snap.json --json
+
+# "c11 is laggy — give me a clean restart." Clean-shutdown choreography
+# (suspend conversations → final snapshot → mark clean) then relaunch; layout
+# and every Claude conversation come back via the normal restore path.
+c11 app restart
+c11 app restart --no-resume          # restore layout, but type nothing into panes
+```
+
+`state save` is cheap insurance an agent (or a cron, or you) can fire anytime. `state verify` makes the resume pipeline observable — reach for it to answer "why didn't pane X resume?" after a crash. `app restart` is the one-command fix for a sluggish instance and exercises exactly the clean-shutdown path, so heavy use continuously validates persistence.
+
+**Crash resume.** After an unclean exit (kill, panic, power loss) c11 relaunches, restores layout, and verifies each Claude conversation against the transcript it keeps at `~/.claude/projects/<cwd-slug>/<id>.jsonl` (stat only — bytes are never read). A verified transcript resumes in place; a missing one is skipped with a clear diagnostic. Sessions you ended with `/exit` are never auto-resumed.
 
 ## Conversation primitives
 

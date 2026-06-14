@@ -1163,6 +1163,13 @@ final class WindowTerminalPortal: NSObject {
                 "frame=\(portalLogFrame(entry.hostedView?.frame ?? .zero)) " +
                 "entryCount=\(entriesByHostedId.count)"
             )
+            // C11-134: orphaned portal entries signal teardown/remount churn —
+            // the shape we need visible in Sentry hang reports.
+            sentryBreadcrumb("portal.orphan.hide", category: "portal", data: [
+                "layer": "terminal",
+                "anchor": anchorWindowDesc,
+                "entryCount": entriesByHostedId.count,
+            ])
         }
         return didHide
     }
