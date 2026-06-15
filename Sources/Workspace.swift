@@ -795,7 +795,8 @@ extension Workspace {
             markdownSnapshot = SessionMarkdownPanelSnapshot(
                 filePath: markdownPanel.filePath,
                 editMode: markdownPanel.editMode,
-                markdownFontSize: Double(markdownPanel.markdownFontSize)
+                markdownFontSize: Double(markdownPanel.markdownFontSize),
+                fontScale: markdownPanel.fontScale
             )
         }
 
@@ -1046,6 +1047,9 @@ extension Workspace {
             if let persistedFontSize = snapshot.markdown?.markdownFontSize,
                persistedFontSize.isFinite {
                 _ = markdownPanel.setMarkdownFontSize(CGFloat(persistedFontSize))
+            } else if let restoredScale = snapshot.markdown?.fontScale,
+                      restoredScale.isFinite {
+                markdownPanel.applyRestoredFontScale(restoredScale)
             }
             applySessionPanelMetadata(snapshot, toPanelId: markdownPanel.id)
             return markdownPanel.id

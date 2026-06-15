@@ -297,16 +297,22 @@ struct SessionMarkdownPanelSnapshot: Codable, Sendable {
     /// MarkdownPanel.setMarkdownFontSize clamps to the valid range on restore.
     var markdownFontSize: Double?
 
+    /// Upstream font-scale multiplier. Optional for compatibility with
+    /// Stage-11 snapshots that predate fork-local point-size persistence.
+    var fontScale: Double?
+
     private enum CodingKeys: String, CodingKey {
         case filePath
         case editMode
         case markdownFontSize
+        case fontScale
     }
 
-    init(filePath: String?, editMode: Bool?, markdownFontSize: Double?) {
+    init(filePath: String?, editMode: Bool?, markdownFontSize: Double?, fontScale: Double? = nil) {
         self.filePath = filePath
         self.editMode = editMode
         self.markdownFontSize = markdownFontSize
+        self.fontScale = fontScale
     }
 
     init(from decoder: Decoder) throws {
@@ -318,6 +324,7 @@ struct SessionMarkdownPanelSnapshot: Codable, Sendable {
         // SessionPersistenceStore.load — a wrong type resolves to nil and the
         // panel restores at the default size instead of dropping every surface.
         self.markdownFontSize = try? container.decodeIfPresent(Double.self, forKey: .markdownFontSize)
+        self.fontScale = try? container.decodeIfPresent(Double.self, forKey: .fontScale)
     }
 }
 
