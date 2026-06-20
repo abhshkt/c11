@@ -471,13 +471,41 @@ the sub-agent's PR transitively requires another open PR to land first.
 
 ## Inter-agent messaging (mailbox)
 
-**c11 ships a per-workspace mailbox primitive.** Any agent in a surface can write an envelope to `_outbox/`; the c11-in-process dispatcher validates, resolves the recipient by surface name, copies into the recipient's inbox, and — for stdin-delivery recipients — writes a framed `<c11-msg>` block into the PTY.
+**c11 ships a mailbox primitive that routes across all workspaces.** Any agent in a surface can `c11 mailbox send --to <name>`; c11 resolves the recipient across every workspace in the instance, delivers into the recipient's inbox, and — for stdin-delivery recipients — writes a framed `<c11-msg>` block into the PTY. A recipient that matches no live surface is **rejected with a non-zero exit**, never silently dropped.
 
 This section is the agent-facing quick-reference. The full guide (filesystem layout, sequence diagrams, schema reference, dispatch log shape, patterns, anti-patterns, Stage 2 limits) lives in [`docs/c11-mailbox-guide.md`](../../docs/c11-mailbox-guide.md).
 
+### Stable addressing — declare a `mailbox.address` once at orientation
+
+A `--to` value resolves with precedence **address → role → title**:
+
+1. `mailbox.address` — a stable handle the surface declares for itself.
+2. `mailbox.role` — an opt-in role handle (e.g. `delegator`, `orchestrator`).
+3. `title` — the display name; the fallback so a bare-name send keeps working.
+
+The title is **mutable** — the c11 orientation rule has you rename your tab as your first action, and operators rename tabs freely. If peers address you by title, every rename silently re-partitions the bus. So **declare a stable `mailbox.address` at orientation, before anyone needs to reach you**, and tell peers to send to that — it survives every later tab-rename:
+
+```bash
+# At orientation, once. Use a value that won't collide — your ULID, your
+# ticket id, or a role-scoped handle.
+c11 set-metadata --surface "$C11_SURFACE_ID" --key mailbox.address --value "delegator-c11-143" --type string
+# Optional: also claim a role so peers can reach you by function.
+c11 set-metadata --surface "$C11_SURFACE_ID" --key mailbox.role --value "delegator" --type string
+```
+
+Address a peer by its stable handle with the qualifier forms (which match **only** that key, never the title):
+
+```bash
+c11 mailbox send --to surface:delegator-c11-143 --body "PR open at #259"   # → mailbox.address
+c11 mailbox send --to role:orchestrator --body "blocked on a decision"     # → mailbox.role
+c11 mailbox send --to watcher --body "build green"                         # bare: address→role→title
+```
+
+Role addressing is opt-in: a surface is reachable by `role:<name>` only if it set `mailbox.role` (the canonical `role` key is not consulted, so bare-name sends to title-only surfaces are unchanged). Nothing breaks for surfaces that only set a title — they remain addressable by name exactly as before.
+
 ### The framed block you'll see in your PTY
 
-When another surface sends you a message and your surface's `mailbox.delivery` contains `stdin`, a block like this appears between prompts:
+When another surface sends you a message and your surface's `mailbox.delivery` contains `stdin`, a block like this appears **at a shell prompt** (delivery is prompt-gated — see below):
 
 ```
 <c11-msg from="builder" id="01K3A2B7X8PQRTVWYZ0123456J" ts="2026-04-23T10:15:42Z" to="watcher">
@@ -508,9 +536,11 @@ c11 mailbox send --to watcher --topic ci.status --urgent --body "CI red" \
 
 Auto-fills `version`, `id`, `ts`, `from` (resolved via the caller's surface title). Prints the envelope id on success.
 
+**Cross-workspace + collisions.** `--to` resolves across all workspaces, local-first: a match in your own workspace wins; otherwise the one workspace that has the name receives it. If the name exists in **more than one** other workspace the send fails *ambiguous* — disambiguate with `--to-workspace <ref>` (a workspace UUID or `workspace:*`). No match anywhere → non-zero *unresolved* exit, message not sent.
+
 **Stage 2 requires `--to`.** Topic-only sends (`--topic` with no `--to`) are rejected with a non-zero exit — topic subscribe/fan-out ships in Stage 3. Until then, always pair `--topic` with an explicit `--to <surface-name>`.
 
-**Raw file write (any process, any language):**
+**Raw file write (any process, any language)** — note this reaches only recipients in *your own* workspace (it bypasses global resolution); use the CLI to cross workspaces:
 
 ```bash
 OUTBOX=$(c11 mailbox outbox-dir)
@@ -526,13 +556,23 @@ See [`Resources/bin/c11-mailbox-send-bash-example.sh`](../../Resources/bin/c11-m
 
 ### Receiving
 
-- **If your `mailbox.delivery` includes `stdin`:** the framed block arrives in your PTY automatically. No poll, no sync.
-- **Otherwise:** drain the inbox explicitly.
+**Pull at every turn boundary — this is the robust floor.** Regardless of your delivery mode, run `c11 mailbox recv --drain` at the top of each turn (or every few turns in a long autonomous loop). The filesystem inbox is the durable queue; `stdin` push is only a best-effort doorbell layered on top. Pulling is the one delivery path that always works — it does not depend on your shell being idle, on push being enabled, or on shell-integration reporting your state.
 
 ```bash
-c11 mailbox recv --drain    # list + print + unlink (default)
+c11 mailbox recv --drain    # list + print + unlink (default) — run at turn boundaries
 c11 mailbox recv --peek     # list + print only
 ```
+
+- **If your `mailbox.delivery` includes `stdin`:** a framed block *also* appears in your PTY, but **only when you're at a shell prompt** (delivery is prompt-gated, below). While you're running a command or a live agent owns the terminal, pushes are buffered, not injected — so the pull cadence above is what actually delivers them in time.
+- **Otherwise:** the pull cadence is your only delivery path; do not skip it.
+
+#### Prompt-gated delivery (why push can lag)
+
+c11 will not paste a `<c11-msg>` block into a PTY that has a foreground command running — doing so would corrupt that command's input (a build, `vim`, a REPL, or another agent's raw-mode stdin). It gates on the recipient surface's shell activity:
+
+- **At a shell prompt (`promptIdle`)** → the block is injected immediately.
+- **A command is running (`commandRunning`) or state is `unknown`** → the block is **buffered** and flushed when the surface next returns to its prompt. A buffered message is still delivered and logged (`c11 mailbox trace <id>` shows `buffered` → `flushed`), never silently dropped.
+- A long-lived agent TUI keeps its shell in `commandRunning` for its whole life, so push into a busy agent may never flush before it goes stale. **That is exactly why you pull** — `recv --drain` reads the inbox copy that was written before any push was attempted.
 
 **Opting in to stdin delivery.** Stdin delivery is per-recipient and off by default. Set `mailbox.delivery` on the surface that should auto-receive — it is a **comma-separated string** (not a JSON array), and the only handlers registered today are `stdin` and `silent`:
 
@@ -547,7 +587,7 @@ Writing the value as JSON (e.g. `--type json --value '["stdin"]'`) is the canoni
 ### Debugging
 
 ```bash
-c11 mailbox trace 01K3A2B7X8PQRTVWYZ0123456J   # pretty-print dispatch events for one id
+c11 mailbox trace 01K3A2B7X8PQRTVWYZ0123456J   # dispatch events for one id, across all workspaces (a cross-workspace send logs in the recipient's workspace)
 c11 mailbox tail                                # follow _dispatch.log as it grows
 c11 mailbox outbox-dir                          # absolute path of your outbox
 c11 mailbox inbox-dir                           # absolute path of your inbox

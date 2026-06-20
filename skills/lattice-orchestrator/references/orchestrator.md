@@ -282,6 +282,17 @@ No interval → dynamic mode; the model self-paces by calling `ScheduleWakeup` a
 
 Three failure modes recur and have proven recovery procedures. Detection is mostly the same — a delegator's cost counter frozen across 2+ orchestrator ticks (≥9 min) is the canonical tell. Deep-read the screen to confirm one of these patterns, then apply the matching recovery. **Never trust `c11 send-key enter` alone** — Claude Code's TUI sometimes swallows synthetic Return; always pair it with a fresh `c11 send "<message>"` immediately before.
 
+### Before you treat a frozen cost counter as a stall: diagnose
+
+A frozen cost counter is the canonical stall tell — but it is *also* exactly what a delegator legitimately blocked on a long-running shell looks like (a multi-minute test suite, a model-driven build, a compile over a real corpus). Nudging a working delegator interrupts real work.
+
+So when cost is frozen but the screen shows `✻ <verb>` + a `N shell(s) still running` footer (or a visible long-running command), **confirm it's actually dead before intervening:**
+
+- `pgrep -fl "<worktree-slug>.*pytest"` (or the relevant command) — a live PID means it's working; leave it.
+- For output buffered behind `| tail` / `| grep`, read the task's `.output` file or a `tee`'d log directly to see real progress.
+
+Only nudge when the diagnosis shows the work is genuinely done (PID gone, log shows completion) but the delegator is idle/sleeping, OR there's an unsubmitted input buffer with no running shell. The "frozen cost + live shell = background-watching, not a stall" distinction prevented every false recovery on the Substrate wiki run (it fired ~6 times; each was a live ~22-min suite). The slow suite is the deeper fix — see SKILL.md "Build for fast feedback."
+
 ### Pattern: frozen cost across ≥2 ticks
 
 Symptoms: cost counter unchanged across ticks; api time unchanged; "Cooked for X" or "Baked for X" indicator with no monitor; input box may contain unsubmitted text like "check on the impl agent" or "check on the planner".
@@ -526,7 +537,7 @@ Sub-agent boilerplate is at the bottom of references/orchestrator.md — bake it
 
 Lattice writes: every \`lattice\` call runs through the PARENT repo, not the worktree. Use \`(cd <REPO_ROOT> && lattice ...)\`. Two exceptions that run from the worktree (because their output rides the feature branch): \`lattice branch-link\` (before scaffold commit) and \`lattice code-review\` (with explicit \`--base origin/main\`, NEVER bare \`main\` — they look identical but post-merge \`main\` and \`origin/main\` may differ, producing an empty diff).
 
-**\`lattice\` from a worktree: the find_root footgun.** LAT-219 added auto-detection so most \`lattice\` calls route correctly from a worktree — but **\`lattice code-review\` still has worktree↔root bridge bugs that even \`LATTICE_ROOT=$PWD\` doesn't always fix.** Set \`export LATTICE_ROOT=$PWD\` at session start as the cheap mitigation; when it fails anyway (empty diff, vacuous artifact), fall back to the **own-reviewer-tab pattern** documented later in this file. Every Wave 2 delegator on the EC v1.2.1 run hit this — the fallback is the documented standard, not an exception.
+**\`lattice\` from a worktree: the find_root footgun.** LAT-219 added auto-detection so most \`lattice\` calls route correctly from a worktree — but **\`lattice code-review\` still has worktree↔root bridge bugs that even a correct \`LATTICE_ROOT\` doesn't always fix.** Set \`export LATTICE_ROOT=<PRIMARY_CHECKOUT_ROOT>\` at session start as the cheap mitigation — the **primary checkout's root** (the directory that contains \`.lattice/\`), NOT \`$PWD\`. A worktree carries its own \`.lattice/\` checkout from its branch point, so \`LATTICE_ROOT=$PWD\` writes to that divergent board — which surfaces later as duplicate short IDs and unmapped tickets on the primary board. When code-review fails anyway (empty diff, vacuous artifact), fall back to the **own-reviewer-tab pattern** documented later in this file. Every Wave 2 delegator on the EC v1.2.1 run hit this — the fallback is the documented standard, not an exception.
 
 **HARD RULE — status discipline.** Bump Lattice status BEFORE each phase begins, not after. Only YOU bump status — sub-agents post completion comments and stop. Verify with \`lattice show <TICKET-ID> --json\` after each bump. The orchestrator's tick reads Lattice status to distinguish "actively working" from "idle/stalled" — a ticket sitting at \`planned\` while impl is mid-flight makes the board lie and triggers false recovery interventions. If you correct a premature bump (e.g., plan-review surfaces findings and you downgrade \`in_progress → planned\` to triage), **explicitly re-bump back to \`in_progress\` before re-launching impl** — easy to forget after a triage roundtrip. Status drift is the #1 silent-failure mode of well-meaning delegators.
 
@@ -649,7 +660,7 @@ If an operator explicitly asks for a new workspace (e.g., "spawn the review in i
 
 ## HARD RULE: `lattice code-review` 600-second timeout → own-reviewer fallback
 
-`lattice code-review --headless --base <remote>/main` invoked from a worktree fails reliably in ways `LATTICE_ROOT=$PWD` does not always fix — the CLI's worktree↔root bridge for code-review is more fragile than for plan-review (LAT-219 fixed plan-review; code-review still drifts). Symptom: empty-diff artifact, vacuous review, "no commits found", or — most commonly — the CLI polls indefinitely without ever producing the artifact. **Promoted to HARD RULE after the Overtone V1.1 build run (2026-05-23) hit this three times in one run (OVR-51 first cycle, OVR-39, OVR-52)**, exceeding the catalog's three-instance escalation threshold. Previously fired on EC v1.2.1 (every Wave-2 delegator) and Substrate Round 2.
+`lattice code-review --headless --base <remote>/main` invoked from a worktree fails reliably in ways even a correct `LATTICE_ROOT` (the primary checkout root, not `$PWD`) does not always fix — the CLI's worktree↔root bridge for code-review is more fragile than for plan-review (LAT-219 fixed plan-review; code-review still drifts). Symptom: empty-diff artifact, vacuous review, "no commits found", or — most commonly — the CLI polls indefinitely without ever producing the artifact. **Promoted to HARD RULE after the Overtone V1.1 build run (2026-05-23) hit this three times in one run (OVR-51 first cycle, OVR-39, OVR-52)**, exceeding the catalog's three-instance escalation threshold. Previously fired on EC v1.2.1 (every Wave-2 delegator) and Substrate Round 2.
 
 **The HARD RULE.** Every delegator (inline-full, sub-agent-full, and any captain or recovery agent that invokes `lattice code-review`) MUST:
 
@@ -916,6 +927,17 @@ Record every auto-merged PR in `agents.md` under an "Auto-merges" subsection so 
 **The take-both-additive-registrations conflict pattern** — when a rebase hits a conflict because both branches added entries to the same registration file (`__init__.py` re-exports, CLI subcommand registries, mock provider registries), the resolution is almost always "take both additions, preserve order by ticket id." Don't choose one side; merge the union. This was the documented pattern from the EC v1.2.1 + Holodeck v1 Phase 3 closeout audits.
 
 **Conflict modes that need operator surfacing**: real semantic conflicts (both branches modified the same function's body, both renamed the same symbol, etc.) get surfaced via `🛑 NEEDS YOUR INPUT — <TICKET> auto-merge conflict` rather than guessed-at. Auto-merge mode does NOT mean "merge through any conflict."
+
+### Merging a deep stacked tree: prefer one integration branch over N re-targets
+
+The per-PR rebase-and-merge above is right for a short stack landing incrementally as it's reviewed. For a **whole tree landing at once** at run-complete (a Merge Captain merging 8–12 stacked PRs together), assembling one integration branch is cleaner and safer:
+
+- **Cut `integration/<run>` off `main`, merge the feature branches into it in dependency order, validate the *assembled* tree once, then open a single `integration/<run> → main` PR.** One reviewed merge instead of N interleaved rebases.
+- **A stacked tree's leaf tips usually cover the whole set.** If C branched off B off A, merging C alone brings A+B+C. Identify the leaf tips, merge only those, then verify every expected file/feature is present (`ls` the modules, grep the registration lines, check the hard constraints).
+- **A squash-merged parent is NOT an ancestor of its children.** Once any PR squash-merges to `main`, `git merge-base --is-ancestor <child> main` returns false even though the content is there, and child PRs show phantom/duplicate diffs. Don't gate logic on ancestry after a squash; let the integration branch's 3-way merge resolve the duplicated content (identical changes auto-resolve; real conflicts resolve by the take-both-additive pattern — keep every ticket's work).
+- **Gate the merge on validating the assembled tree, not the individual PRs.** Per-ticket fixture tests can all pass while the integration breaks on the real dataset. (Substrate wiki run: GATE-1 caught a real output-truncation bug only visible compiling over the live corpus, fixed in the integration branch before the single merge to main.)
+
+When the tree lands this way, close the individual PRs with a "merged via integration/<run>" comment and mark each ticket `done`; record the integration merge SHA in `agents.md`.
 
 ## Orchestrator-as-captain (degraded mode, last resort)
 

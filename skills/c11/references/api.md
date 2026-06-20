@@ -251,18 +251,22 @@ c11 trigger-flash [--surface <id|ref>]     # Visual flash on a surface
 
 Also responds to standard terminal escape sequences: OSC 9, OSC 99, OSC 777.
 
-## Skill Management (`c11 skill`)
+## Skill + Plugin Management (`c11 skill`)
 
-`c11 skill` helps an operator inspect, install, update, or remove the bundled c11 skill files for supported agent tools. It does not install lifecycle shims into tenant configuration; agents should still self-report with `c11 set-agent` / metadata commands from inside their own session.
+`c11 skill` helps an operator inspect, install, update, or remove the bundled c11 skill files for supported agent tools. For OpenCode, it can also install the bundled notification/status plugin. It does not install lifecycle shims or edit tenant settings files; agents should still self-report with `c11 set-agent` / metadata commands from inside their own session.
 
 ```bash
-c11 skill path                       # Print the bundled skill source directory
-c11 skill status                     # Show supported targets and install state
-c11 skill install --tool claude-code # Install/update the c11 skill for one tool
+c11 skill path                         # Print the bundled skill source directory
+c11 skill status [--json]              # Show supported targets and install state
+c11 skill install --tool claude-code   # Install/update the c11 skill for one tool
+c11 skill install --tool opencode      # Install skill + OpenCode notification plugin
 c11 skill install --tool codex --dry-run
-c11 skill remove --tool claude-code  # Remove a c11-installed skill
+c11 skill remove --tool opencode       # Remove c11-installed OpenCode skill + plugin
 ```
 
+For OpenCode, the installer copies `c11-notify.js` into `~/.config/opencode/plugins/`. The plugin bridges `session.idle`, `permission.asked`, `session.error`, and `session.status` events into c11 notifications and sidebar status updates. OpenCode auto-loads plugins from that directory at startup; no `opencode.json` edit is required.
+
+> **Historical note:** `c11 install <tui>` (without the `skill` subcommand) is not a real command — it was aspirational in earlier docs. The actual install path is `c11 skill install --tool <tui>`.
 ## Troubleshooting
 
 - **"Connection refused" / socket errors** — c11 app may not be running. Launch it, then retry.

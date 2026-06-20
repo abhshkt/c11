@@ -17798,6 +17798,12 @@ extension CMUXCLI {
           Claude Code is the default active install (grandfathered exception).
           For every other tool, c11 prints the manual command and only writes
           to disk when --tool is passed explicitly — the operator stays in charge.
+
+        Plugins:
+          For OpenCode, `install --tool opencode` also copies bundled plugins
+          (notification + status bridge) into ~/.config/opencode/plugins/.
+          OpenCode auto-loads plugins from that directory at startup — no
+          opencode.json edit required.
         """
     }
 
@@ -18010,17 +18016,49 @@ extension CMUXCLI {
                 "refreshed": result.refreshed,
                 "skipped": result.skipped,
             ]))
-            return
+        } else {
+            print("Installed skill for \(target.displayName) at \(result.destDir.path)")
+            if !result.installed.isEmpty {
+                print("  installed: \(result.installed.joined(separator: ", "))")
+            }
+            if !result.refreshed.isEmpty {
+                print("  refreshed: \(result.refreshed.joined(separator: ", "))")
+            }
+            if !result.skipped.isEmpty {
+                print("  skipped (up-to-date): \(result.skipped.joined(separator: ", "))")
+            }
         }
-        print("Installed skill for \(target.displayName) at \(result.destDir.path)")
-        if !result.installed.isEmpty {
-            print("  installed: \(result.installed.joined(separator: ", "))")
-        }
-        if !result.refreshed.isEmpty {
-            print("  refreshed: \(result.refreshed.joined(separator: ", "))")
-        }
-        if !result.skipped.isEmpty {
-            print("  skipped (up-to-date): \(result.skipped.joined(separator: ", "))")
+
+        // For TUIs that support plugins (OpenCode), install those too.
+        if target.supportsPlugins {
+            let pluginResult = try SkillInstaller.installPlugins(
+                target: target,
+                home: home,
+                sourceDir: source,
+                force: force
+            )
+            if emitJSON {
+                // Re-print as a combined object — but the skills result was
+                // already printed above. For JSON mode, callers who want the
+                // plugin result should check stdout is two JSON objects. This
+                // is acceptable because the primary install target is skills;
+                // plugins are a bonus side-effect for OpenCode.
+                if !pluginResult.installed.isEmpty || !pluginResult.skipped.isEmpty {
+                    print(skillJSONString([
+                        "tool": target.rawValue,
+                        "plugins_dest": pluginResult.destDir.path,
+                        "plugins_installed": pluginResult.installed,
+                        "plugins_skipped": pluginResult.skipped,
+                    ]))
+                }
+            } else {
+                if !pluginResult.installed.isEmpty {
+                    print("  plugins installed: \(pluginResult.installed.joined(separator: ", "))")
+                }
+                if !pluginResult.skipped.isEmpty {
+                    print("  plugins skipped (up-to-date): \(pluginResult.skipped.joined(separator: ", "))")
+                }
+            }
         }
     }
 
@@ -18043,14 +18081,39 @@ extension CMUXCLI {
                 "removed": result.removed,
                 "skipped": result.skipped,
             ]))
-            return
+        } else {
+            print("Removed skill for \(target.displayName) from \(result.destDir.path)")
+            if !result.removed.isEmpty {
+                print("  removed: \(result.removed.joined(separator: ", "))")
+            }
+            if !result.skipped.isEmpty {
+                print("  skipped: \(result.skipped.joined(separator: ", "))")
+            }
         }
-        print("Removed skill for \(target.displayName) from \(result.destDir.path)")
-        if !result.removed.isEmpty {
-            print("  removed: \(result.removed.joined(separator: ", "))")
-        }
-        if !result.skipped.isEmpty {
-            print("  skipped: \(result.skipped.joined(separator: ", "))")
+
+        // Remove plugins for TUIs that support them (OpenCode).
+        if target.supportsPlugins {
+            let pluginResult = try SkillInstaller.removePlugins(
+                target: target,
+                home: home,
+                sourceDir: source
+            )
+            if emitJSON {
+                if !pluginResult.removed.isEmpty || !pluginResult.skipped.isEmpty {
+                    print(skillJSONString([
+                        "tool": target.rawValue,
+                        "plugins_removed": pluginResult.removed,
+                        "plugins_skipped": pluginResult.skipped,
+                    ]))
+                }
+            } else {
+                if !pluginResult.removed.isEmpty {
+                    print("  plugins removed: \(pluginResult.removed.joined(separator: ", "))")
+                }
+                if !pluginResult.skipped.isEmpty {
+                    print("  plugins skipped: \(pluginResult.skipped.joined(separator: ", "))")
+                }
+            }
         }
     }
 }
@@ -18107,7 +18170,7 @@ extension CMUXCLI {
         Per-workspace messaging primitive for coordinating between c11 surfaces.
         Full guide: docs/c11-mailbox-guide.md (agent quick-reference: skills/c11/SKILL.md).
 
-          send       write an envelope to the per-workspace outbox
+          send       deliver an envelope to a surface in any workspace
           recv       drain or peek the caller's inbox
           trace      pretty-print _dispatch.log lines for an envelope id
           tail       follow _dispatch.log
@@ -18118,7 +18181,8 @@ extension CMUXCLI {
           new-id     print a fresh Crockford base32 ULID (26 chars)
 
         Send flags:
-          --to <surface>          recipient surface name
+          --to <surface>          recipient surface name (any workspace)
+          --to-workspace <ref>    disambiguate a name shared across workspaces
           --topic <topic>         dotted topic token
           --body <text>           inline body (≤ 4096 bytes UTF-8)
           --body-ref <path>       absolute path to external body (body must be empty)
@@ -18208,6 +18272,7 @@ extension CMUXCLI {
         let tsOverride = optionValue(subArgs, name: "--ts")
         let contentType = optionValue(subArgs, name: "--content-type")
         let fromOverride = optionValue(subArgs, name: "--from")
+        let toWorkspace = optionValue(subArgs, name: "--to-workspace")
 
         if to == nil && topic == nil {
             throw CLIError(
@@ -18262,8 +18327,23 @@ extension CMUXCLI {
             contentType: contentType
         )
 
+        // Resolve which workspace actually hosts the recipient. The dispatcher
+        // is per-workspace, so the envelope must land in the recipient's outbox
+        // — which may be a different workspace than the sender's. Resolution
+        // also lets us fail loudly (non-zero exit) when the recipient does not
+        // exist, instead of dropping the message into an outbox where no
+        // dispatcher will ever resolve it. `to` is guaranteed non-nil here
+        // (topic-only sends were rejected above).
+        let resolution = try resolveMailboxTargetWorkspace(
+            client: client,
+            to: to ?? "",
+            senderWorkspaceId: workspaceId,
+            qualifier: toWorkspace
+        )
+        let targetWorkspaceId = resolution.workspaceId
+
         let stateURL = try MailboxLayout.defaultStateURL()
-        let outboxURL = MailboxLayout.outboxURL(state: stateURL, workspaceId: workspaceId)
+        let outboxURL = MailboxLayout.outboxURL(state: stateURL, workspaceId: targetWorkspaceId)
         try FileManager.default.createDirectory(
             at: outboxURL,
             withIntermediateDirectories: true,
@@ -18275,16 +18355,113 @@ extension CMUXCLI {
         let data = try envelope.encode()
         try MailboxIO.atomicWrite(data: data, to: targetURL)
 
+        // The recipient could not be resolved across workspaces (c11
+        // unreachable). The envelope was written best-effort to the sender's
+        // own workspace — a same-workspace recipient still gets it, otherwise
+        // the dispatcher rejects it. Either way the operator must know the send
+        // was unverified, so fail loud and non-zero instead of printing the id
+        // as if it succeeded.
+        if !resolution.verified {
+            var message = String(
+                localized: "mailbox.cli.error.unverified-send",
+                defaultValue: "c11 unreachable: wrote envelope %@ to your own workspace but could not verify recipient \"%@\" across workspaces. If the recipient is not in your workspace the message will be rejected — run `c11 mailbox trace %@` to confirm delivery."
+            )
+            // Fill the three %@ placeholders left-to-right: id, recipient, id.
+            for value in [envelope.id, to ?? "", envelope.id] {
+                if let range = message.range(of: "%@") {
+                    message.replaceSubrange(range, with: value)
+                }
+            }
+            throw CLIError(message: message)
+        }
+
         if jsonOutput {
             print(jsonString([
                 "id": envelope.id,
                 "outbox_path": targetURL.path,
-                "workspace_id": workspaceId.uuidString,
+                "workspace_id": targetWorkspaceId.uuidString,
+                "sender_workspace_id": workspaceId.uuidString,
                 "from": envelope.from
             ]))
         } else {
             print(envelope.id)
         }
+    }
+
+    /// Resolves which workspace's outbox a `--to` envelope should be written
+    /// into by asking the app for a cross-workspace view of live surfaces
+    /// (`mailbox.resolve`). Throws a non-zero `CLIError` when the recipient is
+    /// unknown (so the sender learns the message was not delivered) or when the
+    /// name is ambiguous across workspaces. Falls back to the sender's own
+    /// workspace if the socket is unreachable, so same-workspace delivery still
+    /// works offline; the dispatcher's unresolved-recipient rejection is the
+    /// backstop against a silent drop in that case.
+    private func resolveMailboxTargetWorkspace(
+        client: SocketClient,
+        to: String,
+        senderWorkspaceId: UUID,
+        qualifier: String?
+    ) throws -> (workspaceId: UUID, verified: Bool) {
+        var params: [String: Any] = [
+            "to": to,
+            "sender_workspace_id": senderWorkspaceId.uuidString
+        ]
+        if let qualifier, !qualifier.isEmpty {
+            params["workspace"] = qualifier
+        }
+
+        let payload: [String: Any]
+        do {
+            payload = try client.sendV2(method: "mailbox.resolve", params: params)
+        } catch {
+            // Socket unreachable (or an older app without mailbox.resolve): we
+            // cannot resolve across workspaces. Fall back to the sender's own
+            // workspace so a same-workspace recipient still gets the message,
+            // but flag it `verified: false` so the caller warns loudly and
+            // exits non-zero — an unverified send must not look like success.
+            return (senderWorkspaceId, false)
+        }
+
+        switch payload["resolution"] as? String {
+        case "unique":
+            guard
+                let idStr = payload["target_workspace_id"] as? String,
+                let id = UUID(uuidString: idStr)
+            else {
+                throw CLIError(message: "mailbox.resolve returned an invalid target workspace")
+            }
+            return (id, true)
+        case "ambiguous":
+            let candidates = (payload["candidates"] as? [[String: Any]]) ?? []
+            throw CLIError(message: mailboxAmbiguityMessage(to: to, candidates: candidates))
+        default:
+            throw CLIError(
+                message: String(
+                    localized: "mailbox.cli.error.unresolved-recipient",
+                    defaultValue: "No live surface named \"%@\" in any workspace. Message not sent."
+                ).replacingOccurrences(of: "%@", with: to)
+            )
+        }
+    }
+
+    private func mailboxAmbiguityMessage(to: String, candidates: [[String: Any]]) -> String {
+        var seenRefs: Set<String> = []
+        var refLines: [String] = []
+        for candidate in candidates {
+            guard let ref = candidate["workspace_ref"] as? String else { continue }
+            if seenRefs.insert(ref).inserted {
+                refLines.append("  \(ref)")
+            }
+        }
+        let header = String(
+            localized: "mailbox.cli.error.ambiguous-header",
+            defaultValue: "Surface \"%@\" exists in more than one workspace:"
+        ).replacingOccurrences(of: "%@", with: to)
+        let hint = String(
+            localized: "mailbox.cli.error.ambiguous-hint",
+            defaultValue: "Disambiguate with --to-workspace <workspace-ref>."
+        )
+        return ([header] + refLines + [hint]).joined(separator: "\n")
     }
 
     // MARK: - recv
@@ -18347,21 +18524,43 @@ extension CMUXCLI {
                 )
             )
         }
-        let (workspaceId, _) = try resolveMailboxCaller(
-            client: client,
-            fromOverride: nil,
-            surfaceOverride: nil
-        )
+        // Trace globally: a cross-workspace send is dispatched in the
+        // *recipient's* workspace, so its delivery/rejection events land in
+        // that workspace's `_dispatch.log`, not the sender's. Scanning every
+        // workspace's log (the envelope id is an instance-unique ULID) makes a
+        // message followable wherever it routed. No socket call — trace works
+        // even when the socket is unreachable, which is exactly when you need
+        // to diagnose a stuck send.
         let stateURL = try MailboxLayout.defaultStateURL()
-        let logURL = MailboxLayout.dispatchLogURL(state: stateURL, workspaceId: workspaceId)
-        guard let text = try? String(contentsOf: logURL, encoding: .utf8) else {
-            return
-        }
+        let workspacesRoot = stateURL.appendingPathComponent(
+            MailboxLayout.workspacesDirectoryName,
+            isDirectory: true
+        )
         let needle = "\"\(id)\""
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            if line.contains(needle) {
-                print(String(line))
+        var matches: [(ts: String, line: String)] = []
+        let workspaceDirs = (try? FileManager.default.contentsOfDirectory(
+            at: workspacesRoot,
+            includingPropertiesForKeys: nil
+        )) ?? []
+        for workspaceDir in workspaceDirs {
+            guard let workspaceId = UUID(uuidString: workspaceDir.lastPathComponent) else {
+                continue
             }
+            let logURL = MailboxLayout.dispatchLogURL(state: stateURL, workspaceId: workspaceId)
+            guard let text = try? String(contentsOf: logURL, encoding: .utf8) else { continue }
+            for line in text.split(separator: "\n", omittingEmptySubsequences: true)
+            where line.contains(needle) {
+                let lineStr = String(line)
+                let ts = (try? JSONSerialization.jsonObject(with: Data(lineStr.utf8)))
+                    .flatMap { ($0 as? [String: Any])?["ts"] as? String } ?? ""
+                matches.append((ts, lineStr))
+            }
+        }
+        // ISO-8601 UTC timestamps sort lexically into chronological order, so a
+        // string sort merges events from multiple workspace logs correctly.
+        matches.sort { $0.ts < $1.ts }
+        for match in matches {
+            print(match.line)
         }
     }
 

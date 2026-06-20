@@ -96,24 +96,73 @@ Official Codex docs make the trust boundary explicit: non-managed command hooks 
 
 `c11 codex-hook prompt-submit`, `pre-tool-use`, `post-tool-use`, and `stop` remain supported for custom launch paths, but they are opt-in. Use plain `c11 codex-hook stop` only for a custom Codex launch path that does not also use the wrapper's notification bridge.
 
-### OpenCode Plugin
+### OpenCode Plugin (auto-installed)
 
-Create `.opencode/plugins/c11-notify.js`:
+c11 ships a bundled OpenCode plugin that bridges `session.idle`, `permission.asked`, `session.error`, and `session.status` events into c11 notifications and sidebar status updates. This gives OpenCode the same "blue ring + tab highlight + Cmd+Shift+U jump-to-unread" workflow that Claude Code and Codex have.
+
+**Install:**
+
+```bash
+c11 skill install --tool opencode
+```
+
+This copies:
+- The c11 skill bundle into `~/.opencode/skills/`
+- The notification plugin into `~/.config/opencode/plugins/c11-notify.js`
+
+OpenCode auto-loads plugins from `~/.config/opencode/plugins/` at startup — no `opencode.json` edit required.
+
+**What the plugin does:**
+
+| OpenCode event | c11 action | Claude Code equivalent |
+|---|---|---|
+| `session.idle` | `c11 notify "Waiting for input"` + `set-metadata status=idle` | `idle_prompt` matcher |
+| `permission.asked` | `c11 notify "Approval needed"` + `set-metadata status="Needs input"` | `permission_prompt` matcher |
+| `session.error` | `c11 notify "Session error"` | (no equivalent) |
+| `session.status` | `c11 set-metadata status=<value>` | (wrapper-emitted status) |
+
+**Uninstall:**
+
+```bash
+c11 skill remove --tool opencode
+```
+
+Removes both the skill bundle and the plugin file.
+
+**Manual installation (advanced):**
+
+If you prefer not to use `c11 skill install`, you can create `.config/opencode/plugins/c11-notify.js` manually:
 
 ```javascript
-export const C11NotificationPlugin = async ({ $, }) => {
-  const notify = async (title, body) => {
-    try {
-      await $`command -v c11 && c11 notify --title ${title} --body ${body}`;
-    } catch {
-      await $`osascript -e ${"display notification \"" + body + "\" with title \"" + title + "\""}`;
-    }
+export const C11NotifyPlugin = async ({ $ }) => {
+  const c11 = async (args) => {
+    try { await $`c11 ${args}`; } catch {}
   };
-
+  const notify = (title, body, subtitle) => {
+    const args = ["notify", "--title", title];
+    if (subtitle) args.push("--subtitle", subtitle);
+    if (body) args.push("--body", body);
+    return c11(args);
+  };
   return {
     event: async ({ event }) => {
-      if (event.type === "session.idle") {
-        await notify("OpenCode", "Session idle");
+      switch (event.type) {
+        case "session.idle":
+          await notify("OpenCode", "Waiting for input");
+          await c11(["set-metadata", "--key", "status", "--value", "idle"]);
+          break;
+        case "permission.asked":
+          await notify("OpenCode", "Approval needed", "Permission");
+          await c11(["set-metadata", "--key", "status", "--value", "Needs input"]);
+          break;
+        case "session.error":
+          await notify("OpenCode", "Session error", "Error");
+          break;
+        case "session.status":
+          if (event.properties?.status) {
+            await c11(["set-metadata", "--key", "status", "--value", event.properties.status]);
+          }
+          break;
       }
     },
   };

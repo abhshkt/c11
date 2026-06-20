@@ -5025,6 +5025,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return nil
     }
 
+    /// Every live, mailbox-addressable surface across all windows and
+    /// workspaces in this instance. A surface is addressable when it carries a
+    /// `title` metadata value (the mailbox name). Reads the same
+    /// `SurfaceMetadataStore` `title` the per-workspace `MailboxSurfaceResolver`
+    /// uses, so global resolution matches local resolution exactly.
+    ///
+    /// Main-thread only: it enumerates each workspace's `@Published panels`.
+    /// Callers on the socket queue must hop to main first.
+    func mailboxAddressableSurfaces() -> [MailboxGlobalResolver.Surface] {
+        var result: [MailboxGlobalResolver.Surface] = []
+        for context in mainWindowContexts.values {
+            for workspace in context.tabManager.tabs {
+                for surfaceId in workspace.panels.keys {
+                    let (metadata, _) = SurfaceMetadataStore.shared.getMetadata(
+                        workspaceId: workspace.id,
+                        surfaceId: surfaceId
+                    )
+                    guard let name = metadata[MetadataKey.title] as? String, !name.isEmpty else {
+                        continue
+                    }
+                    // Stable identities (optional): the same `mailbox.*` keys
+                    // the per-workspace resolver reads, so global routing and
+                    // local delivery resolve a `to` identically.
+                    let address = metadata["mailbox.address"] as? String
+                    let role = metadata["mailbox.role"] as? String
+                    result.append(
+                        MailboxGlobalResolver.Surface(
+                            workspaceId: workspace.id,
+                            surfaceId: surfaceId,
+                            name: name,
+                            address: address,
+                            role: role
+                        )
+                    )
+                }
+            }
+        }
+        return result
+    }
+
     @discardableResult
     func moveSurface(
         panelId: UUID,
