@@ -115,111 +115,23 @@ struct AgentRestartRegistry: Sendable {
     /// forwards to real claude with the hooks settings JSON intact.
     ///
     /// Codex uses captured `codex.session_id` metadata for deterministic
-    /// `codex resume <id>` when available. The generic `sessionId` parameter is
-    /// intentionally ignored for Codex so a stale `claude.session_id` cannot be
-    /// consumed as a Codex id. Older snapshots without a captured Codex id still
-    /// fall back to `codex resume --last`, but malformed captured ids and invalid
-    /// store provenance fail closed rather than guessing with `--last` or the
-    /// managed overlay. Like Claude, a malformed project_dir hint is dropped
-    /// while the valid session id is still resumed.
-    /// Grok supports `--resume` without an id to attach to the most recent
-    /// session. Opencode and kimi have no verified resume flag and launch
-    /// fresh — best-effort is preferable to a broken flag.
-    static let phase1: AgentRestartRegistry = .init(name: "phase1", rows: [
-        Row(terminalType: "claude-code") { sessionId, metadata in
-            guard let raw = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !raw.isEmpty,
-                  isValidClaudeSessionId(raw) else { return nil }
-            let resume = "claude --dangerously-skip-permissions --resume \(raw)"
-            // `claude --resume <id>` resolves the session JSONL relative to
-            // the current shell's cwd encoding (`~/.claude/projects/<encoded-cwd>/<id>.jsonl`).
-            // A session captured in a worktree subdir cannot be resumed
-            // from its parent. When the hook recorded a project_dir, `cd`
-            // there first — re-validating defensively in case a future
-            // bypass slipped a malformed value past the store. The
-            // single-quote escape is belt-and-braces: the validator
-            // already rejects single quotes.
-            if let raw = metadata[SurfaceMetadataKeyName.claudeSessionProjectDir]?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-               !raw.isEmpty,
-               isValidClaudeSessionProjectDir(raw) {
-                return "cd \(shellSingleQuote(raw)) && \(resume)\n"
+    /// `codex resume <id>` when available, and falls back to `--last` only
+    /// when no trusted id exists. Grok/Pi have best-effort recent-session
+    /// commands; Opencode/OMP exact resume flows through conversation
+    /// strategies, with this registry remaining the legacy fallback path.
+    static let phase1: AgentRestartRegistry = {
+        // Rows are generated from the agent registry: every manifest that
+        // declares a resume spec contributes a row whose resolver is the
+        // manifest's `resumeCommand`. Manifests with `ResumeSpec.none`
+        // (github-copilot, custom) contribute no row and fall through to a
+        // fresh launch. Belt-and-braces id/path re-validation lives in
+        // `AgentManifest.resumeCommand`.
+        let rows = AgentRegistry.shared.all.compactMap { manifest -> Row? in
+            if case .none = manifest.resume { return nil }
+            return Row(terminalType: manifest.kind) { sessionId, metadata in
+                manifest.resumeCommand(sessionId: sessionId, metadata: metadata)
             }
-            return "\(resume)\n"
-        },
-        Row(terminalType: SurfaceMetadataKeyName.terminalTypeCodex) { _, metadata in
-            if metadata.keys.contains(SurfaceMetadataKeyName.codexRestartBlocked) {
-                return nil
-            }
-
-            func recordedProjectDir() -> String? {
-                guard let rawDir = metadata[SurfaceMetadataKeyName.codexSessionProjectDir]?
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                      !rawDir.isEmpty,
-                      isValidCodexSessionProjectDir(rawDir) else {
-                    return nil
-                }
-                return rawDir
-            }
-
-            let sessionStore: String
-            if metadata.keys.contains(SurfaceMetadataKeyName.codexSessionStore) {
-                guard let candidate = metadata[SurfaceMetadataKeyName.codexSessionStore]?
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                      candidate == SurfaceMetadataKeyName.codexSessionStoreManagedOverlay ||
-                        candidate == SurfaceMetadataKeyName.codexSessionStoreRealHome else {
-                    return nil
-                }
-                sessionStore = candidate
-            } else {
-                sessionStore = SurfaceMetadataKeyName.codexSessionStoreManagedOverlay
-            }
-
-            let raw: String
-            if metadata.keys.contains(SurfaceMetadataKeyName.codexSessionId) {
-                guard let candidate = metadata[SurfaceMetadataKeyName.codexSessionId]?
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                      !candidate.isEmpty else {
-                    return nil
-                }
-                raw = candidate
-            } else {
-                // Older snapshots or disabled hooks retain the historical
-                // best-effort behavior. `resume --last` must read the
-                // operator's real Codex state; c11's managed CODEX_HOME
-                // overlay intentionally does not mirror sessions/state DBs.
-                // The wrapper also detects this argv shape for manual runs,
-                // but the env marker keeps restored legacy snapshots explicit.
-                let resumeLast = "env CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last"
-                if let rawDir = recordedProjectDir() {
-                    return "cd \(shellSingleQuote(rawDir)) 2>/dev/null || true; \(resumeLast)\n"
-                }
-                return "\(resumeLast)\n"
-            }
-            guard isValidCodexSessionId(raw) else { return nil }
-            let resume: String
-            if sessionStore == SurfaceMetadataKeyName.codexSessionStoreRealHome {
-                resume = "env CMUX_CODEX_REAL_HOME_RESUME=1 codex resume \(raw)"
-            } else {
-                resume = "env CMUX_CODEX_MANAGED_RESUME=1 codex resume \(raw)"
-            }
-            if let rawDir = recordedProjectDir() {
-                return "cd \(shellSingleQuote(rawDir)) 2>/dev/null || true; \(resume)\n"
-            }
-            return "\(resume)\n"
-        },
-        Row(terminalType: "grok") { _, _ in
-            // grok --resume (no id) attaches to the most recent session.
-            // Best-effort: may not match the exact session in the snapshot.
-            "grok --always-approve --resume\n"
-        },
-        Row(terminalType: "opencode") { _, _ in
-            // no stable resume flag known; launches fresh.
-            "opencode run --dangerously-skip-permissions\n"
-        },
-        Row(terminalType: "kimi") { _, _ in
-            // no stable resume flag known; launches fresh.
-            "kimi\n"
         }
-    ])
+        return .init(name: "phase1", rows: rows)
+    }()
 }
