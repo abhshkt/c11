@@ -20,7 +20,17 @@ final class AgentSkillsModel: ObservableObject {
             packages.contains { $0.state == .installedOutdated || $0.state == .installedNoManifest || $0.state == .schemaMismatch }
         }
         var needsInstallOrUpdate: Bool {
-            !isSharedDestination && !packages.isEmpty && packages.contains { $0.state == .notInstalled || $0.state == .installedOutdated }
+            // Single source of truth with the auto-show gate: a row is
+            // actionable iff `AgentSkillsOnboarding.shouldRowOffer` (the same
+            // classifier `shouldPresent` uses) would offer one of its packages.
+            // This must stay aligned with the gate — if it counts fewer states
+            // than the gate offers (it previously omitted `.installedNoManifest`
+            // and `.schemaMismatch`), such a row auto-pops the sheet yet renders
+            // the celebratory "Done" branch whose handler persists nothing, so
+            // the sheet re-fires on every launch with no way for the operator to
+            // resolve it. Shared destinations stay non-actionable; their owner
+            // row carries the same on-disk state and remains offerable.
+            !isSharedDestination && packages.contains { AgentSkillsOnboarding.shouldRowOffer($0) }
         }
         var anyInstalled: Bool {
             packages.contains { $0.state != .notInstalled }
@@ -598,6 +608,8 @@ struct AgentSkillsOnboardingSheet: View {
     @State private var kimiOptIn: Bool = false
     @State private var opencodeOptIn: Bool = false
     @State private var copilotOptIn: Bool = false
+    @State private var piOptIn: Bool = false
+    @State private var ompOptIn: Bool = false
     @State private var initializedDefaultOptIns: Bool = false
     @State private var selectedAction: AgentSkillsOnboardingAction = .install
 
@@ -642,7 +654,7 @@ struct AgentSkillsOnboardingSheet: View {
     }
 
     private var anySelected: Bool {
-        initializedDefaultOptIns && (claudeOptIn || codexOptIn || grokOptIn || kimiOptIn || opencodeOptIn || copilotOptIn)
+        initializedDefaultOptIns && (claudeOptIn || codexOptIn || grokOptIn || kimiOptIn || opencodeOptIn || copilotOptIn || piOptIn || ompOptIn)
     }
 
     private var hasActionNeeded: Bool {
@@ -948,6 +960,8 @@ struct AgentSkillsOnboardingSheet: View {
         case .kimi: return $kimiOptIn
         case .opencode: return $opencodeOptIn
         case .copilot: return $copilotOptIn
+        case .pi: return $piOptIn
+        case .omp: return $ompOptIn
         }
     }
 
@@ -959,6 +973,8 @@ struct AgentSkillsOnboardingSheet: View {
             (.kimi, kimiOptIn),
             (.opencode, opencodeOptIn),
             (.copilot, copilotOptIn),
+            (.pi, piOptIn),
+            (.omp, ompOptIn),
         ]
         var selectedKeys: Set<String> = []
         for (target, _) in selections.filter({ $0.1 }) {
@@ -1039,6 +1055,8 @@ struct AgentSkillsOnboardingSheet: View {
         kimiOptIn = defaults[.kimi] ?? false
         opencodeOptIn = defaults[.opencode] ?? false
         copilotOptIn = defaults[.copilot] ?? false
+        piOptIn = defaults[.pi] ?? false
+        ompOptIn = defaults[.omp] ?? false
     }
 }
 
@@ -1464,7 +1482,7 @@ enum AgentSkillsOnboarding {
 
     /// True when the running app is a **local development build**: either a
     /// Debug build, or a tagged `reload.sh --tag` / automation build (which
-    /// exports `CMUX_TAG`). Neither is ever true in a shipped Release without
+    /// exports `C11_TAG`). Neither is ever true in a shipped Release without
     /// a tag. Every local build rebundles edited skills, so the content-hash
     /// re-offer would pop the onboarding sheet on essentially every launch for
     /// the person *building* the skills; suppressing the auto-popup here ends

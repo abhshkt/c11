@@ -864,12 +864,12 @@ class GhosttyApp {
     private static func resolveBackgroundLogURL(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> URL {
-        if let explicitPath = environment["CMUX_DEBUG_BG_LOG"],
+        if let explicitPath = c11Env("C11_DEBUG_BG_LOG", in: environment),
            !explicitPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return URL(fileURLWithPath: explicitPath)
         }
 
-        if let debugLogPath = environment["CMUX_DEBUG_LOG"],
+        if let debugLogPath = c11Env("C11_DEBUG_LOG", in: environment),
            !debugLogPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let baseURL = URL(fileURLWithPath: debugLogPath)
             let extensionSeparatorIndex = baseURL.lastPathComponent.lastIndex(of: ".")
@@ -882,10 +882,10 @@ class GhosttyApp {
     }
 
     let backgroundLogEnabled = {
-        if ProcessInfo.processInfo.environment["CMUX_DEBUG_BG"] == "1" {
+        if c11Env("C11_DEBUG_BG", in: ProcessInfo.processInfo.environment) == "1" {
             return true
         }
-        if ProcessInfo.processInfo.environment["CMUX_DEBUG_LOG"] != nil {
+        if c11Env("C11_DEBUG_LOG", in: ProcessInfo.processInfo.environment) != nil {
             return true
         }
         if ProcessInfo.processInfo.environment["GHOSTTYTABS_DEBUG_BG"] == "1" {
@@ -3366,7 +3366,14 @@ final class TerminalSurface: Identifiable, ObservableObject {
         // CMUX_TAB_ID to resolve to a surface (accepts `tab:<n>` or `surface:<n>`).
         setManagedEnvironmentValue("CMUX_PANEL_ID", id.uuidString)
         setManagedEnvironmentValue("CMUX_TAB_ID", id.uuidString)
-        setManagedEnvironmentValue("CMUX_SOCKET_PATH", SocketControlSettings.socketPath())
+        // Inject the *actually-bound* socket path (not the recomputed resolution
+        // path) so a build that fell back to a safe alternate path (C11-155) still
+        // hands its children the correct socket. Set the canonical C11_ key too.
+        let boundSocketPath = TerminalController.shared.activeSocketPath(
+            preferredPath: SocketControlSettings.socketPath()
+        )
+        setManagedEnvironmentValue("CMUX_SOCKET_PATH", boundSocketPath)
+        setManagedEnvironmentValue("C11_SOCKET_PATH", boundSocketPath)
         if let bundledCLIURL = Bundle.main.resourceURL?.appendingPathComponent("bin/c11"),
            FileManager.default.isExecutableFile(atPath: bundledCLIURL.path) {
             setManagedEnvironmentValue("CMUX_BUNDLED_CLI_PATH", bundledCLIURL.path)
@@ -3824,7 +3831,12 @@ final class TerminalSurface: Identifiable, ObservableObject {
         }
     }
 
-    private func scheduleSubmitReturnAfterPasteDelay() {
+    /// Dispatch a synthetic Return as a distinct key event after the
+    /// paste-settle delay. Used by the interactive text box submit and by the
+    /// socket `send` submit path, both of which type text first and must let a
+    /// paste-detecting TUI finish ingesting before the Return lands (a Return
+    /// inside the input burst is silently swallowed).
+    func scheduleSubmitReturnAfterPasteDelay() {
         let delayMs = TextBoxBehavior.returnKeyDelayMs
         if delayMs <= 0 {
             sendKey(.returnKey)
