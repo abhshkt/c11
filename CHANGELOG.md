@@ -6,6 +6,41 @@ Note: historical entries below pre-date the `c11mux` → `c11` rename and refere
 
 ## [Unreleased]
 
+## [0.56.1] - 2026-07-01
+
+Patch release. Headline: **auto-update failures are no longer a dead end.** When Sparkle can't launch its installer (error 4005 — most often a damaged `Sparkle.framework` on the installed copy, not a real location problem), the update popover used to show a misleading "c11 needs to live in Applications" message with only a Retry that re-hit the same wall. It now explains the failure plainly and offers a **Download Latest** button that opens the releases page so you can reinstall in one click. If auto-update ever errors with 4005, download the latest DMG and drag it over c11 in Applications once — auto-update resumes afterward.
+
+### Fixed
+
+- **Sparkle update error 4005 no longer dead-ends.** A 4005 ("couldn't launch the installer") now reads "Update Couldn't Be Installed" and offers a prominent **Download Latest** button to the releases page instead of a futile Retry and a misleading "move to Applications" message. Genuine "app isn't in Applications" cases (Sparkle 1003 disk-image / 1005 translocated) keep their move-and-relaunch guidance. ([#304](https://github.com/Stage-11-Agentics/c11/pull/304))
+
+## [0.56.0] - 2026-06-30
+
+Re-signing release — **no functional changes from 0.55.0.** 0.54.0 and 0.55.0 were signed under a different Apple Developer ID team, so existing installs couldn't auto-update across the team boundary (Sparkle declines a cross-team swap). This build is re-signed under the original Developer ID team, restoring seamless auto-update. Updating from 0.53.x lands all of the 0.54.0 and 0.55.0 changes (exact-session resume for Pi/oh-my-pi/opencode, the agent registry, size-aware splits, the collapsing tab bar, chrome themes, `c11 tree --report`, the Agent Skills sheet fix, and the resume/socket hardening) in one step — see those sections below.
+
+## [0.55.0] - 2026-06-30
+
+Tooling + hardening release. Headline: **`c11 tree --report` — a one-command, human-readable Markdown snapshot of your whole fleet** (every workspace's layout plus each surface's title, agent, live status, and description), built for "save the state before I close c11" handoffs. Alongside it: a fix for a main-thread hang that could beachball c11 under a heavy multi-agent fleet, the Agent Skills onboarding sheet stops re-popping on every launch, a workspace-navigation latch fix, socket-collision hardening so parallel c11 instances don't stomp each other's IPC socket, and a session-resume fix so Pi/oh-my-pi reconnect to the right session when a working directory holds several.
+
+### Added
+
+- **`c11 tree --report` — human-readable fleet snapshot.** A new flag on `tree` (alias `--markdown`) emits a Markdown report of what every agent is doing: per workspace, the pane layout and, for each surface, its title, agent type + model, live status/role, description, mailbox address, and browser URL — closed by a summary table. Unlike `workspace export-blueprint` (a layout template that drops live metadata), this is the legible status artifact for handoffs. `--out <path>` writes to a file; scope with `--window`/`--workspace`. ([#263](https://github.com/Stage-11-Agentics/c11/pull/263)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+
+### Fixed
+
+- **c11 no longer beachballs under a heavy multi-agent fleet.** Every Claude Code hook (one `c11 claude-hook` per tool call, per agent) ran its sidebar/notification socket commands on the GUI main thread, so a fleet of agents — or a crash-restore that resumed them all at once — could saturate the main thread and freeze the UI for tens of seconds. Those status/notification commands now ack off the main thread and apply asynchronously, the redundant per-hook workspace probe is gone, and agent resumes are staggered on restore. ([#296](https://github.com/Stage-11-Agentics/c11/pull/296)) (C11-156) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **Pi and oh-my-pi resume no longer skip when a working directory holds more than one session.** Pi/omp resolve their session id by scraping the cwd's session store at restore time, but with no launch-time claim the scrape had no time floor to tell a heavily-used cwd's accumulated sessions apart — so it returned "ambiguous" and the pane came up fresh instead of resuming (the v0.55 staging "Pi did not resume" report). New PATH-scoped `pi` and `omp` wrappers mint a wrapper-claim at launch (mirroring the codex wrapper), giving the restore scrape a time floor that narrows past the stale sessions to this pane's own. ([#300](https://github.com/Stage-11-Agentics/c11/pull/300))
+- **Claude Code wrapper-claim fallback now actually fires.** A `cmux` → `c11` rename left `Resources/bin/claude` testing an undefined variable (`cmux_set_agent_bin` instead of the assigned `C11_SET_AGENT_BIN`), so `conversation claim --kind claude-code` was silently skipped — the fallback meant to leave a resumable claim when the SessionStart hook is dropped never ran. One-line fix restores it. ([#300](https://github.com/Stage-11-Agentics/c11/pull/300))
+- **Workspace Previous/Next navigation no longer latches on the first workspace.** A selection latch could trap navigation on the first workspace; the Prev/Next controls release correctly now. ([#269](https://github.com/Stage-11-Agentics/c11/pull/269)) — thanks [@ajroberts0417](https://github.com/ajroberts0417)!
+- **Parallel c11 instances no longer stomp each other's IPC socket.** The control socket is namespaced per bundle, so a second instance binding its socket can't unlink a live peer's out from under it. (C11-155) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **The Agent Skills onboarding sheet stops re-popping on every launch.** A row could auto-open the sheet yet render the "Done" branch (whose handler persists nothing), so the sheet re-fired each launch with no way to dismiss it for good. The actionable-row check now matches the auto-show gate exactly, so a satisfied row no longer re-triggers. ([#299](https://github.com/Stage-11-Agentics/c11/pull/299))
+- **Socket-control password is read from the current `c11/` dir, not the old `c11mux/`.** A `cmux` → `c11` rename casualty left the CLI reading the local socket password from a `c11mux/` directory the app no longer creates, so it returned nil and CLI auth could silently fail. It now reads the renamed location (falling back to the legacy dir only if present). ([#302](https://github.com/Stage-11-Agentics/c11/pull/302))
+
+### Thanks to 2 contributors!
+
+- [@ajroberts0417](https://github.com/ajroberts0417)
+- [@BenevolentFutures](https://github.com/BenevolentFutures)
+
 ## [0.54.0] - 2026-06-29
 
 Feature release. Headline: **exact-session conversation resume arrives for Pi, oh-my-pi, and opencode — when c11 restores a workspace, these agents reconnect to the exact session they were in before the restart, not a fresh shell.** Alongside it: Pi and oh-my-pi become first-class agents via a new data-driven registry, splits get size-aware, the tab bar collapses responsively when space runs short, four new chrome themes ship, and surfaces now export the `C11_*` environment namespace the skill documents.

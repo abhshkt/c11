@@ -578,7 +578,15 @@ enum CLIIDFormat: String {
 enum SocketPasswordResolver {
     private static let service = "com.cmuxterm.app.socket-control"
     private static let account = "local-socket-password"
-    private static let directoryName = "c11mux"
+    // Must match the app's SocketControlPasswordStore.directoryName ("c11") so
+    // the CLI reads the password file the app actually writes. The legacy name
+    // was "c11mux"; the app moved to "c11" (StateDirectoryMigration.currentName)
+    // and the app's symlink covers migrated machines, but a fresh install never
+    // creates a `c11mux` dir — reading it there returned nil and the password
+    // was silently invisible to the CLI. `legacyDirectoryName` stays as a
+    // read-only fallback for any un-migrated checkout.
+    private static let directoryName = "c11"
+    private static let legacyDirectoryName = "c11mux"
     private static let fileName = "socket-control-password"
 
     static func resolve(explicit: String?, socketPath: String) -> String? {
@@ -604,16 +612,20 @@ enum SocketPasswordResolver {
         guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil
         }
-        let passwordURL = appSupport
-            .appendingPathComponent(directoryName, isDirectory: true)
-            .appendingPathComponent(fileName, isDirectory: false)
-        guard let data = try? Data(contentsOf: passwordURL) else {
-            return nil
+        // Canonical "c11" dir first; fall back to the legacy "c11mux" dir for
+        // un-migrated checkouts where the app's migration symlink is absent.
+        for dir in [directoryName, legacyDirectoryName] {
+            let passwordURL = appSupport
+                .appendingPathComponent(dir, isDirectory: true)
+                .appendingPathComponent(fileName, isDirectory: false)
+            guard let data = try? Data(contentsOf: passwordURL),
+                  let value = String(data: data, encoding: .utf8),
+                  let normalizedValue = normalized(value) else {
+                continue
+            }
+            return normalizedValue
         }
-        guard let value = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-        return normalized(value)
+        return nil
     }
 
     static func keychainServices(
@@ -16883,6 +16895,18 @@ struct CMUXCLI {
     }
 
     private func resolveWorkspaceIdForClaudeHook(_ raw: String?, client: SocketClient) throws -> String {
+        // C11-156: when the hook carries an explicit workspace UUID (the common
+        // case — c11 exports CMUX_WORKSPACE_ID into every hook process), trust
+        // it directly. `resolveWorkspaceId` short-circuits a UUID with zero
+        // socket calls, but the existence-probe below added a main-thread
+        // `surface.list` round-trip to EVERY hook invocation — a dominant
+        // contributor to the hook-flood main-thread hang. A stale UUID is
+        // harmless: downstream status/notify commands no-op on a missing
+        // workspace, and falling back to the *current* focused workspace would
+        // wrongly retarget another workspace's sidebar.
+        if let raw, !raw.isEmpty, isUUID(raw) {
+            return raw
+        }
         if let raw, !raw.isEmpty, let candidate = try? resolveWorkspaceId(raw, client: client) {
             let probe = try? client.sendV2(method: "surface.list", params: ["workspace_id": candidate])
             if probe != nil {
