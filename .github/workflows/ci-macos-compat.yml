@@ -160,6 +160,8 @@ jobs:
 
       - name: Build app for smoke test
         if: matrix.smoke
+        env:
+          CMUX_SKIP_ZIG_BUILD: ${{ github.repository != 'Stage-11-Agentics/c11' && '1' || '' }}
         run: |
           set -euo pipefail
           SOURCE_PACKAGES_DIR="$PWD/.ci-source-packages"

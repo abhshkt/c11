@@ -150,6 +150,8 @@ jobs:
         # shape and dispatcher-behavior tests so the push path stays
         # fast (sub-5-min on a warm cache). All targeted tests moved
         # to c11LogicTests in C11-27.
+        env:
+          CMUX_SKIP_ZIG_BUILD: ${{ github.repository != 'Stage-11-Agentics/c11' && '1' || '' }}
         run: |
           set -euo pipefail
           SOURCE_PACKAGES_DIR="$PWD/.ci-source-packages"

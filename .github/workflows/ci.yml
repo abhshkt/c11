@@ -184,6 +184,8 @@ jobs:
             -resolvePackageDependencies
 
       - name: Build app
+        env:
+          CMUX_SKIP_ZIG_BUILD: ${{ github.repository != 'Stage-11-Agentics/c11' && '1' || '' }}
         run: |
           set -euo pipefail
           SOURCE_PACKAGES_DIR="$PWD/.ci-source-packages"
@@ -200,6 +202,8 @@ jobs:
         # must block merges because it covers the sanitizer and terminal launch
         # env merge seam. The macOS compatibility smoke test also probes a real
         # built app launched under poisoned Codex env.
+        env:
+          CMUX_SKIP_ZIG_BUILD: ${{ github.repository != 'Stage-11-Agentics/c11' && '1' || '' }}
         run: |
           set -euo pipefail
           SOURCE_PACKAGES_DIR="$PWD/.ci-source-packages"
@@ -224,6 +228,8 @@ jobs:
         # still provide host-runtime signal (AppKit, Ghostty, WKWebView,
         # UNNotificationCenter). Remove the skip flags when Area C lands.
         continue-on-error: true
+        env:
+          CMUX_SKIP_ZIG_BUILD: ${{ github.repository != 'Stage-11-Agentics/c11' && '1' || '' }}
         run: |
           set -euo pipefail
           SOURCE_PACKAGES_DIR="$PWD/.ci-source-packages"
@@ -247,6 +253,8 @@ jobs:
         # remain compile-checked above; C11-27 records pre-existing failures
         # under the old c11Tests prefix, so normalize c11LogicTests back before
         # diffing the failure set.
+        env:
+          CMUX_SKIP_ZIG_BUILD: ${{ github.repository != 'Stage-11-Agentics/c11' && '1' || '' }}
         run: |
           set -euo pipefail
           SOURCE_PACKAGES_DIR="$PWD/.ci-source-packages"
