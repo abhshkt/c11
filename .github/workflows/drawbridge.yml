@@ -67,7 +67,7 @@ jobs:
       open: ${{ steps.resolve.outputs.open }}
     steps:
       - name: Checkout trusted default branch
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
 
@@ -139,7 +139,7 @@ jobs:
       - name: Judge (read-only LLM triage)
         if: steps.resolve.outputs.open == 'true'
         continue-on-error: true
-        uses: anthropics/claude-code-action@fbda2eb1bdc90d319b8d853f5deb53bca199a7c1 # v1.0.140
+        uses: anthropics/claude-code-action@a92e7c70a4da9793dc164451d829089dc057a464 # v1.0.159
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Explicit token skips the action's GitHub-App OIDC exchange,
@@ -197,7 +197,7 @@ jobs:
       item_number: ${{ needs.drawbridge-judge.outputs.item_number }}
     steps:
       - name: Checkout trusted default branch
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
 
@@ -401,7 +401,7 @@ jobs:
       comment_url: ${{ steps.post.outputs.comment_url }}
     steps:
       - name: Checkout trusted default branch
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
 
@@ -420,7 +420,7 @@ jobs:
 
       - name: Deep review (read-only LLM pass)
         continue-on-error: true
-        uses: anthropics/claude-code-action@fbda2eb1bdc90d319b8d853f5deb53bca199a7c1 # v1.0.140
+        uses: anthropics/claude-code-action@a92e7c70a4da9793dc164451d829089dc057a464 # v1.0.159
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Explicit token skips the action's GitHub-App OIDC exchange,
@@ -476,7 +476,7 @@ jobs:
       issues: write         # GitHub-native fallback ping (label + assignee)
     steps:
       - name: Checkout trusted default branch
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
 

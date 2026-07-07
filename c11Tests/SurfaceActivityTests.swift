@@ -20,7 +20,7 @@ final class SurfaceActivityTests: XCTestCase {
         XCTAssertEqual(read?.timeIntervalSince1970, 1000)
     }
 
-    func testInputBurstCoalescedWithDebounce() {
+    func testInputBurstCoalescedWithDebounce() throws {
         let tracker = SurfaceActivityTracker()
         let base = Date()
         // First write fires.
@@ -30,25 +30,22 @@ final class SurfaceActivityTests: XCTestCase {
         tracker.recordActivity(surfaceId: "S1", at: base.addingTimeInterval(0.05))
         tracker.recordActivity(surfaceId: "S1", at: base.addingTimeInterval(0.10))
         tracker.recordActivity(surfaceId: "S1", at: base.addingTimeInterval(0.20))
-        guard let read = tracker.lastActivity(for: "S1") else {
-            XCTFail("expected S1 activity to be recorded")
-            return
-        }
-        XCTAssertEqual(read.timeIntervalSince1970, base.timeIntervalSince1970, accuracy: 0.001,
+        let read = tracker.lastActivity(for: "S1")
+        // C11-164: the `accuracy:` XCTAssertEqual overload requires a
+        // non-optional FloatingPoint; unwrap first (was a pre-existing host-lane
+        // compile break — `Double?` never satisfied that overload).
+        XCTAssertEqual(try XCTUnwrap(read).timeIntervalSince1970, base.timeIntervalSince1970, accuracy: 0.001,
                        "burst inside the debounce window must not advance the timestamp")
     }
 
-    func testWritesPastDebounceWindowAdvanceTheTimestamp() {
+    func testWritesPastDebounceWindowAdvanceTheTimestamp() throws {
         let tracker = SurfaceActivityTracker()
         let base = Date()
         tracker.recordActivity(surfaceId: "S1", at: base)
         let later = base.addingTimeInterval(SurfaceActivityTracker.debounceInterval + 0.1)
         tracker.recordActivity(surfaceId: "S1", at: later)
-        guard let read = tracker.lastActivity(for: "S1") else {
-            XCTFail("expected S1 activity to be recorded")
-            return
-        }
-        XCTAssertEqual(read.timeIntervalSince1970, later.timeIntervalSince1970, accuracy: 0.001)
+        let read = tracker.lastActivity(for: "S1")
+        XCTAssertEqual(try XCTUnwrap(read).timeIntervalSince1970, later.timeIntervalSince1970, accuracy: 0.001)
     }
 
     func testEmptyOrWhitespaceSurfaceIdIgnored() {
@@ -59,18 +56,14 @@ final class SurfaceActivityTests: XCTestCase {
         XCTAssertNil(tracker.lastActivity(for: "   "))
     }
 
-    func testSeedAndSnapshotRoundTrip() {
+    func testSeedAndSnapshotRoundTrip() throws {
         let tracker = SurfaceActivityTracker()
         let now = Date()
         tracker.seed(from: ["S1": now, "S2": now.addingTimeInterval(-60)])
         let snap = tracker.snapshot()
-        guard let s1 = snap["S1"], let s2 = snap["S2"] else {
-            XCTFail("expected seeded activity for S1 and S2")
-            return
-        }
-        XCTAssertEqual(s1.timeIntervalSince1970,
+        XCTAssertEqual(try XCTUnwrap(snap["S1"]).timeIntervalSince1970,
                        now.timeIntervalSince1970, accuracy: 0.001)
-        XCTAssertEqual(s2.timeIntervalSince1970,
+        XCTAssertEqual(try XCTUnwrap(snap["S2"]).timeIntervalSince1970,
                        now.addingTimeInterval(-60).timeIntervalSince1970, accuracy: 0.001)
         XCTAssertEqual(snap.count, 2)
     }

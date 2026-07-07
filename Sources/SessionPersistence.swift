@@ -280,6 +280,10 @@ struct SessionLogEntrySnapshot: Codable, Sendable {
 struct SessionProgressSnapshot: Codable, Sendable {
     var value: Double
     var label: String?
+    /// C11-162 (TEL-2): wall-clock stamp (seconds since 1970) of when this
+    /// progress value was written, so decay freshness survives relaunch instead
+    /// of resetting to "now". Optional so pre-existing snapshots still decode.
+    var timestamp: TimeInterval?
 }
 
 struct SessionGitBranchSnapshot: Codable, Sendable {
@@ -388,11 +392,24 @@ struct SessionPanelSnapshot: Codable, Sendable {
     /// for stable JSON output across v1/v2.
     var surfaceConversations: SurfaceConversations? = nil
 
+    /// C11-164 (RES-2): persisted `SurfaceActivityTracker.lastActivity` floor
+    /// for this surface. The Codex/pi/omp scrape filters use "candidate mtime
+    /// ≥ surface lastActivityTimestamp" to disambiguate which on-disk session
+    /// belongs to which pane after a crash. The live tracker is in-memory only,
+    /// so without persisting this the floor was lost on every restart and the
+    /// restore-time scrape ran with `lastActivityTimestamp: nil` (widening the
+    /// candidate set → spurious ambiguity). Optional for backcompat: pre-C11-164
+    /// snapshots decode with `lastActivityAt == nil` (no floor, prior behaviour).
+    /// Keyed implicitly by this panel's `id` — the same id the store and
+    /// `ScrapeCaptureContext` key on across a restart.
+    var lastActivityAt: Date? = nil
+
     private enum CodingKeys: String, CodingKey {
         case id, type, title, customTitle, customColor, directory, isPinned,
              isManuallyUnread, gitBranch, listeningPorts, ttyName,
              terminal, browser, markdown, metadata, metadataSources
         case surfaceConversations = "surface_conversations"
+        case lastActivityAt = "last_activity_at"
     }
 }
 

@@ -213,7 +213,11 @@ extension Workspace {
         }
 
         let progressSnapshot = progress.map { progress in
-            SessionProgressSnapshot(value: progress.value, label: progress.label)
+            SessionProgressSnapshot(
+                value: progress.value,
+                label: progress.label,
+                timestamp: progress.timestamp.timeIntervalSince1970
+            )
         }
         let gitBranchSnapshot = gitBranch.map { branch in
             SessionGitBranchSnapshot(branch: branch.branch, isDirty: branch.isDirty)
@@ -319,7 +323,16 @@ extension Workspace {
                 timestamp: Date(timeIntervalSince1970: entry.timestamp)
             )
         }
-        progress = snapshot.progress.map { SidebarProgressState(value: $0.value, label: $0.label) }
+        // C11-162 (MAJOR-2): restore the original write time so a restored
+        // progress bar carries its real age instead of appearing freshly written.
+        // Falls back to now for pre-existing snapshots that lack the field.
+        progress = snapshot.progress.map {
+            SidebarProgressState(
+                value: $0.value,
+                label: $0.label,
+                timestamp: $0.timestamp.map { Date(timeIntervalSince1970: $0) } ?? Date()
+            )
+        }
         gitBranch = snapshot.gitBranch.map { SidebarGitBranchState(branch: $0.branch, isDirty: $0.isDirty) }
 
         recomputeListeningPorts()
@@ -853,6 +866,14 @@ extension Workspace {
         if !ConversationStorePolicy.isDisabled, panel.panelType == .terminal {
             surfaceConversations = conversationsByPanelId[panelId.uuidString] ?? .empty
         }
+        // C11-164 (RES-2): persist the surface's live activity floor so the
+        // Codex/pi/omp scrape disambiguation survives a crash. Only terminal
+        // surfaces carry a meaningful floor; `lastActivity(for:)` is a bounded
+        // synchronous queue read (no main-thread hot-path work).
+        var lastActivityAt: Date? = nil
+        if !ConversationStorePolicy.isDisabled, panel.panelType == .terminal {
+            lastActivityAt = SurfaceActivityTracker.shared.lastActivity(for: panelId.uuidString)
+        }
         return SessionPanelSnapshot(
             id: panelId,
             type: panel.panelType,
@@ -870,7 +891,8 @@ extension Workspace {
             markdown: markdownSnapshot,
             metadata: persistedMetadata,
             metadataSources: persistedMetadataSources,
-            surfaceConversations: surfaceConversations
+            surfaceConversations: surfaceConversations,
+            lastActivityAt: lastActivityAt
         )
     }
 
@@ -4922,6 +4944,11 @@ struct SidebarLogEntry {
 struct SidebarProgressState {
     let value: Double
     let label: String?
+    /// TEL-2: wall-clock stamp of when this progress value was written. Defaulted
+    /// to `Date()` so the synthesized memberwise initializer keeps every existing
+    /// `SidebarProgressState(value:label:)` call site compiling while stamping each
+    /// fresh write "now".
+    var timestamp: Date = Date()
 }
 
 struct SidebarGitBranchState {
@@ -5273,6 +5300,15 @@ final class Workspace: Identifiable, ObservableObject {
     /// Mapping from bonsplit TabID to our Panel instances
     @Published private(set) var panels: [UUID: any Panel] = [:]
 
+    /// C11-163 events stream: single create/close chokepoint. Subscribing to
+    /// `$panels` and diffing keys catches every surface lifecycle transition
+    /// through one path — split, tab, restore, reattach, rollback, bulk
+    /// teardown, detach — so no emit site can be missed (amendments C, D). A
+    /// `@Published` property can't carry a `didSet` observer, hence the Combine
+    /// subscription. `lastKnownPanelIds` is the diff baseline.
+    private var panelEventsCancellable: AnyCancellable?
+    private var lastKnownPanelIds: Set<UUID> = []
+
     /// Monotonically incrementing token used by the sidebar workspace row to
     /// observe focus flashes targeting any panel in this workspace. Bumped
     /// from `triggerFocusFlash(panelId:)` so a single fan-out drives the
@@ -5426,6 +5462,12 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var metadataBlocks: [String: SidebarMetadataBlock] = [:]
     @Published var logEntries: [SidebarLogEntry] = []
     @Published var progress: SidebarProgressState?
+    /// TEL-4: per-surface derived-liveness state, the @Published bridge the
+    /// sidebar observes. Written by `setDerivedActivity` (which
+    /// `SurfaceLivenessDeriver` calls from the derived-liveness backend) and
+    /// pruned alongside the other per-surface metadata. Absence of a key means
+    /// "no derived signal yet."
+    @Published var derivedActivityBySurface: [UUID: SidebarActivityState] = [:]
     @Published var gitBranch: SidebarGitBranchState?
     @Published var panelGitBranches: [UUID: SidebarGitBranchState] = [:]
     /// C11-104 — per-panel resolved worktree+branch context for the
@@ -5991,6 +6033,16 @@ final class Workspace: Identifiable, ObservableObject {
                     "markdown": counts.markdown,
                 ])
             }
+
+        // C11-163: emit surface.created / surface.closed by diffing $panels.
+        // Subscribing fires once synchronously with the current set (the seed
+        // terminal), then on every subsequent mutation — a single chokepoint
+        // that no create/close/reattach/teardown path can bypass. No debounce:
+        // events must be observable within 1s (EVT-6).
+        panelEventsCancellable = $panels
+            .sink { [weak self] newPanels in
+                self?.reconcilePanelEvents(newPanels)
+            }
     }
 
     deinit {
@@ -6010,6 +6062,29 @@ final class Workspace: Identifiable, ObservableObject {
             }
             persistentFlashPanels.removeAll()
         }
+    }
+
+    /// C11-163: diff the panel set against the last-known ids and publish
+    /// surface lifecycle events. Runs synchronously inside `$panels` delivery
+    /// (main actor); `EventEmitter.emit` is fire-and-forget so this never
+    /// blocks. A rolled-back create surfaces as a balanced created→closed pair;
+    /// a cross-pane detach→reattach as closed→created (amendment D move policy).
+    private func reconcilePanelEvents(_ newPanels: [UUID: any Panel]) {
+        let newIds = Set(newPanels.keys)
+        guard newIds != lastKnownPanelIds else { return }
+        for createdId in newIds.subtracting(lastKnownPanelIds) {
+            guard let panel = newPanels[createdId] else { continue }
+            EventEmitter.shared.emitSurfaceCreated(
+                workspace: id,
+                surface: createdId,
+                kind: panel.panelType.rawValue,
+                title: panel.displayTitle
+            )
+        }
+        for closedId in lastKnownPanelIds.subtracting(newIds) {
+            EventEmitter.shared.emitSurfaceClosed(workspace: id, surface: closedId)
+        }
+        lastKnownPanelIds = newIds
     }
 
     /// Creates a per-workspace mailbox dispatcher bound to this workspace's
@@ -6952,6 +7027,47 @@ final class Workspace: Identifiable, ObservableObject {
         if state == .promptIdle {
             flushBufferedMailboxStdin(surfaceId: panelId)
         }
+        // TEL-3: feed the shell-activity transition into the derived-liveness
+        // backend, which resolves it (with its own debounce/heuristics) back
+        // into `derivedActivityBySurface` via `setDerivedActivity`.
+        SurfaceLivenessDeriver.onShellActivityChanged(
+            surfaceId: panelId,
+            workspaceId: id,
+            state: state,
+            workspace: self
+        )
+    }
+
+    // MARK: - TEL-4 Derived Activity
+
+    /// TEL-4: main-actor setter for a surface's derived-liveness state. Passing
+    /// `nil` removes the key (surface has no derived signal); any other value
+    /// overwrites it. The enclosing type is `@MainActor`, so this publishes on
+    /// the main actor. Cheap and I/O-free.
+    func setDerivedActivity(_ state: SidebarActivityState?, forSurface surfaceId: UUID) {
+        if let state {
+            if derivedActivityBySurface[surfaceId] != state {
+                derivedActivityBySurface[surfaceId] = state
+            }
+        } else if derivedActivityBySurface[surfaceId] != nil {
+            derivedActivityBySurface.removeValue(forKey: surfaceId)
+        }
+    }
+
+    /// TEL-4: workspace-level rollup of per-surface derived activity. `.working`
+    /// if ANY surface is working, else `.idle` if any surface is idle, else
+    /// `nil` when there are no derived signals at all.
+    var aggregatedDerivedActivity: SidebarActivityState? {
+        var sawIdle = false
+        for state in derivedActivityBySurface.values {
+            switch state {
+            case .working:
+                return .working
+            case .idle:
+                sawIdle = true
+            }
+        }
+        return sawIdle ? .idle : nil
     }
 
     func panelNeedsConfirmClose(panelId: UUID, fallbackNeedsConfirmClose: Bool) -> Bool {
@@ -7499,6 +7615,9 @@ final class Workspace: Identifiable, ObservableObject {
         surfaceListeningPorts = surfaceListeningPorts.filter { validSurfaceIds.contains($0.key) }
         surfaceTTYNames = surfaceTTYNames.filter { validSurfaceIds.contains($0.key) }
         panelShellActivityStates = panelShellActivityStates.filter { validSurfaceIds.contains($0.key) }
+        // TEL-4: drop derived-activity for surfaces that no longer exist so the
+        // @Published map doesn't leak stale liveness for pruned surfaces.
+        derivedActivityBySurface = derivedActivityBySurface.filter { validSurfaceIds.contains($0.key) }
         mailboxStdinBuffer.retainOnly(surfaceIds: validSurfaceIds)
         panelPullRequests = panelPullRequests.filter { validSurfaceIds.contains($0.key) }
         SurfaceMetadataStore.shared.pruneWorkspace(workspaceId: id, validSurfaceIds: validSurfaceIds)
@@ -11961,12 +12080,55 @@ extension Workspace: BonsplitDelegate {
             inPane: pane,
             startupEnvironment: resolved.launch.envOverrides
         ) else { return }
-        // The launch command goes to bash; for claude-code the initial prompt
-        // is already baked in as a positional arg by the resolver. Other
-        // agents preserve the prompt in their config but don't auto-deliver
-        // (different TUI input contracts; per-agent post-ready delivery is
-        // a follow-up).
+        // By default no orientation prompt is baked (see `c11OrientPrompt`),
+        // so the agent boots straight to ready with no dead-time. c11 stamps
+        // the identity the sidebar needs itself — no agent round-trip: the
+        // type comes from `AgentDetector`, and we stamp the pinned model plus
+        // a placeholder title here. An operator who configured a launch prompt
+        // still gets it delivered below (baked positional for claude-code,
+        // post-ready sendText for other TUIs is a follow-up).
+        stampLaunchIdentity(
+            surfaceId: panel.id,
+            agent: resolved.agent,
+            userDefault: userDefault,
+            projectConfig: projectConfig
+        )
         panel.sendText(resolved.launch.command + "\n")
+    }
+
+    /// Populate a freshly launched agent surface with the identity the sidebar
+    /// would otherwise wait on the agent to report: the pinned model (which
+    /// process detection can't infer) and a placeholder title. Written with
+    /// source `.declare` so a later explicit `set-agent` / `set-title` from the
+    /// agent or operator cleanly wins. The agent *type* is intentionally not
+    /// stamped here — `AgentDetector` owns it authoritatively.
+    private func stampLaunchIdentity(
+        surfaceId: UUID,
+        agent: AgentType,
+        userDefault: DefaultAgentConfig,
+        projectConfig: DefaultAgentConfig?
+    ) {
+        var partial: [String: Any] = [
+            MetadataKey.title: String(
+                localized: "agent.launch.placeholderTitle",
+                defaultValue: "Awaiting first task"
+            )
+        ]
+        // Mirror the resolver's per-agent config pick so the chip shows the
+        // model c11 launched with. Reads config only; no mutation.
+        let cfg = projectConfig?.agents[agent] ?? userDefault.config(for: agent)
+        let model = cfg.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !model.isEmpty {
+            partial[MetadataKey.model] = model
+        }
+        _ = try? SurfaceMetadataStore.shared.setMetadata(
+            workspaceId: id,
+            surfaceId: surfaceId,
+            partial: partial,
+            mode: .merge,
+            source: .declare
+        )
+        syncPanelTitleFromMetadata(panelId: surfaceId)
     }
 
     func splitTabBar(_ controller: BonsplitController, menuItemsForNewTabKind kind: String, inPane pane: PaneID) -> [BonsplitNewTabMenuItem] {
