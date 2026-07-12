@@ -10861,7 +10861,7 @@ private struct SidebarWaitingAgentCluster: View {
     }
 
     var body: some View {
-        VStack(spacing: 1) {
+        VStack(spacing: 6) {
             WaitingAgentRow(display: display, onJump: jump)
             WorkspaceNavRow(
                 isFirstDisabled: isFirstWorkspace,
@@ -10941,14 +10941,13 @@ private struct WaitingAgentRow: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            // TEL-6: sustained "agent is waiting" lit state is an off-white
-            // paper-fill inversion (content flips to void) with a thin gold
-            // hairline at the fill edge — deliberately no motion; the
-            // inversion does the attention work. Rest state stays
-            // paper-white-on-void with a rule outline.
+            // Sustained "agent is waiting" lit state is a solid c11-gold
+            // fill with void (black) content — the standard c11 gold button.
+            // Deliberately no motion; the gold does the attention work. Rest
+            // state stays paper-white-on-void with a rule outline.
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(isLit ? BrandColors.paperFillSwiftUI : BrandColors.surfaceSwiftUI)
+                    .fill(isLit ? BrandColors.goldSwiftUI : BrandColors.surfaceSwiftUI)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -11676,16 +11675,18 @@ private struct TabItemView: View, Equatable {
         explicitRailColor != nil
     }
 
-    // The selected workspace is conveyed by one consistent signal in every
-    // indicator style: a thick white outline. Custom-colored workspaces keep
-    // their color as a rail (.leftRail) or fill (.solidFill) for identity, but
-    // selection itself is always the white outline.
+    // Every workspace row carries a rule-gray hairline so it reads as one
+    // cohesive card against the void. Selection is conveyed by one consistent
+    // signal in every indicator style: the hairline thickens into a white
+    // outline. Custom-colored workspaces keep their color as a rail
+    // (.leftRail) or fill (.solidFill) for identity, but selection itself is
+    // always the white outline.
     private var activeBorderLineWidth: CGFloat {
-        isActive ? 2.5 : 0
+        isActive ? 2.5 : 1
     }
 
     private var activeBorderColor: Color {
-        isActive ? BrandColors.whiteSwiftUI : .clear
+        isActive ? BrandColors.whiteSwiftUI : BrandColors.ruleSwiftUI
     }
 
     // When a workspace has a custom color and is selected in .solidFill mode,
