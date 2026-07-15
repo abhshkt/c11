@@ -310,7 +310,7 @@ struct cmuxApp: App {
     }
 
     private static func terminateForMissingLaunchTag() -> Never {
-        let message = "error: refusing to launch untagged cmux DEV; start with ./scripts/reload.sh --tag <name> (or set CMUX_TAG for test harnesses)"
+        let message = "error: refusing to launch untagged c11 DEV; start with ./scripts/reload.sh --tag <name> (or set C11_TAG for test harnesses)"
         fputs("\(message)\n", stderr)
         fflush(stderr)
         NSLog("%@", message)
@@ -4479,6 +4479,10 @@ struct SettingsView: View {
     @AppStorage(WorkspacePresentationModeSettings.modeKey)
     private var workspacePresentationMode = WorkspacePresentationModeSettings.defaultMode.rawValue
     @AppStorage(SocketControlSettings.appStorageKey) private var socketControlMode = SocketControlSettings.defaultMode.rawValue
+    @AppStorage(SurfaceTypeAvailability.internalBrowserEnabledKey)
+    private var internalBrowserEnabled = SurfaceTypeAvailability.defaultEnabled
+    @AppStorage(SurfaceTypeAvailability.markdownSurfacesEnabledKey)
+    private var markdownSurfacesEnabled = SurfaceTypeAvailability.defaultEnabled
     @AppStorage(ClaudeCodeIntegrationSettings.hooksEnabledKey)
     private var claudeCodeHooksEnabled = ClaudeCodeIntegrationSettings.defaultHooksEnabled
     @AppStorage(CodexIntegrationSettings.hooksEnabledKey)
@@ -4542,6 +4546,12 @@ struct SettingsView: View {
     @AppStorage("sidebarShowLog") private var sidebarShowLog = true
     @AppStorage("sidebarShowProgress") private var sidebarShowProgress = true
     @AppStorage("sidebarShowStatusPills") private var sidebarShowMetadata = true
+    // TEL-2: operator-tunable decay thresholds (stored in seconds; the
+    // Settings rows below present them in minutes).
+    @AppStorage(SidebarStalenessSettings.staleThresholdKey)
+    private var sidebarStaleThresholdSeconds = SidebarStalenessSettings.defaultStaleSeconds
+    @AppStorage(SidebarStalenessSettings.expiryThresholdKey)
+    private var sidebarExpiryThresholdSeconds = SidebarStalenessSettings.defaultExpirySeconds
     @AppStorage("sidebarTintHex") private var sidebarTintHex = SidebarTintDefaults.hex
     @AppStorage("sidebarTintHexLight") private var sidebarTintHexLight: String?
     @AppStorage("sidebarTintHexDark") private var sidebarTintHexDark: String?
@@ -5184,6 +5194,33 @@ struct SettingsView: View {
                     .controlSize(.small)
             }
         }
+
+        SettingsSectionHeader(title: String(localized: "settings.section.surfaces", defaultValue: "Surfaces"))
+        SettingsCard {
+            SettingsCardRow(
+                String(localized: "settings.app.internalBrowser", defaultValue: "Internal Browser"),
+                subtitle: internalBrowserEnabled
+                    ? String(localized: "settings.app.internalBrowser.subtitleOn", defaultValue: "Allow creating internal browser surfaces. Open browser surfaces keep running when turned off.")
+                    : String(localized: "settings.app.internalBrowser.subtitleOff", defaultValue: "Block new internal browser surfaces. The Browser spawn button is hidden and CLI/socket creation is rejected.")
+            ) {
+                Toggle("", isOn: $internalBrowserEnabled)
+                    .labelsHidden()
+                    .controlSize(.small)
+            }
+
+            SettingsCardDivider()
+
+            SettingsCardRow(
+                String(localized: "settings.app.markdownSurfaces", defaultValue: "Markdown Surfaces"),
+                subtitle: markdownSurfacesEnabled
+                    ? String(localized: "settings.app.markdownSurfaces.subtitleOn", defaultValue: "Allow creating markdown surfaces. Open markdown surfaces keep running when turned off.")
+                    : String(localized: "settings.app.markdownSurfaces.subtitleOff", defaultValue: "Block new markdown surfaces. The Markdown spawn button is hidden and CLI/socket creation is rejected.")
+            ) {
+                Toggle("", isOn: $markdownSurfacesEnabled)
+                    .labelsHidden()
+                    .controlSize(.small)
+            }
+        }
     }
 
     @ViewBuilder
@@ -5605,7 +5642,74 @@ struct SettingsView: View {
                     .controlSize(.small)
             }
             .disabled(sidebarHideAllDetails)
+
+            SettingsCardDivider()
+
+            // TEL-2: decay thresholds. A status pill dims once older than the
+            // stale threshold and grays out (or hands off to derived activity)
+            // once older than the expiry threshold.
+            SettingsCardRow(
+                String(localized: "settings.app.sidebarStaleThreshold.title", defaultValue: "Stale After"),
+                subtitle: String(localized: "settings.app.sidebarStaleThreshold.subtitle", defaultValue: "How long before a sidebar status pill dims to signal it may be going quiet.")
+            ) {
+                HStack(spacing: 8) {
+                    Slider(
+                        value: Binding<Double>(
+                            get: { sidebarStaleThresholdSeconds },
+                            set: { sidebarStaleThresholdSeconds = SidebarStalenessSettings.clamp($0) }
+                        ),
+                        in: SidebarStalenessSettings.minSeconds...SidebarStalenessSettings.maxSeconds,
+                        step: 15
+                    )
+                    .controlSize(.small)
+                    .frame(width: 140)
+                    .accessibilityLabel(String(localized: "settings.app.sidebarStaleThreshold.title", defaultValue: "Stale After"))
+                    Text(sidebarDecayThresholdLabel(sidebarStaleThresholdSeconds))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(minWidth: 56, alignment: .trailing)
+                }
+            }
+            .disabled(sidebarHideAllDetails)
+
+            SettingsCardDivider()
+
+            SettingsCardRow(
+                String(localized: "settings.app.sidebarExpiryThreshold.title", defaultValue: "Expire After"),
+                subtitle: String(localized: "settings.app.sidebarExpiryThreshold.subtitle", defaultValue: "How long before a status pill grays out entirely and derived activity takes over.")
+            ) {
+                HStack(spacing: 8) {
+                    Slider(
+                        value: Binding<Double>(
+                            get: { sidebarExpiryThresholdSeconds },
+                            set: { sidebarExpiryThresholdSeconds = SidebarStalenessSettings.clamp($0) }
+                        ),
+                        in: SidebarStalenessSettings.minSeconds...SidebarStalenessSettings.maxSeconds,
+                        step: 15
+                    )
+                    .controlSize(.small)
+                    .frame(width: 140)
+                    .accessibilityLabel(String(localized: "settings.app.sidebarExpiryThreshold.title", defaultValue: "Expire After"))
+                    Text(sidebarDecayThresholdLabel(sidebarExpiryThresholdSeconds))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(minWidth: 56, alignment: .trailing)
+                }
+            }
+            .disabled(sidebarHideAllDetails)
         }
+    }
+
+    /// TEL-2: present a decay threshold (stored in seconds) as a compact
+    /// human label — minutes once it crosses a minute, seconds below that.
+    private func sidebarDecayThresholdLabel(_ seconds: Double) -> String {
+        if seconds >= 60 {
+            let minutes = seconds / 60
+            return String(format: String(localized: "settings.app.sidebarDecay.unit.minutes", defaultValue: "%.1f min"), minutes)
+        }
+        return String(format: String(localized: "settings.app.sidebarDecay.unit.seconds", defaultValue: "%d s"), Int(seconds))
     }
 
     @ViewBuilder
@@ -6429,7 +6533,7 @@ struct SettingsView: View {
 
         SettingsSectionHeader(title: String(localized: "settings.section.socketOverrides", defaultValue: "Socket Overrides"))
         SettingsCard {
-            SettingsCardNote(String(localized: "settings.automation.socketOverrides.note", defaultValue: "Overrides: CMUX_SOCKET_ENABLE, CMUX_SOCKET_MODE, and CMUX_SOCKET_PATH (set CMUX_ALLOW_SOCKET_OVERRIDE=1 for stable/nightly builds)."))
+            SettingsCardNote(String(localized: "settings.automation.socketOverrides.note", defaultValue: "Overrides: C11_SOCKET_ENABLE, C11_SOCKET_MODE, and C11_SOCKET_PATH (set C11_ALLOW_SOCKET_OVERRIDE=1 for stable/nightly builds)."))
         }
     }
 
@@ -6500,6 +6604,8 @@ struct SettingsView: View {
             showLanguageRestartAlert = true
         }
         socketControlMode = SocketControlSettings.defaultMode.rawValue
+        internalBrowserEnabled = SurfaceTypeAvailability.defaultEnabled
+        markdownSurfacesEnabled = SurfaceTypeAvailability.defaultEnabled
         claudeCodeHooksEnabled = ClaudeCodeIntegrationSettings.defaultHooksEnabled
         codexHooksEnabled = CodexIntegrationSettings.defaultHooksEnabled
         sendAnonymousTelemetry = TelemetrySettings.defaultSendAnonymousTelemetry
@@ -6553,6 +6659,8 @@ struct SettingsView: View {
         sidebarShowLog = true
         sidebarShowProgress = true
         sidebarShowMetadata = true
+        sidebarStaleThresholdSeconds = SidebarStalenessSettings.defaultStaleSeconds
+        sidebarExpiryThresholdSeconds = SidebarStalenessSettings.defaultExpirySeconds
         sidebarTintHex = SidebarTintDefaults.hex
         sidebarTintHexLight = nil
         sidebarTintHexDark = nil

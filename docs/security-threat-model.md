@@ -136,6 +136,13 @@ browser surface communicates with c11 via `WKContentController` script
 message handlers configured per-panel; new handlers must be added to
 this doc when introduced (the diff signal in section 9 catches this).
 
+Outbound hand-off: the browser toolbar's "Open in Default Browser"
+button (v0.51.0) passes the panel's current URL to
+`NSWorkspace.shared.open(_:)`. It is operator-gesture-gated (explicit
+click, never script-triggered) and refuses empty/`about:` schemes; a
+page can influence *which* URL is handed off only by navigating itself,
+which the operator sees in the address bar before clicking.
+
 Evidence:
 
 ```
@@ -234,25 +241,33 @@ ghostty/                                               (Zig submodule loaded as 
 ## 8. Socket control
 
 The c11 socket is a Unix-domain socket at
-`~/Library/Application Support/c11mux/c11.sock` (release) or
-`/tmp/cmux-debug*.sock` (debug). Control modes are defined by
+`~/Library/Application Support/c11/c11.sock` (release) or
+`/tmp/c11-debug*.sock` (debug; tagged builds use
+`/tmp/c11-debug-<tag>.sock`). Control modes are defined by
 `SocketControlMode`:
 
 | Mode         | Who can connect                                  | Socket perms |
 | ------------ | ------------------------------------------------ | ------------ |
 | `off`        | Nobody — listener disabled.                       | n/a          |
-| `cmuxOnly`   | Processes whose ancestry includes the c11 app.    | `0o600`      |
+| `c11Only`    | Processes whose ancestry includes the c11 app.    | `0o600`      |
 | `automation` | Any local process with the same uid.              | `0o600`      |
 | `password`   | Any local process that authenticates.             | `0o600`      |
 | `allowAll`   | Anyone with filesystem access to the socket file. | `0o666`      |
 
-Default mode on a fresh install: `cmuxOnly`. The ancestry check at
-`TerminalController.swift:1594-1596` walks the connecting process's
-parents and rejects when c11 is not on the chain.
+Default mode on a fresh install: `c11Only`. The ancestry gate walks the
+connecting process's parents (`TerminalController.parentPid(of:)`,
+`TerminalController.swift:745`) and rejects when c11 is not on the
+chain. As of v0.58.0, command *dispatch* lives in per-domain handlers
+under `Sources/SocketHandlers/`; the connection ACL and ancestry gate
+remain in `TerminalController`. Also as of v0.58.0, surface-scoped
+write commands reject empty or absent surface refs outright — a write
+can no longer be silently routed to the operator-focused surface by a
+malformed ref.
 
 Password mode reads its secret from (in order):
-1. `CMUX_SOCKET_PASSWORD` environment variable.
-2. The file `~/Library/Application Support/c11mux/socket-control-password`.
+1. `C11_SOCKET_PASSWORD` environment variable
+   (`SocketControlSettings.swift:297`).
+2. The file `~/Library/Application Support/c11/socket-control-password`.
 
 Both modes other than `allowAll` use `0o600` socket permissions; only
 `allowAll` widens to `0o666`.
@@ -263,12 +278,22 @@ gate from the test side — they're the regression boundary for the
 ancestor-PID and mode-check paths. New socket modes or changes to the
 gate require updates to those tests as well as this doc.
 
+Local persistent artifacts written by the socket/telemetry layer: the
+surface-metadata snapshots, the mailbox tree, and (new in v0.58.0) the
+events NDJSON log under `~/Library/Application Support/c11/` — an
+append-only record of surface lifecycle, canonical-metadata changes,
+liveness transitions, and mailbox deliveries. All are plaintext,
+uid-scoped files in the same trust class: readable by any process
+running as the operator. No transcript or scrollback content is
+written to any of them.
+
 Evidence:
 
 ```
-Sources/SocketControlSettings.swift                    (mode enum + defaults)
-Sources/TerminalController.swift:66                    (accessMode = .cmuxOnly default)
-Sources/TerminalController.swift:1594-1596             (ancestry check)
+Sources/SocketControlSettings.swift:9                  (mode enum; .c11Only)
+Sources/TerminalController.swift:172                   (accessMode = .c11Only default)
+Sources/TerminalController.swift:745                   (ancestry walk)
+Sources/SocketHandlers/                                (per-domain command dispatch, v0.58.0)
 c11Tests/TerminalControllerSocketSecurityTests.swift   (focus-policy negative tests)
 ```
 

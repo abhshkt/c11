@@ -1,59 +1,52 @@
-# Validation plan — C11-99 CI restoration
+# Validation Plan — Truth & Stability cycle
 
-Per-acceptance-criterion verification plan, authored Phase 2 while audit context is fresh. Phase 4 Result Validator walks this top-down, records pass / fail / partial.
+Source spec: [SPEC.md](../../docs/cycles/2026-07-truth-and-stability/SPEC.md) · Source evaluation: [EVALUATION.md](../../docs/cycles/2026-07-truth-and-stability/EVALUATION.md) · Date: 2026-07-07
 
-**Verification baseline.** Runs against the merged main HEAD after both delegators' PRs land. Where a check needs CI history, the validator pulls the last 5 main-branch runs via `gh run list --branch main --workflow <name>`.
+Conventions: "artifact" means a `--role validation` attachment on the named ticket (screenshot/recording/log/table). The Result Validator runs every `pre-merge-static` row from PR diff + source + recorded artifacts; it re-runs nothing that needs a merged tree or a human. Runtime proofs are recorded by delegators pre-merge; the Validator verifies the artifact exists, is specific, and matches the claim.
 
----
-
-## Area A — CI unblock
-
-| # | Acceptance criterion | How to verify | Artifact |
-|---|---|---|---|
-| A1 | `nightly.yml` runs go green end-to-end (Sparkle appcast + artifact upload + tag move all execute even if Sentry upload fails) | `gh run list --workflow nightly.yml --limit 3` — all post-merge runs green; pick one and `gh run view --log` to confirm Sparkle/appcast/upload steps ran | nightly.yml run output |
-| A2 | `ci.yml` build job green on main with `c11-logic` as the gate | `gh run list --workflow ci.yml --branch main --limit 5` — all post-merge runs green | ci.yml run output |
-| A3 | Advisory `c11-unit` step still runs and reports failures, just doesn't fail the job | `gh run view --log` on a recent main run — confirm both `c11-logic` and `c11-unit` steps appear; `c11-unit` step status reads as a warning if failing, doesn't gate the job | ci.yml step block |
-| A4 | The skipped slow test has a TODO + Lattice link in source | `grep -n "XCTSkip" c11Tests/AppDelegateShortcutRoutingTests.swift` — confirms skip on `testMinimalModeUsesZeroTopSafeAreaForMainWindowContentView` with reference to C11-99 / area C | c11Tests source |
-
-## Area B — Local test runnability
-
-| # | Acceptance criterion | How to verify | Artifact |
-|---|---|---|---|
-| B1 | Operator can run `scripts/test-unit-local.sh` on Hyperion with `/Applications/c11.app` AND a `c11 DEV.app` running, and neither dies | Open prod + DEV → invoke `scripts/test-unit-local.sh -only-testing:c11Tests/AppDelegateShortcutRoutingTests/<some fast test>` → confirm test host launches with its own per-PID socket path and prod/DEV sockets remain live | runtime check |
-| B2 | New c11LogicTests case verifies the socket path is per-PID under XCTest | `grep -rn "XCTestConfigurationFilePath" c11LogicTests/` — finds the new test in `SocketControlSettings`-related test file; running `xcodebuild -scheme c11-logic test` includes it | c11LogicTests source |
-| B3 | CLAUDE.md no longer mentions the "Don't run xcodebuild test on c11 locally" prohibition | `grep -in "don't run xcodebuild" code/c11/CLAUDE.md` → no match; section instead points at `scripts/test-unit-local.sh` | CLAUDE.md |
-| B4 | Scheme env var self-documents the isolation | `grep -n "CMUX_TAG" GhosttyTabs.xcodeproj/xcshareddata/xcschemes/c11-unit.xcscheme` — finds `EnvironmentVariable` block with `local-xctest` value | scheme XML |
-
-## Area C — c11Tests stabilization
-
-| # | Acceptance criterion | How to verify | Artifact |
-|---|---|---|---|
-| C1 | `c11-unit` step in CI green on main for 5+ consecutive runs | `gh run list --workflow ci.yml --branch main --limit 5` — all 5 runs show `c11-unit` step green | ci.yml runs |
-| C2 | CI flips `c11-unit` from `continue-on-error: true` back to hard-fail | `grep -A 3 "Host-bound unit tests" .github/workflows/ci.yml` — no `continue-on-error: true` line | ci.yml source |
-| C3 | Quarantined slow test re-enabled | `grep -A 3 "testMinimalModeUsesZeroTopSafeAreaForMainWindowContentView" c11Tests/AppDelegateShortcutRoutingTests.swift` — no `XCTSkip`; test executes in the run | c11Tests source |
-| C4 | AAR comment on C11-99 covering the actual root cause | `lattice show C11-99` → find a `comment_added` event from `delegator:c-stab` with the AAR (portable insight for future test design — what class of timing assumption was wrong) | C11-99 events |
-
-## Area D — Workflow / scripts / docs hygiene
-
-| # | Acceptance criterion | How to verify | Artifact |
-|---|---|---|---|
-| D1 | `update-homebrew.yml` has `timeout-minutes: 10` | `grep -n "timeout-minutes" .github/workflows/update-homebrew.yml` → finds `10` | workflow source |
-| D2 | `sparkle_generate_appcast.sh` defaults flipped to Stage-11-Agentics/c11 (or requires explicit envs) | `grep -n "DOWNLOAD_URL_PREFIX\|RELEASE_NOTES_URL" scripts/sparkle_generate_appcast.sh` → no `manaflow-ai/cmux` in default fallbacks | script source |
-| D3 | `bump-version.sh` hard-fails on Sparkle-floor curl returning 0 bytes when invoked for release tag | Read `scripts/bump-version.sh:28` and surrounding logic — confirms guard added | script source |
-| D4 | `claude.yml` deleted | `test ! -f .github/workflows/claude.yml` | filesystem |
-| D5 | `test-e2e.yml` deleted | `test ! -f .github/workflows/test-e2e.yml` | filesystem |
-| D6 | `code/c11/CLAUDE.md` ghostty submodule section reflects real remote layout | `grep -A 5 "Ghostty submodule workflow" code/c11/CLAUDE.md` — references `stage11` remote, not `manaflow` | CLAUDE.md |
-
----
-
-## Cross-area integration checks
-
-| # | Criterion | How to verify |
-|---|---|---|
-| X1 | Local-test wrapper actually unblocks Area C's iteration loop | Have Result Validator run `scripts/test-unit-local.sh -only-testing:c11Tests/<one previously-flaky test>` and confirm it passes locally after C's fixes |
-| X2 | No regression in release path | `gh run list --workflow release.yml --limit 3` after a tag push (or against the latest pre-existing successful run if no new tag) — green |
-| X3 | No regression in mailbox-parity | `gh run list --workflow mailbox-parity.yml --limit 3` — still green |
-
-## When to skip Phase 4
-
-Skip the formal Result Validator pass only if all of: (a) operator has personally walked the 4 areas in PR review, (b) all PRs are merged, (c) operator confirms 5+ consecutive green main runs. Otherwise run it.
+| # | Criterion (ID) | Verification method | Artifact to inspect | Pass condition | runnable_at |
+|---|---|---|---|---|---|
+| 1 | DX-1 | Read PR tree: dispatch switch gone from TerminalController.swift; per-domain handler files under a dedicated dir | PR (C11-159) diff | No socket dispatch switch in TerminalController.swift; ≥6 domain handler units present | pre-merge-static |
+| 2 | DX-2 | Compare recorded pre-change tests_v2 baseline vs post-change run on the ticket; check c11-logic + CI status on PR | C11-159 validation artifacts + PR checks | Baseline and post-change results identical; c11-logic green; CI green | pre-merge-static |
+| 3 | DX-3 | Diff audit per handler: threading annotations (off-main vs main-actor) preserved; grep diff for added `DispatchQueue.main.sync` | PR (C11-159) diff | Zero handlers change threading tier; zero added main.sync on telemetry paths | pre-merge-static |
+| 4 | DX-4 | `wc -l` on TerminalController.swift and each new handler file at PR head | PR (C11-159) branch | TerminalController.swift < ~10k LOC; no new handler > ~3k LOC | pre-merge-static |
+| 5 | DX-5 | Diff audit: socket method names and wire response shapes unchanged; no new abstraction beyond the handler seam | PR (C11-159) diff | No renamed methods, no changed response shapes | pre-merge-static |
+| 6 | HYG-1 | Run `git ls-files \| grep -c node_modules` at PR head; check .gitignore; CI status | PR (C11-160) branch + checks | Count = 0; gitignored; CI green | pre-merge-static |
+| 7 | HYG-2 | `gh pr list --author app/dependabot --state open`; read closure comments on closed ones | GitHub PR list | Zero open dependabot PRs; every closure carries a one-line reason | pre-merge-static |
+| 8 | HYG-3 | Confirm stale-branch inventory artifact exists (local+remote, last-commit date, merged status) | C11-160 attachment | Inventory complete and readable; NO deletions performed | pre-merge-static |
+| 9 | HYG-3b | Operator reviews inventory and decides deletions | inventory artifact | Operator call | post-merge-smoke |
+| 10 | WEB-1 | Repo grep for manaflow domains/keys under web/ at PR head | PR (C11-161) branch | Only deliberate lineage credits remain | pre-merge-static |
+| 11 | WEB-2 | Read CONTRIBUTING.md at PR head | PR (C11-161) branch | Directs to Stage-11-Agentics/c11 | pre-merge-static |
+| 12 | WEB-3 | Count dotted v2 method registrations in source vs method-index entries in docs/socket-api-reference.md; grep doc for cmux branding | PR (C11-161) branch | Counts match; zero stale cmux naming; JSON-RPC framing documented | pre-merge-static |
+| 13 | WEB-4 | ROADMAP.md exists at repo root; PHILOSOPHY.md reference resolves | PR (C11-161) branch | Both true | pre-merge-static |
+| 14 | WEB-5 | Read tests_v2 discovery code at PR head + delegator's recorded discovery-run log (c11-only PATH) | PR diff + C11-161 artifact | Discovery locates `c11` binary; recorded run passed with no `cmux` binary on PATH | pre-merge-static |
+| 15 | TEL-1 | Read PR: timestamp persisted with canonical metadata; socket test present; delegator's socket-test artifact (set key → get_metadata returns last-updated; snapshot round-trip) | PR (C11-162) diff + artifact | Test exists + recorded run green | pre-merge-static |
+| 16 | TEL-2 | Inspect recorded decay demo (accelerated TTL screenshots fresh/stale/expired); settings expose thresholds w/ 5m/15m defaults | C11-162 artifacts + diff | Screenshots show three visual states; defaults + tunability in code | pre-merge-static |
+| 17 | TEL-2b | Operator judges decay rendering + thresholds by living with it | merged build | Feels right (felt) | post-merge-smoke |
+| 18 | TEL-3 | Read derived-liveness implementation + recorded scripted proof (silent pane vs output pane, derived tier via socket) | PR diff + C11-162 artifact | Derived tier written; never overwrites fresh explicit | pre-merge-static |
+| 19 | TEL-4 | Recorded takeover demo + screenshot of derived-distinct pill; code path for explicit-resume | C11-162 artifacts + diff | Takeover on expiry; visually distinct; explicit resumes on re-report | pre-merge-static |
+| 20 | TEL-5 | Hot-path diff review: CLAUDE.md hot-path list untouched (or justified); no per-keystroke/per-frame additions | PR (C11-162) diff | Clean or explicitly justified | pre-merge-static |
+| 21 | TEL-6 | Tagged-build screenshots vs docs/c11-waiting-agent-cluster-plan.md design spec | C11-162 artifacts | Two-row cluster, rename, lit-state inversion, prev/next arrows all present | pre-merge-static |
+| 22 | TEL-6b | Operator judges cluster restyle at a glance | merged build | Earns its place (felt) | post-merge-smoke |
+| 23 | TEL-7 | Both scenarios recorded: (a) status → silence → decay → derived flip; (b) never-reporting agent with output → derived `working` | C11-162 artifacts | Both recordings attached and show claimed behavior | pre-merge-static |
+| 24 | TEL-8 | Skill metadata-reference diff in same PR; sync script run noted | PR (C11-162) diff | Age/decay + derived-liveness documented | pre-merge-static |
+| 25 | EVT-1 | Read emitter + envelope schema in spec/; delegator's tail-capture validated against schema | PR (C11-163) diff + artifact | NDJSON w/ seq, ISO-8601 ts, type, subject refs, payload | pre-merge-static |
+| 26 | EVT-2 | Taxonomy check: each v1 member has an emit site; recorded trigger-each-member run | PR diff + C11-163 artifact | All members present (derived-liveness via TEL stub if seam hit) | pre-merge-static |
+| 27 | EVT-3 | Code audit: writes off-main, non-blocking; stall-injection test present + recorded result | PR diff + C11-163 artifact | UI/socket unaffected by slow disk in test | pre-merge-static |
+| 28 | EVT-4 | Rotation test/recorded run: fill past cap, one rolled generation, rotation detectable | PR diff + C11-163 artifact | Rotation observed w/ marker or seq reset | pre-merge-static |
+| 29 | EVT-5 | CLI matrix recorded: `c11 events tail` with --follow / --filter type= / --since | C11-163 artifact | All three flags demonstrated | pre-merge-static |
+| 30 | EVT-6 | Latency measurement in recorded run (transition ts vs consumer-observed ts) | C11-163 artifact | < 1s under normal load | pre-merge-static |
+| 31 | EVT-7 | Consumer-reacts demo recording (status change, mailbox delivery, surface close) | C11-163 artifact | All three appear; consumer reacts | pre-merge-static |
+| 32 | EVT-8 | Skill diff + spec/ schema in same PR | PR (C11-163) diff | Both present | pre-merge-static |
+| 33 | RES-1 | Recorded kill-and-relaunch scenario run (≥10 conversations, ≥3 workspaces, ≥3 kinds incl. claude-code+codex) + per-surface resume/diagnostic table | C11-164 artifacts | Every surface resumes per tier OR shows specific diagnostic_reason; zero silent fresh-launches | pre-merge-static |
+| 34 | RES-1b | Operator force-quits real session once and relaunches | merged build | Everything comes back | post-merge-smoke |
+| 35 | RES-2 | Scope trace in ticket: each wired subsystem ↔ scenario need | C11-164 attachment | Complete mapping, no unscoped work | pre-merge-static |
+| 36 | RES-3 | Harness script in PR, documented; two consecutive green runs recorded | PR diff + C11-164 artifact | Script exists; 2× green | pre-merge-static |
+| 37 | RES-4 | Existing resume suites green; CI green | PR (C11-164) checks | Green | pre-merge-static |
+| 38 | RES-5 | references/conversation.md diff in same PR | PR (C11-164) diff | Per-kind crash guarantees documented | pre-merge-static |
+| 39 | COR-1 | Read rejection code + socket test matrix (all 10 write commands, empty + absent ref) + recorded run | PR (C11-165) diff + artifact | Error returned, no write lands, for every command | pre-merge-static |
+| 40 | COR-2 | Skill footgun-guidance diff in same PR | PR (C11-165) diff | Updated to new contract | pre-merge-static |
+| 41 | COR-3 | Sweep artifact (audit list → fix commit map); flood-test recorded run with clean hang-monitor log | C11-165 artifacts | pane.confirm, feedback.submit, nested CFRunLoopRun genre all addressed; monitor clean | pre-merge-static |
+| 42 | COR-4 | Both regression tests present in diff and green in CI | PR (C11-165) diff + checks | Empty-ref logic test + socket-flood test, green | pre-merge-static |
+| 43 | Smoke-1 | Live with new sidebar for a day (decay feel, derived-pill trust) | merged build | Operator judgment (felt) | post-merge-smoke |
+| 44 | Smoke-2 | `c11 events tail --follow` open during a normal day: signal or noise? | merged build | Operator judgment (felt) | post-merge-smoke |

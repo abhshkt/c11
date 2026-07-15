@@ -20,7 +20,17 @@ final class AgentSkillsModel: ObservableObject {
             packages.contains { $0.state == .installedOutdated || $0.state == .installedNoManifest || $0.state == .schemaMismatch }
         }
         var needsInstallOrUpdate: Bool {
-            !isSharedDestination && !packages.isEmpty && packages.contains { $0.state == .notInstalled || $0.state == .installedOutdated }
+            // Single source of truth with the auto-show gate: a row is
+            // actionable iff `AgentSkillsOnboarding.shouldRowOffer` (the same
+            // classifier `shouldPresent` uses) would offer one of its packages.
+            // This must stay aligned with the gate — if it counts fewer states
+            // than the gate offers (it previously omitted `.installedNoManifest`
+            // and `.schemaMismatch`), such a row auto-pops the sheet yet renders
+            // the celebratory "Done" branch whose handler persists nothing, so
+            // the sheet re-fires on every launch with no way for the operator to
+            // resolve it. Shared destinations stay non-actionable; their owner
+            // row carries the same on-disk state and remains offerable.
+            !isSharedDestination && packages.contains { AgentSkillsOnboarding.shouldRowOffer($0) }
         }
         var anyInstalled: Bool {
             packages.contains { $0.state != .notInstalled }
@@ -164,6 +174,19 @@ final class AgentSkillsModel: ObservableObject {
                 AgentSkillsOnboarding.clearDismissal(for: target, skillName: name)
             }
             lastActionMessage = formatInstallMessage(result: result)
+            // For TUIs that support plugins (OpenCode), install those too.
+            if target.supportsPlugins {
+                let pluginResult = try SkillInstaller.installPlugins(
+                    target: target,
+                    home: home,
+                    sourceDir: source,
+                    force: force,
+                    fileManager: fileManager
+                )
+                if !pluginResult.installed.isEmpty {
+                    lastActionMessage = (lastActionMessage ?? "") + "\nPlugins installed: \(pluginResult.installed.joined(separator: ", "))"
+                }
+            }
         } catch let err as SkillInstallerError {
             lastActionMessage = AgentSkillsLocalized.description(for: err, target: target)
         } catch {
@@ -182,6 +205,18 @@ final class AgentSkillsModel: ObservableObject {
                 fileManager: fileManager
             )
             lastActionMessage = formatRemoveMessage(result: result)
+            // Remove plugins for TUIs that support them (OpenCode).
+            if target.supportsPlugins {
+                let pluginResult = try SkillInstaller.removePlugins(
+                    target: target,
+                    home: home,
+                    sourceDir: source,
+                    fileManager: fileManager
+                )
+                if !pluginResult.removed.isEmpty {
+                    lastActionMessage = (lastActionMessage ?? "") + "\nPlugins removed: \(pluginResult.removed.joined(separator: ", "))"
+                }
+            }
         } catch let err as SkillInstallerError {
             lastActionMessage = AgentSkillsLocalized.description(for: err, target: target)
         } catch {
@@ -569,8 +604,12 @@ struct AgentSkillsOnboardingSheet: View {
 
     @State private var claudeOptIn: Bool = false
     @State private var codexOptIn: Bool = false
+    @State private var grokOptIn: Bool = false
     @State private var kimiOptIn: Bool = false
     @State private var opencodeOptIn: Bool = false
+    @State private var copilotOptIn: Bool = false
+    @State private var piOptIn: Bool = false
+    @State private var ompOptIn: Bool = false
     @State private var initializedDefaultOptIns: Bool = false
     @State private var selectedAction: AgentSkillsOnboardingAction = .install
 
@@ -615,7 +654,7 @@ struct AgentSkillsOnboardingSheet: View {
     }
 
     private var anySelected: Bool {
-        initializedDefaultOptIns && (claudeOptIn || codexOptIn || kimiOptIn || opencodeOptIn)
+        initializedDefaultOptIns && (claudeOptIn || codexOptIn || grokOptIn || kimiOptIn || opencodeOptIn || copilotOptIn || piOptIn || ompOptIn)
     }
 
     private var hasActionNeeded: Bool {
@@ -917,8 +956,12 @@ struct AgentSkillsOnboardingSheet: View {
         switch target {
         case .claude: return $claudeOptIn
         case .codex: return $codexOptIn
+        case .grok: return $grokOptIn
         case .kimi: return $kimiOptIn
         case .opencode: return $opencodeOptIn
+        case .copilot: return $copilotOptIn
+        case .pi: return $piOptIn
+        case .omp: return $ompOptIn
         }
     }
 
@@ -926,8 +969,12 @@ struct AgentSkillsOnboardingSheet: View {
         let selections: [(SkillInstallerTarget, Bool)] = [
             (.claude, claudeOptIn),
             (.codex, codexOptIn),
+            (.grok, grokOptIn),
             (.kimi, kimiOptIn),
             (.opencode, opencodeOptIn),
+            (.copilot, copilotOptIn),
+            (.pi, piOptIn),
+            (.omp, ompOptIn),
         ]
         var selectedKeys: Set<String> = []
         for (target, _) in selections.filter({ $0.1 }) {
@@ -975,6 +1022,16 @@ struct AgentSkillsOnboardingSheet: View {
     }
 
     private func installLater() {
+        // Persist a hash-pinned dismissal for every currently-offered row so
+        // "Later" survives app restarts and only re-surfaces when skill
+        // content actually changes — instead of re-prompting on the very next
+        // launch (the in-memory flag alone covers only this run). An empty
+        // selection records all offered rows.
+        let offered = model.rows.filter(\.detected).flatMap(\.packages)
+        AgentSkillsOnboarding.recordDismissalsForUncheckedRows(
+            offered: offered,
+            selectedKeys: []
+        )
         AgentSkillsOnboarding.markDismissedThisLaunch()
         onDismiss()
     }
@@ -994,8 +1051,12 @@ struct AgentSkillsOnboardingSheet: View {
         let defaults = AgentSkillsOnboarding.defaultOptIns(for: rows)
         claudeOptIn = defaults[.claude] ?? false
         codexOptIn = defaults[.codex] ?? false
+        grokOptIn = defaults[.grok] ?? false
         kimiOptIn = defaults[.kimi] ?? false
         opencodeOptIn = defaults[.opencode] ?? false
+        copilotOptIn = defaults[.copilot] ?? false
+        piOptIn = defaults[.pi] ?? false
+        ompOptIn = defaults[.omp] ?? false
     }
 }
 
@@ -1407,13 +1468,44 @@ enum AgentSkillsOnboarding {
         defaults.set(dict, forKey: dismissalsKey)
     }
 
+    /// Compile-time DEBUG flag surfaced as a value so the environment-driven
+    /// portion of `isLocalDevBuild` stays unit-testable — the logic test
+    /// target compiles DEBUG, so a bare `#if DEBUG` inside `isLocalDevBuild`
+    /// would force the gate `true` under test and hide the env branch.
+    static var isCompiledDebugBuild: Bool {
+        #if DEBUG
+        true
+        #else
+        false
+        #endif
+    }
+
+    /// True when the running app is a **local development build**: either a
+    /// Debug build, or a tagged `reload.sh --tag` / automation build (which
+    /// exports `C11_TAG`). Neither is ever true in a shipped Release without
+    /// a tag. Every local build rebundles edited skills, so the content-hash
+    /// re-offer would pop the onboarding sheet on essentially every launch for
+    /// the person *building* the skills; suppressing the auto-popup here ends
+    /// that treadmill while leaving end-user release behavior untouched. Only
+    /// the automatic `applicationDidBecomeActive` trigger is gated — the
+    /// operator can still open the sheet from Help / Settings.
+    static func isLocalDevBuild(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        isCompiledDebug: Bool = AgentSkillsOnboarding.isCompiledDebugBuild
+    ) -> Bool {
+        // Single source of truth lives in SocketControlSettings (alongside
+        // launchTag / isDebugBuild); keeps the existing call sites + #272 tests.
+        SocketControlSettings.isLocalDevBuild(environment: environment, isDebugBuild: isCompiledDebug)
+    }
+
     /// Should the onboarding sheet be offered on this launch?
     ///
     /// Order of suppression checks (cheapest first):
-    /// 1. Explicit `dontAskAgain` opt-out wins over everything.
-    /// 2. In-memory `_dismissedThisLaunch` covers the "Later" / window-close
+    /// 1. QA launch + local dev/tagged builds never auto-pop.
+    /// 2. Explicit `dontAskAgain` opt-out wins over everything.
+    /// 3. In-memory `_dismissedThisLaunch` covers the "Later" / window-close
     ///    paths for the current run.
-    /// 3. For each detected target × bundled skill that would otherwise
+    /// 4. For each detected target × bundled skill that would otherwise
     ///    offer, the persistent dismissal entry (if any) must match the
     ///    current bundled hash. A matching entry suppresses that row; a
     ///    mismatched entry (content drifted since dismissal) re-surfaces
@@ -1423,8 +1515,17 @@ enum AgentSkillsOnboarding {
         home: URL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true),
         sourceDir: URL? = nil,
         defaults: UserDefaults = .standard,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        isLocalDevBuild: Bool? = nil
     ) -> Bool {
+        // QA launch (`C11_QA_LAUNCH`) suppresses the onboarding sheet so
+        // automated runs reach a usable window with no modal in the way.
+        if QALaunchPolicy.current(environment: environment).isActive { return false }
+        // Local dev / tagged builds rebundle edited skills on every compile,
+        // drifting the content hash and re-offering the sheet; suppress the
+        // auto-popup for the skill author. Release builds fall through.
+        if isLocalDevBuild ?? Self.isLocalDevBuild(environment: environment) { return false }
         if defaults.bool(forKey: dontAskAgainKey) { return false }
         if _dismissedThisLaunch { return false }
         let resolvedSource: URL

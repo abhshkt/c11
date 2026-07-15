@@ -24,17 +24,29 @@ public enum MetadataKey {
     public static let worktree = "worktree"
     public static let branch = "branch"
 
+    /// C11-162 (Telemetry truth) — derived liveness truth. Written by the
+    /// c11 runtime via `SurfaceLivenessDeriver` at the `.derived` tier from a
+    /// surface's shell-activity ground state; agents never write it directly.
+    /// Values: `"working"` | `"idle"`.
+    public static let activity = "activity"
+
     /// Non-canonical display hint used by M3's sidebar chip.
     public static let modelLabel = "model_label"
 
     public static let canonical: Set<String> = [
         role, status, task, model, progress, terminalType, title, description, lifecycleState,
-        worktree, branch
+        worktree, branch, activity
     ]
 
-    public static let canonicalTerminalTypes: Set<String> = [
-        "claude-code", "codex", "kimi", "opencode", "shell", "unknown"
-    ]
+    // Derived from the agent registry plus the two non-agent terminal types.
+    // Adding an agent manifest extends this set automatically.
+    public static let canonicalTerminalTypes: Set<String> = {
+        var types: Set<String> = ["shell", "unknown"]
+        for manifest in AgentRegistry.shared.all where manifest.isCanonicalTerminalType {
+            types.insert(manifest.kind)
+        }
+        return types
+    }()
 }
 
 public enum MetadataSource: String, CaseIterable, Codable, Sendable {
@@ -171,12 +183,15 @@ final class SurfaceMetadataStore: @unchecked Sendable {
         "lifecycle_state",
         "worktree",
         "branch",
+        "activity",
         "claude.session_id",
         "claude.session_project_dir",
         "codex.session_id",
         "codex.session_project_dir",
         "codex.session_store",
-        "codex.restart_blocked"
+        "codex.restart_blocked",
+        "opencode.session_id",
+        "opencode.session_project_dir"
     ]
 
     private static let codexSessionAtomicKeys: Set<String> = [
@@ -268,6 +283,13 @@ final class SurfaceMetadataStore: @unchecked Sendable {
             // C11-104 — derived branch name (or "(detached @ <sha>)"
             // or "(no branch)"). Up to 64 chars per spec.
             return validateString(key: key, value: value, maxLen: 64)
+        case "activity":
+            // C11-162 — derived liveness truth ("working" | "idle"). Plain
+            // string with a tight cap, mirroring the worktree/branch derived
+            // validators. The deriver only ever writes the two rawValues of
+            // `SidebarActivityState`, so a size cap is sufficient; no grammar
+            // check is needed.
+            return validateString(key: key, value: value, maxLen: 16)
         case "claude.session_id":
             // Claude SessionStart's `session_id` is a UUIDv4; reject
             // anything else. The value is interpolated verbatim into
@@ -324,6 +346,37 @@ final class SurfaceMetadataStore: @unchecked Sendable {
                 return .reservedKeyInvalidType(key, "expected string")
             }
             if !isValidCodexSessionProjectDir(s) {
+                return .reservedKeyInvalidType(
+                    key,
+                    "must be an absolute POSIX path (≤4096 chars, no NUL/newline/single-quote)"
+                )
+            }
+            return nil
+        case "opencode.session_id":
+            // opencode's `session.created` id is `ses_` + 26-char base62,
+            // not a UUID. The value is interpolated into the resume
+            // command (`opencode … -s <id>`) at restore time, so a
+            // non-conforming value would be a command-injection vector.
+            // See `isValidOpencodeSessionId` for the grammar.
+            guard let s = value as? String else {
+                return .reservedKeyInvalidType(key, "expected string")
+            }
+            if !isValidOpencodeSessionId(s) {
+                return .reservedKeyInvalidType(
+                    key,
+                    "must match ses_ + 26-char base62 body"
+                )
+            }
+            return nil
+        case "opencode.session_project_dir":
+            // Project directory the opencode session was created in; same
+            // grammar as `claude.session_project_dir`. Interpolated into
+            // `cd '<path>' && …` at restore time, so reject anything that
+            // could break the single-quote escape.
+            guard let s = value as? String else {
+                return .reservedKeyInvalidType(key, "expected string")
+            }
+            if !isValidOpencodeSessionProjectDir(s) {
                 return .reservedKeyInvalidType(
                     key,
                     "must be an absolute POSIX path (≤4096 chars, no NUL/newline/single-quote)"
@@ -657,6 +710,8 @@ final class SurfaceMetadataStore: @unchecked Sendable {
             if let existing = blob[key], sameJSONValue(existing, value), sblob[key]?.source == source {
                 return false
             }
+            // C11-163: capture prior before overwrite (amendment E).
+            let priorValue = blob[key]
             blob[key] = value
             sblob[key] = SourceRecord(source: source, ts: Date().timeIntervalSince1970)
 
@@ -668,6 +723,19 @@ final class SurfaceMetadataStore: @unchecked Sendable {
             metadata[workspaceId, default: [:]][surfaceId] = blob
             sources[workspaceId, default: [:]][surfaceId] = sblob
             metadataStoreRevision &+= 1
+
+            // C11-163: publish canonical metadata change (post-commit).
+            if EventEmitter.canonicalMetadataEventKeys.contains(key) {
+                EventEmitter.shared.emitMetadataChanged(
+                    scope: "surface",
+                    workspace: workspaceId,
+                    surface: surfaceId,
+                    key: key,
+                    value: value,
+                    prior: priorValue,
+                    source: source.rawValue
+                )
+            }
             return true
         }
     }
@@ -709,6 +777,11 @@ final class SurfaceMetadataStore: @unchecked Sendable {
 
         let ts = Date().timeIntervalSince1970
         var mutated = false
+        // C11-163: canonical metadata changes to publish to the events stream
+        // AFTER the write commits (the size guard below can still abort).
+        // Prior value is captured inline here — the surface store does not
+        // populate WriteResult.priorValues (amendment E).
+        var canonicalEventChanges: [(key: String, value: Any, prior: Any?)] = []
 
         if mode == .replace {
             // `mode == .replace` discarded the prior blob above. If that prior
@@ -770,6 +843,9 @@ final class SurfaceMetadataStore: @unchecked Sendable {
                 result.applied[k] = true
                 continue
             }
+            if EventEmitter.canonicalMetadataEventKeys.contains(k) {
+                canonicalEventChanges.append((key: k, value: v, prior: existing))
+            }
             blob[k] = v
             sblob[k] = SourceRecord(source: source, ts: ts)
             result.applied[k] = true
@@ -790,6 +866,21 @@ final class SurfaceMetadataStore: @unchecked Sendable {
         result.metadata = blob
         result.sources = sblob.mapValues { $0.toJSON() }
         if mutated { metadataStoreRevision &+= 1 }
+
+        // C11-163: publish canonical metadata changes now that the write has
+        // committed (post size-guard). Off the store's serial queue; emit is
+        // fire-and-forget and never blocks this path.
+        for change in canonicalEventChanges {
+            EventEmitter.shared.emitMetadataChanged(
+                scope: "surface",
+                workspace: workspaceId,
+                surface: surfaceId,
+                key: change.key,
+                value: change.value,
+                prior: change.prior,
+                source: source.rawValue
+            )
+        }
         return result
     }
 

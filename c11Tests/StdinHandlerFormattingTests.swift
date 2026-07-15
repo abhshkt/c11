@@ -139,7 +139,7 @@ final class StdinHandlerFormattingTests: XCTestCase {
             id: "01K3A2B7X8PQRTVWYZ0123456J",
             ts: "2026-04-23T10:15:42Z"
         )
-        let handler = StdinMailboxHandler(writer: { _, bytes in
+        let handler = StdinMailboxHandler(writer: { _, _, _, bytes in
             .ok(bytes: bytes.utf8.count)
         })
         let surfaceId = UUID()
@@ -152,6 +152,71 @@ final class StdinHandlerFormattingTests: XCTestCase {
         XCTAssertGreaterThan(result.bytes ?? 0, 0)
     }
 
+    /// C11-144: when the writer buffers (recipient shell busy), `deliver` must
+    /// report `.buffered` with the byte count — a delivery, not a drop.
+    func testDeliverReportsBufferedWhenWriterBuffers() async throws {
+        let envelope = try MailboxEnvelope.build(
+            from: "builder",
+            to: "watcher",
+            body: "buffered hello",
+            id: "01K3A2B7X8PQRTVWYZ0123456J",
+            ts: "2026-04-23T10:15:42Z"
+        )
+        let handler = StdinMailboxHandler(writer: { _, _, _, bytes in
+            .buffered(bytes: bytes.utf8.count)
+        })
+        let result = await handler.deliver(
+            envelope: envelope,
+            to: UUID(),
+            surfaceName: "watcher"
+        )
+        XCTAssertEqual(result.outcome, .buffered)
+        XCTAssertGreaterThan(result.bytes ?? 0, 0)
+    }
+
+    /// The writer receives the envelope id and resolved recipient name so the
+    /// buffer/flush path can log a coherent `handler` event for that id.
+    func testDeliverPassesEnvelopeIdAndRecipientToWriter() async throws {
+        let envelope = try MailboxEnvelope.build(
+            from: "builder",
+            to: "watcher",
+            body: "hi",
+            id: "01K3A2B7X8PQRTVWYZ0123456J",
+            ts: "2026-04-23T10:15:42Z"
+        )
+        // Lock-protected box so the *synchronous* writer closure can capture
+        // its arguments inline. The prior version made this an actor, which
+        // forced the writer to spawn a detached `Task { await … }` and the
+        // test to `Task.sleep(50ms)` and hope it ran — a race that lost on a
+        // busy CI runner. `deliver` invokes the writer synchronously and
+        // returns its result, so the capture is complete the moment `deliver`
+        // returns: no Task, no sleep, deterministic.
+        final class Captured: @unchecked Sendable {
+            private let lock = NSLock()
+            private var idValue: String?
+            private var recipientValue: String?
+            func set(id: String, recipient: String) {
+                lock.lock(); defer { lock.unlock() }
+                idValue = id
+                recipientValue = recipient
+            }
+            var id: String? { lock.lock(); defer { lock.unlock() }; return idValue }
+            var recipient: String? { lock.lock(); defer { lock.unlock() }; return recipientValue }
+        }
+        let captured = Captured()
+        let handler = StdinMailboxHandler(writer: { _, envelopeId, recipientName, bytes in
+            captured.set(id: envelopeId, recipient: recipientName)
+            return .ok(bytes: bytes.utf8.count)
+        })
+        _ = await handler.deliver(
+            envelope: envelope,
+            to: UUID(),
+            surfaceName: "watcher"
+        )
+        XCTAssertEqual(captured.id, "01K3A2B7X8PQRTVWYZ0123456J")
+        XCTAssertEqual(captured.recipient, "watcher")
+    }
+
     func testDeliverReportsClosedWhenSurfaceNotFound() async throws {
         let envelope = try MailboxEnvelope.build(
             from: "builder",
@@ -160,7 +225,7 @@ final class StdinHandlerFormattingTests: XCTestCase {
             id: "01K3A2B7X8PQRTVWYZ0123456J",
             ts: "2026-04-23T10:15:42Z"
         )
-        let handler = StdinMailboxHandler(writer: { _, _ in .surfaceNotFound })
+        let handler = StdinMailboxHandler(writer: { _, _, _, _ in .surfaceNotFound })
         let result = await handler.deliver(
             envelope: envelope,
             to: UUID(),
@@ -178,7 +243,7 @@ final class StdinHandlerFormattingTests: XCTestCase {
             ts: "2026-04-23T10:15:42Z"
         )
         let handler = StdinMailboxHandler(
-            writer: { _, _ in
+            writer: { _, _, _, _ in
                 // Simulate a hang that exceeds the timeout deadline.
                 Thread.sleep(forTimeInterval: 0.6)
                 return .ok(bytes: 0)
@@ -217,7 +282,7 @@ final class StdinHandlerFormattingTests: XCTestCase {
         // Thread.sleep blocks that thread for the whole interval — exactly
         // the scenario the reporting-bound documentation describes.
         let handler = StdinMailboxHandler(
-            writer: { _, _ in
+            writer: { _, _, _, _ in
                 Thread.sleep(forTimeInterval: 5.0)
                 return .ok(bytes: 0)
             },

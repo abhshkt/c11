@@ -864,12 +864,12 @@ class GhosttyApp {
     private static func resolveBackgroundLogURL(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> URL {
-        if let explicitPath = environment["CMUX_DEBUG_BG_LOG"],
+        if let explicitPath = c11Env("C11_DEBUG_BG_LOG", in: environment),
            !explicitPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return URL(fileURLWithPath: explicitPath)
         }
 
-        if let debugLogPath = environment["CMUX_DEBUG_LOG"],
+        if let debugLogPath = c11Env("C11_DEBUG_LOG", in: environment),
            !debugLogPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let baseURL = URL(fileURLWithPath: debugLogPath)
             let extensionSeparatorIndex = baseURL.lastPathComponent.lastIndex(of: ".")
@@ -882,10 +882,10 @@ class GhosttyApp {
     }
 
     let backgroundLogEnabled = {
-        if ProcessInfo.processInfo.environment["CMUX_DEBUG_BG"] == "1" {
+        if c11Env("C11_DEBUG_BG", in: ProcessInfo.processInfo.environment) == "1" {
             return true
         }
-        if ProcessInfo.processInfo.environment["CMUX_DEBUG_LOG"] != nil {
+        if c11Env("C11_DEBUG_LOG", in: ProcessInfo.processInfo.environment) != nil {
             return true
         }
         if ProcessInfo.processInfo.environment["GHOSTTYTABS_DEBUG_BG"] == "1" {
@@ -3347,6 +3347,15 @@ final class TerminalSurface: Identifiable, ObservableObject {
         func setManagedEnvironmentValue(_ key: String, _ value: String) {
             env[key] = value
             protectedStartupEnvironmentKeys.insert(key)
+            // Export the canonical C11_* twin alongside every managed CMUX_*
+            // var so agents inside the surface can rely on the project-convention
+            // names ($C11_SURFACE_ID, $C11_TAB_ID, $C11_SHELL_INTEGRATION, …),
+            // not just the legacy $CMUX_* aliases. Non-CMUX keys (PATH, ZDOTDIR)
+            // are left untouched.
+            if let twin = c11TwinKey(forCmuxKey: key) {
+                env[twin] = value
+                protectedStartupEnvironmentKeys.insert(twin)
+            }
         }
 
         setManagedEnvironmentValue("CMUX_SURFACE_ID", id.uuidString)
@@ -3357,7 +3366,14 @@ final class TerminalSurface: Identifiable, ObservableObject {
         // CMUX_TAB_ID to resolve to a surface (accepts `tab:<n>` or `surface:<n>`).
         setManagedEnvironmentValue("CMUX_PANEL_ID", id.uuidString)
         setManagedEnvironmentValue("CMUX_TAB_ID", id.uuidString)
-        setManagedEnvironmentValue("CMUX_SOCKET_PATH", SocketControlSettings.socketPath())
+        // Inject the *actually-bound* socket path (not the recomputed resolution
+        // path) so a build that fell back to a safe alternate path (C11-155) still
+        // hands its children the correct socket. Set the canonical C11_ key too.
+        let boundSocketPath = TerminalController.shared.activeSocketPath(
+            preferredPath: SocketControlSettings.socketPath()
+        )
+        setManagedEnvironmentValue("CMUX_SOCKET_PATH", boundSocketPath)
+        setManagedEnvironmentValue("C11_SOCKET_PATH", boundSocketPath)
         if let bundledCLIURL = Bundle.main.resourceURL?.appendingPathComponent("bin/c11"),
            FileManager.default.isExecutableFile(atPath: bundledCLIURL.path) {
             setManagedEnvironmentValue("CMUX_BUNDLED_CLI_PATH", bundledCLIURL.path)
@@ -3769,6 +3785,12 @@ final class TerminalSurface: Identifiable, ObservableObject {
 
     func sendText(_ text: String) {
         guard let data = text.data(using: .utf8), !data.isEmpty else { return }
+        // C11-24: bump the per-surface activity timestamp. Off-main and
+        // debounced; safe to call from this entry point because sendText
+        // itself is not the per-keystroke typing-hot path
+        // (`forceRefresh`/`hitTest`/`TabItemView` are — sendText handles
+        // bigger composed input and synthesised pastes).
+        SurfaceActivityTracker.shared.recordActivity(surfaceId: id.uuidString)
         guard let surface = surface else {
             enqueuePendingText(data)
             return
@@ -3809,7 +3831,12 @@ final class TerminalSurface: Identifiable, ObservableObject {
         }
     }
 
-    private func scheduleSubmitReturnAfterPasteDelay() {
+    /// Dispatch a synthetic Return as a distinct key event after the
+    /// paste-settle delay. Used by the interactive text box submit and by the
+    /// socket `send` submit path, both of which type text first and must let a
+    /// paste-detecting TUI finish ingesting before the Return lands (a Return
+    /// inside the input burst is silently swallowed).
+    func scheduleSubmitReturnAfterPasteDelay() {
         let delayMs = TextBoxBehavior.returnKeyDelayMs
         if delayMs <= 0 {
             sendKey(.returnKey)
@@ -3865,9 +3892,38 @@ final class TerminalSurface: Identifiable, ObservableObject {
 
     /// Named-key wrapper used by `TextBoxInputContainer` when routing
     /// decides a keystroke belongs to the terminal (Rule 5/9) or when
-    /// submitting via bracket-paste (`TextBoxSubmit`).
+    /// submitting via bracket-paste (`TextBoxSubmit`), and by the socket
+    /// `send` submit path.
+    ///
+    /// C11-173: `sendSyntheticKey` needs `view.window` to fabricate an
+    /// `NSEvent`, and a pane in a *background workspace* is portal-detached —
+    /// its view has no window. That made every socket-driven submit into a
+    /// background agent a silent no-op: the text landed, the Return did not,
+    /// and the message sat in the composer forever while `send` reported OK.
+    /// Inject straight into Ghostty when there is no window; every key in
+    /// `TerminalKey` is a control key, so the keycode alone encodes it.
     func sendKey(_ key: TextBoxKeyRouting.TerminalKey) {
+        if surfaceView.window == nil, let surface {
+            sendKeyDirectlyToSurface(keyCode: key.keyCode, surface: surface)
+            return
+        }
         sendSyntheticKey(characters: key.characters, keyCode: key.keyCode)
+    }
+
+    /// Window-independent key injection: hand Ghostty the key event directly
+    /// rather than routing a synthesized `NSEvent` through AppKit. Ghostty owns
+    /// the keycode → PTY-bytes translation, so this produces the same bytes a
+    /// real keypress would.
+    private func sendKeyDirectlyToSurface(keyCode: UInt16, surface: ghostty_surface_t) {
+        var event = ghostty_input_key_s()
+        event.action = GHOSTTY_ACTION_PRESS
+        event.keycode = UInt32(keyCode)
+        event.mods = GHOSTTY_MODS_NONE
+        event.consumed_mods = GHOSTTY_MODS_NONE
+        event.unshifted_codepoint = 0
+        event.composing = false
+        event.text = nil
+        _ = ghostty_surface_key(surface, event)
     }
 
     /// Pass-through for a fully-formed NSEvent (Rule 2 `forwardControl`).
@@ -6265,7 +6321,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             let manifestItem = menu.addItem(
                 withTitle: String(
                     localized: "surfaceManifest.menuItem",
-                    defaultValue: "Show surface manifest…"
+                    defaultValue: "Surface Details"
                 ),
                 action: #selector(showSurfaceManifest(_:)),
                 keyEquivalent: ""
@@ -6731,6 +6787,10 @@ final class GhosttySurfaceScrollView: NSView {
     }
     /// [TextBox] Read-only accessor used by `TerminalSurface.scrollbarOffset`.
     var currentScrollbarOffset: UInt64? { surfaceView.scrollbar?.offset }
+    /// Font cell size (points) as last reported by Ghostty. `.zero` until the
+    /// surface has been measured. Used by size-aware split decisions to convert a
+    /// pane's pixel rect to columns × rows.
+    var cellSize: CGSize { surfaceView.cellSize }
     /// Threshold in points from bottom to consider "at bottom" (allows for minor float drift)
     private static let scrollToBottomThreshold: CGFloat = 5.0
     private var isActive = true
@@ -9576,7 +9636,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
         // the current layout turn. Re-entrant syncs here can wedge window resize
         // handling and leave the app spinning on the wait cursor.
         guard let window else { return }
-        TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: window)
+        TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: window, trigger: "hostGeometryRevision")
     }
 
     func makeNSView(context: Context) -> NSView {

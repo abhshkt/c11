@@ -24,6 +24,34 @@ func mirrorC11CmuxEnv() {
     }
 }
 
+/// The canonical `C11_*` twin for a managed `CMUX_*` env key, or `nil` when
+/// `key` isn't a `CMUX_`-prefixed name. Used when building a surface's
+/// environment so every managed `CMUX_*` var is exported under its `C11_*`
+/// name too — agents can then rely on the project-convention names
+/// (`$C11_SURFACE_ID`, `$C11_TAB_ID`, `$C11_SHELL_INTEGRATION`, …) rather than
+/// the legacy `$CMUX_*` aliases. Non-`CMUX_` keys (PATH, ZDOTDIR) return nil.
+func c11TwinKey(forCmuxKey key: String) -> String? {
+    guard key.hasPrefix("CMUX_") else { return nil }
+    return "C11_" + key.dropFirst(5)
+}
+
+/// Reads a c11 environment value, preferring the canonical `C11_*` name and
+/// falling back to the legacy `CMUX_*` twin. Pass the canonical `C11_*` key.
+///
+/// This is the read-side mirror of `c11TwinKey(forCmuxKey:)` (which dual-writes
+/// a `C11_*` twin for every managed `CMUX_*` var exported to child surfaces).
+/// Keeping the `CMUX_*` fallback preserves compatibility for any launch
+/// environment — scripts, schemes, or external callers — still setting the
+/// legacy name. Project convention is to author `C11_*` everywhere; the binary
+/// keeps reading `CMUX_*` so nothing in flight breaks.
+func c11Env(_ canonicalKey: String, in environment: [String: String]) -> String? {
+    if let value = environment[canonicalKey] { return value }
+    if canonicalKey.hasPrefix("C11_") {
+        return environment["CMUX_" + canonicalKey.dropFirst(4)]
+    }
+    return nil
+}
+
 final class MainWindowHostingView<Content: View>: NSHostingView<Content> {
     private let zeroSafeAreaLayoutGuide = NSLayoutGuide()
 
@@ -2202,7 +2230,10 @@ enum StartupLayoutGate {
             action(terminalPanel)
             if let window {
                 DispatchQueue.main.async {
-                    TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: window)
+                    TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(
+                        for: window,
+                        trigger: "terminalPanelReady"
+                    )
                 }
             }
         }
@@ -2511,6 +2542,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var mainWindowControllers: [MainWindowController] = []
     private var startupSessionSnapshot: AppSessionSnapshot?
     private var didPrepareStartupSessionSnapshot = false
+    /// C11-24 review (B2): captured at launch and consumed in
+    /// `prepareStartupSessionSnapshotIfNeeded` *after* `seedFromSnapshot`
+    /// runs, so crash recovery can never race ahead of the bridge seed and
+    /// let stale .alive/.suspended refs through.
+    private var priorShutdownAtLaunch: ShutdownSentinel.PriorShutdown = .missing
+    /// C11-131: guards the read-prior-then-write-dirty arming so it runs
+    /// exactly once, at whichever of `applicationDidFinishLaunching` or
+    /// `prepareStartupSessionSnapshotIfNeeded` fires first. The two race
+    /// under the SwiftUI lifecycle (configure → prepare is driven from the
+    /// view tree, not the app-delegate callback), and a direct binary launch
+    /// can invert the order so prepare wins. Reading the sentinel before
+    /// `writeDirty` is load-bearing — afterward this run's own dirty marker
+    /// would masquerade as the prior shutdown — so the capture must be armed
+    /// from whichever path runs first.
+    private var didArmShutdownSentinel = false
     private var didAttemptStartupSessionRestore = false
     private var isApplyingStartupSessionRestore = false
     private var sessionAutosaveTimer: DispatchSourceTimer?
@@ -2532,7 +2578,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var lastTypingActivityAt: TimeInterval = 0
     private var lastBackgroundedAt: Date?
     private var didHandleExplicitOpenIntentAtStartup = false
-    private var isTerminatingApp = false
+    private(set) var isTerminatingApp = false
     private var didInstallLifecycleSnapshotObservers = false
     private var didDisableSuddenTermination = false
     private var commandPaletteVisibilityByWindowId: [UUID: Bool] = [:]
@@ -2678,14 +2724,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return false
     }
 
+    /// C11-131: read the prior-shutdown sentinel (capturing the crash/clean
+    /// decision) and then write this run's dirty marker. Idempotent: the
+    /// read MUST precede the write, and must happen exactly once, before
+    /// either `applicationDidFinishLaunching` or
+    /// `prepareStartupSessionSnapshotIfNeeded` consumes `priorShutdownAtLaunch`.
+    /// Called from both; whichever runs first arms it.
+    private func armShutdownSentinelIfNeeded() {
+        guard !didArmShutdownSentinel else { return }
+        didArmShutdownSentinel = true
+        let bundleId = Bundle.main.bundleIdentifier ?? "com.stage11.c11"
+        let priorShutdown = ShutdownSentinel.readPriorShutdown(bundleId: bundleId)
+        priorShutdownAtLaunch = priorShutdown
+#if DEBUG
+        // dlog only exists in DEBUG (bonsplit DebugEventLog); the sentinel
+        // logic stays live in Release — only the logging is gated.
+        switch priorShutdown {
+        case .clean(let at):
+            dlog("shutdown.sentinel prior=clean at=\(at.timeIntervalSince1970)")
+        case .dirty(let at):
+            dlog("shutdown.sentinel prior=dirty launchedAt=\(at.map { String($0.timeIntervalSince1970) } ?? "nil") — crash recovery (deferred to post-seed)")
+        case .missing:
+            dlog("shutdown.sentinel prior=missing — first launch or sentinel unwritable")
+        }
+#endif
+        ShutdownSentinel.writeDirty(bundleId: bundleId)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         mirrorC11CmuxEnv()
 
-        // Write before anything else can crash. If a previous launch ended without
-        // calling applicationWillTerminate (Force Quit, SIGKILL, jetsam, in-process
-        // crash that Sentry didn't flush), this archives that marker as
-        // unclean-exit-<ts>.json — the only local rail that survives signal-bypass
-        // termination regardless of telemetry consent.
+        // C11-163: open the events stream early — before session restore
+        // recreates workspaces/surfaces — so surface.created and the
+        // log.opened marker land from the first instant (amendment K).
+        EventEmitter.shared.start()
+
+        // C11-24/C11-131: capture the prior-shutdown decision and arm this
+        // run's dirty sentinel as early as possible — before any potential
+        // crash path. The write must precede crashes; the read must precede
+        // the write. Idempotent so a SwiftUI-driven `prepare` that already
+        // ran does not double-write. Bundle-scoped so debug, release, and
+        // concurrent c11 instances don't cross-contaminate.
+        armShutdownSentinelIfNeeded()
+
+        // C11-24 review (M3): kill-switch breadcrumb. The store
+        // short-circuits four code paths silently when CMUX_DISABLE_-
+        // CONVERSATION_STORE=1 is set; without a startup signal,
+        // operators on the legacy fallback path don't notice until
+        // something visibly regresses. Emit once at launch and surface
+        // via `c11 conversation list --json` for diagnostics. (DEBUG-only:
+        // dlog does not exist in Release builds.)
+#if DEBUG
+        if ConversationStorePolicy.isDisabled {
+            dlog("conversation.kill_switch.engaged env=CMUX_DISABLE_CONVERSATION_STORE — falling back to AgentRestartRegistry")
+        }
+#endif
+
+        // Crash visibility (separate rail from ShutdownSentinel above): if a
+        // previous launch ended without applicationWillTerminate (Force Quit,
+        // SIGKILL, jetsam, in-process crash Sentry didn't flush), archive that
+        // marker as unclean-exit-<ts>.json. Survives signal-bypass termination
+        // regardless of telemetry consent.
         LaunchSentinel.recordLaunchAndArchivePrevious()
 
         // Migrate preferences from legacy upstream cmux bundle IDs before anything
@@ -2785,6 +2884,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // (~/Library/Logs/c11/metrickit/). Forwarding to Sentry is gated on
         // telemetry consent inside CrashDiagnostics itself.
         CrashDiagnostics.shared.install()
+
+        // Real-time main-thread watchdog: captures a backtrace *while* main is
+        // wedged (the beachball case a CFRunLoopObserver can't see). Writes a
+        // local hang log unconditionally; forwards to Sentry/PostHog only with
+        // telemetry consent. Opt out with C11_HANG_MONITOR=0.
+        MainThreadHangMonitor.shared.installIfNeeded()
 
         if telemetryEnabled && !isRunningUnderXCTest {
             PostHogAnalytics.shared.startIfNeeded()
@@ -2952,7 +3057,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard env["CMUX_UI_TEST_SOCKET_SANITY"] == "1" else { return }
 
         guard let config = socketListenerConfigurationIfEnabled() else {
-            payload["socketExpectedPath"] = env["CMUX_SOCKET_PATH"] ?? ""
+            payload["socketExpectedPath"] = c11Env("C11_SOCKET_PATH", in: env) ?? ""
             payload["socketMode"] = "off"
             payload["socketReady"] = "0"
             payload["socketPingResponse"] = ""
@@ -3148,9 +3253,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // Surface to the socket so the `c11 claude-hook session-end` CLI
         // (fired from claude's SessionEnd hook as terminals get killed)
         // skips the surface-metadata clear that would race this same
-        // shutdown's snapshot capture. See `SessionEndShutdownPolicy`.
+        // shutdown's snapshot capture.
         TerminalController.shared.setIsTerminatingApp(true)
-        _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
+        // C11-24 review (M1): the snapshot write happens in
+        // applicationWillTerminate AFTER suspendAllAlive runs, so the
+        // persisted refs carry .suspended state. The original
+        // double-write here wrote .alive first, then .suspended after
+        // suspend. If the OS killed the process between the two writes
+        // (forced logout, low memory, sleep-killed) the on-disk
+        // snapshot ended up with .alive refs and promoteToClean never
+        // ran, so next launch hit the dirty path and markAllUnknown
+        // turned what should have been .suspended into .unknown.
+        // Single load-bearing snapshot in applicationWillTerminate.
         return .terminateNow
     }
 
@@ -3158,7 +3272,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         isTerminatingApp = true
         flushDirtyMarkdownBuffersAcrossWindows()
         TerminalController.shared.setIsTerminatingApp(true)
-        _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
+        // C11-163: drain any queued events before exit so a tailing consumer
+        // sees the final transitions of this instance.
+        EventEmitter.shared.flush()
+        // C11-24: suspendAllAlive transitions every alive ConversationRef
+        // to .suspended so resume on next launch is gated. Synchronous
+        // bridge into the actor (bounded — store has no I/O).
+        // `Task.detached` so the task does not inherit `@MainActor`
+        // isolation from this method (`AppDelegate` is `@MainActor`);
+        // without it, the body cannot run while main is blocked on
+        // `sema.wait` and the suspend never lands.
+        let suspendDone = DispatchSemaphore(value: 0)
+        Task.detached(priority: .userInitiated) {
+            await ConversationStore.shared.suspendAllAlive()
+            suspendDone.signal()
+        }
+        _ = suspendDone.wait(timeout: .now() + 1.0)
+
+        // saveSessionSnapshot writes the snapshot synchronously. Promote
+        // dirty → clean ONLY after both the suspend pass AND the
+        // snapshot succeed, eliminating the false-clean window of the
+        // original at-start-of-shutdown design.
+        let snapshotOK = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
+        if snapshotOK {
+            let bundleId = Bundle.main.bundleIdentifier ?? "com.stage11.c11"
+            ShutdownSentinel.promoteToClean(bundleId: bundleId)
+        }
+
         stopSessionAutosaveTimer()
         TerminalController.shared.stop()
         VSCodeServeWebController.shared.stop()
@@ -3203,8 +3343,155 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func persistSessionForUpdateRelaunch() {
         isTerminatingApp = true
-        TerminalController.shared.setIsTerminatingApp(true)
         _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
+    }
+
+    // MARK: - C11-131: explicit state save + clean app restart
+
+    /// Result of `forceSessionSave`, surfaced by the `session.save` socket
+    /// verb and `c11 state save`.
+    struct SessionSaveResult: Sendable {
+        var snapshotPath: String
+        var outPath: String?
+        var windows: Int
+        var workspaces: Int
+        var terminalPanels: Int
+        var refs: Int
+    }
+
+    /// Force the same full-app session snapshot that autosave and terminate
+    /// use, synchronously, while the app keeps running. Production cousin of
+    /// the DEBUG-only `debugForceMetadataSaveAndLoad`. Does NOT touch the
+    /// shutdown sentinel and does NOT suspend conversation refs — the app is
+    /// still live, refs stay `.alive`. Optionally copies the canonical
+    /// snapshot to `outPath` for archival or test fixtures.
+    ///
+    /// Returns nil only if the snapshot write fails (e.g. no windows).
+    func forceSessionSave(includeScrollback: Bool, outPath: String?) -> SessionSaveResult? {
+        let ok = saveSessionSnapshot(includeScrollback: includeScrollback, removeWhenEmpty: false)
+        guard ok, let canonicalURL = SessionPersistenceStore.defaultSnapshotFileURL() else {
+            return nil
+        }
+        // Read the just-written snapshot back to compute counts and confirm
+        // the on-disk artifact (parity with the canonical restore reader).
+        guard let snapshot = SessionPersistenceStore.load(fileURL: canonicalURL) else {
+            return nil
+        }
+        var workspaces = 0
+        var terminalPanels = 0
+        var refs = 0
+        for window in snapshot.windows {
+            for ws in window.tabManager.workspaces {
+                workspaces += 1
+                for panel in ws.panels where panel.type == .terminal {
+                    terminalPanels += 1
+                    if panel.surfaceConversations?.active != nil { refs += 1 }
+                }
+            }
+        }
+        var resolvedOut: String?
+        if let outPath, !outPath.isEmpty {
+            let outURL = URL(fileURLWithPath: (outPath as NSString).expandingTildeInPath)
+            do {
+                try FileManager.default.createDirectory(
+                    at: outURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                if FileManager.default.fileExists(atPath: outURL.path) {
+                    try FileManager.default.removeItem(at: outURL)
+                }
+                try FileManager.default.copyItem(at: canonicalURL, to: outURL)
+                resolvedOut = outURL.path
+            } catch {
+                // Non-fatal: the canonical save succeeded. Surface the miss
+                // by leaving outPath nil; the CLI reports what landed.
+                resolvedOut = nil
+            }
+        }
+        return SessionSaveResult(
+            snapshotPath: canonicalURL.path,
+            outPath: resolvedOut,
+            windows: snapshot.windows.count,
+            workspaces: workspaces,
+            terminalPanels: terminalPanels,
+            refs: refs
+        )
+    }
+
+    /// One-shot sentinel: when present at next launch, the restore path
+    /// suppresses conversation resume (layout restores, nothing is typed
+    /// into panes). Written by `performCleanRestart(resume: false)` and
+    /// consumed-and-deleted in `prepareStartupSessionSnapshotIfNeeded`.
+    static func restartNoResumeSentinelURL(
+        bundleId: String = Bundle.main.bundleIdentifier ?? "com.stage11.c11"
+    ) -> URL? {
+        guard let dir = ShutdownSentinel.defaultDirectory() else { return nil }
+        let safe = bundleId.replacingOccurrences(
+            of: "[^A-Za-z0-9._-]", with: "_", options: .regularExpression
+        )
+        return dir.appendingPathComponent("restart-no-resume.\(safe)", isDirectory: false)
+    }
+
+    /// The "c11 is laggy, give me a clean restart" command. Runs the full
+    /// clean-shutdown choreography (suspendAllAlive → final snapshot →
+    /// promoteToClean), schedules a relaunch of this exact bundle after the
+    /// process exits, then terminates. Restore + resume happen via the
+    /// normal launch path, so the end state is identical to a menu Quit +
+    /// manual relaunch.
+    ///
+    /// `resume == false` writes the no-resume sentinel so the relaunch
+    /// restores layout but types nothing into panes.
+    func performCleanRestart(resume: Bool) {
+        isTerminatingApp = true
+        let bundleId = Bundle.main.bundleIdentifier ?? "com.stage11.c11"
+
+        if !resume, let url = Self.restartNoResumeSentinelURL(bundleId: bundleId) {
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            try? "1\n".write(to: url, atomically: true, encoding: .utf8)
+        }
+
+        // Mirror applicationWillTerminate: suspend alive refs so they persist
+        // as .suspended (resume-on-next-launch), then a synchronous snapshot,
+        // then promote the sentinel to clean — only after both succeed.
+        let suspendDone = DispatchSemaphore(value: 0)
+        Task.detached(priority: .userInitiated) {
+            await ConversationStore.shared.suspendAllAlive()
+            suspendDone.signal()
+        }
+        _ = suspendDone.wait(timeout: .now() + 1.0)
+
+        let snapshotOK = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
+        if snapshotOK {
+            ShutdownSentinel.promoteToClean(bundleId: bundleId)
+        }
+
+        scheduleSelfRelaunchAfterExit()
+        stopSessionAutosaveTimer()
+        // Terminate cleanly on the next runloop tick so the socket reply for
+        // app.restart can flush before the process goes away.
+        DispatchQueue.main.async {
+            NSApp.terminate(nil)
+        }
+    }
+
+    /// Spawn a detached helper that waits for this process to exit, then
+    /// relaunches the same bundle via LaunchServices (`open`). Detached from
+    /// our process group so it survives our termination.
+    private func scheduleSelfRelaunchAfterExit() {
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let bundlePath = Bundle.main.bundlePath
+        let helper = Process()
+        helper.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // Single-quote the bundle path for the shell; bundle paths never
+        // contain single quotes in practice, but quote defensively.
+        let quoted = "'" + bundlePath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        helper.arguments = [
+            "-c",
+            "while kill -0 \(pid) 2>/dev/null; do sleep 0.1; done; /usr/bin/open -n \(quoted)"
+        ]
+        try? helper.run()
     }
 
     func configure(tabManager: TabManager, notificationStore: TerminalNotificationStore, sidebarState: SidebarState) {
@@ -3305,8 +3592,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func prepareStartupSessionSnapshotIfNeeded() {
         guard !didPrepareStartupSessionSnapshot else { return }
         didPrepareStartupSessionSnapshot = true
+        // C11-131: this can run before `applicationDidFinishLaunching` under
+        // the SwiftUI lifecycle (configure → prepare is view-driven). Arm the
+        // shutdown sentinel here too so `priorShutdownAtLaunch` is the real
+        // prior-shutdown decision, not the default `.missing`, before the
+        // dirty-recovery branch below consumes it. Idempotent.
+        armShutdownSentinelIfNeeded()
         guard SessionRestorePolicy.shouldAttemptRestore() else { return }
-        startupSessionSnapshot = SessionPersistenceStore.load()
+        let snapshot = SessionPersistenceStore.load()
+        startupSessionSnapshot = snapshot
+        // C11-24: seed ConversationStore from the loaded snapshot before
+        // any panel restore runs. Native field wins; legacy
+        // claude.session_id metadata is lifted for one release window
+        // (TODO 0.46.0 / v1.1 in WorkspaceSnapshotConversationBridge).
+        if let snapshot, !ConversationStorePolicy.isDisabled {
+            WorkspaceSnapshotConversationBridge.seedFromSnapshot(snapshot)
+            // C11-164 (RES-2): restore the per-surface activity floor into the
+            // live tracker so post-restore operation (and the restore-time
+            // scrape below, which also reads it via `contexts(from:)`) carries
+            // the same disambiguation floor the pre-crash session had. Keyed by
+            // panel id — the id the store and scrape contexts key on.
+            var activityFloor: [String: Date] = [:]
+            for window in snapshot.windows {
+                for ws in window.tabManager.workspaces {
+                    for panel in ws.panels where panel.type == .terminal {
+                        if let ts = panel.lastActivityAt {
+                            activityFloor[panel.id.uuidString] = ts
+                        }
+                    }
+                }
+            }
+            if !activityFloor.isEmpty {
+                SurfaceActivityTracker.shared.seed(from: activityFloor)
+            }
+            // C11-152: live scrape-capture seam. Now that the store is seeded,
+            // run the per-kind scrapers for each restored terminal surface and
+            // resolve real session ids via each strategy's `capture`, applying
+            // scrape-derived refs to the store. This is the missing runtime
+            // call site for the scrape rail — it lights up codex resume (and
+            // future pi/omp). Runs BEFORE the `--no-resume` / dirty-reclassify
+            // branches below so those still win when they apply. `Task.detached`
+            // breaks `@MainActor` isolation so the actor work runs while this
+            // method blocks on the bounded wait (mirrors the seed/reclassify
+            // neighbours).
+            let scrapeContexts = ScrapeCaptureContext.contexts(from: snapshot)
+            if !scrapeContexts.isEmpty {
+                let pipeline = ScrapeCapturePipeline(scrapers: .v1(), strategies: .v1)
+                let sema = DispatchSemaphore(value: 0)
+                Task.detached(priority: .userInitiated) {
+                    await ConversationStore.shared.runScrapeCapture(
+                        contexts: scrapeContexts,
+                        pipeline: pipeline
+                    )
+                    sema.signal()
+                }
+                _ = sema.wait(timeout: .now() + 1.0)
+            }
+        }
+        // C11-131: `c11 app restart --no-resume` left a one-shot sentinel.
+        // Honor it by forcing every seeded ref to .unknown so the restore
+        // path types nothing into panes (layout still restores). Consume the
+        // sentinel so it only affects this one launch, and skip the dirty
+        // reclassify below (the sentinel intent wins).
+        var handledNoResume = false
+        if !ConversationStorePolicy.isDisabled,
+           let noResumeURL = Self.restartNoResumeSentinelURL(),
+           FileManager.default.fileExists(atPath: noResumeURL.path) {
+            try? FileManager.default.removeItem(at: noResumeURL)
+            let sema = DispatchSemaphore(value: 0)
+            Task.detached(priority: .userInitiated) {
+                await ConversationStore.shared.markAllUnknown(reason: "app restart --no-resume")
+                sema.signal()
+            }
+            _ = sema.wait(timeout: .now() + 1.0)
+            handledNoResume = true
+        }
+        // C11-131: now that the snapshot has seeded the store, act on the
+        // prior-shutdown decision captured at launch. On a dirty sentinel,
+        // verify each freshly-seeded ref against its on-disk transcript and
+        // reclassify: a verified transcript → .suspended (resume on this
+        // restore), a missing one → .unknown (skip with a clear reason).
+        // This replaces the old blanket markAllUnknown, which forced every
+        // ref to .unknown and made resume skip the crash-recovery case it
+        // exists for. Synchronous bridge so the order is observable to
+        // subsequent restore work on the same dispatch queue (no Task race
+        // against pendingRestartPlans).
+        if case .dirty = priorShutdownAtLaunch, !ConversationStorePolicy.isDisabled, !handledNoResume {
+            // C11-24: `Task.detached` so the spawned task does not
+            // inherit `@MainActor` isolation from this method. Without
+            // it, the body could not run while main is blocked on
+            // `sema.wait` and the dirty-recovery transition would never
+            // fire. (`AppDelegate` is `@MainActor`.) The transcript stats
+            // are bounded local FS calls; the 1s budget matches the bridge.
+            let sema = DispatchSemaphore(value: 0)
+            Task.detached(priority: .userInitiated) {
+                await ConversationStore.shared.reclassifyAfterCrash(
+                    registry: .v1
+                )
+                sema.signal()
+            }
+            _ = sema.wait(timeout: .now() + 1.0)
+        }
     }
 
     private func persistedWindowGeometry(
@@ -3373,6 +3759,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard !didHandleExplicitOpenIntentAtStartup else { return }
         guard let primaryContext = contextForMainTerminalWindow(primaryWindow) else { return }
 
+        // C11-34: per-workspace resume picker. Sits between
+        // snapshot-load and snapshot-apply: the operator picks which
+        // workspaces from the previous session come back. Policy lives
+        // under `c11.launch.resumePolicy` (default `.ask`); `.always`
+        // keeps the legacy "restore everything" behavior, `.never`
+        // skips restore entirely.
+        //
+        // QA launch (`C11_QA_LAUNCH`) overrides that persisted policy for
+        // this launch only (never written back): `resume` → `.always`
+        // (silent restore), `fresh` → `.never` (skip). Both bypass the
+        // `.ask` picker so an automated run never blocks on the modal. A local
+        // dev / tagged build likewise bypasses the `.ask` picker (silent
+        // restore) so frequent rebuilds don't block on it — see
+        // `LaunchResumePicker.resolveEffectivePolicy`.
+        let policy = LaunchResumePicker.resolveEffectivePolicy(
+            qa: QALaunchPolicy.current(),
+            persisted: LaunchResumePolicy.current(),
+            isLocalDevBuild: SocketControlSettings.isLocalDevBuild()
+        )
+        if policy == .ask,
+           let snapshot = startupSessionSnapshot,
+           snapshot.windows.contains(where: { !$0.tabManager.workspaces.isEmpty }) {
+            LaunchResumePicker.presentSheet(on: primaryWindow, snapshot: snapshot) { [weak self] decision in
+                guard let self else { return }
+                switch decision {
+                case .resumeAll:
+                    break  // startupSessionSnapshot stays as-is
+                case .skipAll:
+                    self.startupSessionSnapshot = nil
+                case .resumeSelected(let keep):
+                    self.startupSessionSnapshot = LaunchResumePicker.filtered(
+                        snapshot: snapshot,
+                        keep: keep
+                    )
+                }
+                self.applyResolvedStartupSessionRestore(
+                    primaryWindow: primaryWindow,
+                    primaryContext: primaryContext
+                )
+            }
+            return
+        }
+        if policy == .never {
+            startupSessionSnapshot = nil
+        }
+        applyResolvedStartupSessionRestore(
+            primaryWindow: primaryWindow,
+            primaryContext: primaryContext
+        )
+    }
+
+    /// Apply `startupSessionSnapshot` (already resolved by policy and
+    /// the picker, if any) to the primary window and any additional
+    /// windows the snapshot declares. Extracted from the old body of
+    /// `attemptStartupSessionRestoreIfNeeded` so the picker callback
+    /// has a clean continuation point.
+    private func applyResolvedStartupSessionRestore(
+        primaryWindow: NSWindow,
+        primaryContext: MainWindowContext
+    ) {
         let startupSnapshot = startupSessionSnapshot
         let primaryWindowSnapshot = startupSnapshot?.windows.first
         if let primaryWindowSnapshot {
@@ -3968,6 +4414,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         }
 
+        // C11-24: include conversation state in the fingerprint so that
+        // wrapper-claim, hook-push, and tombstone events trigger an
+        // autosave write. Without this, conversation activity alone never
+        // changes the fingerprint, the autosave path skips with
+        // `unchanged_autosave_fingerprint`, and the only persisted
+        // snapshot is the one written at clean shutdown — losing every
+        // ref captured in a session that ended any other way.
+        if !ConversationStorePolicy.isDisabled {
+            let conversations = Workspace.readConversationsByPanelIdSync(timeout: 0.5)
+            // Order-independent: sort surface ids before hashing.
+            for surfaceId in conversations.keys.sorted() {
+                guard let surface = conversations[surfaceId],
+                      let active = surface.active else { continue }
+                hasher.combine(surfaceId)
+                hasher.combine(active.kind)
+                hasher.combine(active.id)
+                hasher.combine(active.state.rawValue)
+                hasher.combine(active.capturedVia.rawValue)
+            }
+        }
+
         return hasher.finalize()
     }
 
@@ -4246,6 +4713,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         guard !contexts.isEmpty else { return nil }
 
+        // C11-170: read the *global* conversation store exactly once for the
+        // whole save, then inject the same map into every window/workspace.
+        // The store snapshot spans all panels regardless of workspace, so the
+        // previous per-workspace read (`Workspace.sessionSnapshot` self-read)
+        // fired N independent `Task.detached` + 2s-semaphore round-trips on
+        // main — N timeout dice-rolls where one loss under load dropped a
+        // workspace's `surface_conversations`. One read collapses N rolls into
+        // one and cuts main-thread blocking on save from up-to-N×2s to ≤2s.
+        // (`readConversationsByPanelIdSync` already short-circuits to `[:]`
+        // when the store is disabled, before spawning the detached read.)
+        let conversationsByPanelId = Workspace.readConversationsByPanelIdSync()
+
         let windows: [SessionWindowSnapshot] = contexts
             .prefix(SessionPersistencePolicy.maxWindowsPerSnapshot)
             .map { context in
@@ -4253,7 +4732,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 return SessionWindowSnapshot(
                     frame: window.map { SessionRectSnapshot($0.frame) },
                     display: displaySnapshot(for: window),
-                    tabManager: context.tabManager.sessionSnapshot(includeScrollback: includeScrollback),
+                    tabManager: context.tabManager.sessionSnapshot(
+                        includeScrollback: includeScrollback,
+                        conversationsByPanelId: conversationsByPanelId
+                    ),
                     sidebar: SessionSidebarSnapshot(
                         isVisible: context.sidebarState.isVisible,
                         selection: SessionSidebarSelection(selection: context.sidebarSelectionState.selection),
@@ -4360,10 +4842,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 let workspace = context.tabManager.tabs[wsIdx]
                 // Clear every live surface- and pane-layer entry on this
                 // workspace so the only surviving data path is "loaded from
-                // disk". Both clears run before the rollback-env gate so the
-                // CMUX_DISABLE_METADATA_PERSIST=1 path also fully drops live
-                // state — otherwise live writes would bleed through an
-                // intended no-op round-trip.
+                // disk".
                 for panelId in workspace.panels.keys {
                     SurfaceMetadataStore.shared.removeSurface(
                         workspaceId: workspace.id,
@@ -4380,10 +4859,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     )
                 }
 
-                // Replay persisted metadata from the snapshot. Skipped when
-                // CMUX_DISABLE_METADATA_PERSIST=1 is set — matches the
-                // production restore path's rollback semantics.
-                if PersistedMetadataBridge.isPersistDisabled { continue }
+                // Replay persisted metadata from the snapshot.
                 for panelSnapshot in wsSnapshot.panels {
                     guard let persistedValues = panelSnapshot.metadata else { continue }
                     let values = PersistedMetadataBridge.decodeValues(persistedValues)
@@ -4651,6 +5127,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         }
         return nil
+    }
+
+    /// Every live, mailbox-addressable surface across all windows and
+    /// workspaces in this instance. A surface is addressable when it carries a
+    /// `title` metadata value (the mailbox name). Reads the same
+    /// `SurfaceMetadataStore` `title` the per-workspace `MailboxSurfaceResolver`
+    /// uses, so global resolution matches local resolution exactly.
+    ///
+    /// Main-thread only: it enumerates each workspace's `@Published panels`.
+    /// Callers on the socket queue must hop to main first.
+    func mailboxAddressableSurfaces() -> [MailboxGlobalResolver.Surface] {
+        var result: [MailboxGlobalResolver.Surface] = []
+        for context in mainWindowContexts.values {
+            for workspace in context.tabManager.tabs {
+                for surfaceId in workspace.panels.keys {
+                    let (metadata, _) = SurfaceMetadataStore.shared.getMetadata(
+                        workspaceId: workspace.id,
+                        surfaceId: surfaceId
+                    )
+                    guard let name = metadata[MetadataKey.title] as? String, !name.isEmpty else {
+                        continue
+                    }
+                    // Stable identities (optional): the same `mailbox.*` keys
+                    // the per-workspace resolver reads, so global routing and
+                    // local delivery resolve a `to` identically.
+                    let address = metadata["mailbox.address"] as? String
+                    let role = metadata["mailbox.role"] as? String
+                    result.append(
+                        MailboxGlobalResolver.Surface(
+                            workspaceId: workspace.id,
+                            surfaceId: surfaceId,
+                            name: name,
+                            address: address,
+                            role: role
+                        )
+                    )
+                }
+            }
+        }
+        return result
     }
 
     @discardableResult
@@ -6323,6 +6839,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 // SurfaceSpec.command is delivered verbatim by the layout
                 // executor, so the newline has to live in the value itself.
                 injected.surfaces[idx].command = command + "\n"
+                // No orientation prompt is baked by default (see
+                // `c11OrientPrompt`), so mirror launchAgentSurface: stamp the
+                // identity the sidebar would otherwise wait on the agent to
+                // report — a placeholder title and the pinned model (the type
+                // comes from AgentDetector). Only fill fields the spec left
+                // unset so an explicit blueprint always wins.
+                if injected.surfaces[idx].title == nil {
+                    injected.surfaces[idx].title = String(
+                        localized: "agent.launch.placeholderTitle",
+                        defaultValue: "Awaiting first task"
+                    )
+                }
+                let cfg = projectConfig?.agents[resolved.agent]
+                    ?? userDefault.config(for: resolved.agent)
+                let model = cfg.model.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !model.isEmpty {
+                    var meta = injected.surfaces[idx].metadata ?? [:]
+                    if meta[MetadataKey.model] == nil {
+                        meta[MetadataKey.model] = .string(model)
+                        injected.surfaces[idx].metadata = meta
+                    }
+                }
             }
         }
 
@@ -6778,6 +7316,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let initialDirectory = focusedWorkspaceWorkingDirectory()
             ?? FileManager.default.homeDirectoryForCurrentUser.path
 
+        // Capture the operator's current screen before activating the dialog.
+        // NSWindow.center() always targets NSScreen.main (the menu-bar screen);
+        // on multi-monitor setups that misplaces the dialog off the screen the
+        // operator is actually working on. Read this now while the active main
+        // window is still key.
+        let targetScreen = NSApp.keyWindow?.screen
+            ?? NSApp.mainWindow?.screen
+            ?? NSScreen.main
+
         let rootView = CreateWorkspaceSheet(
             initialDirectory: initialDirectory,
             onCancel: { [weak self] in self?.createWorkspaceSheetWindow?.close() },
@@ -6809,9 +7356,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         )
         window.isReleasedWhenClosed = false
         window.level = .modalPanel
-        window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // Defer centering: NSHostingController with .preferredContentSize
+        // syncs the window's content size during SwiftUI's first layout pass,
+        // so center()'ing before makeKey runs against a smaller-than-final
+        // frame and the dialog lands off-center once it grows. Position on
+        // the captured screen, with the standard HIG "1/3 from the top"
+        // vertical placement.
+        DispatchQueue.main.async { [weak window] in
+            guard let window, let screen = targetScreen else { return }
+            let visible = screen.visibleFrame
+            let frame = window.frame
+            let x = visible.origin.x + (visible.width - frame.width) / 2
+            let y = visible.origin.y + (visible.height - frame.height) * 2.0 / 3.0
+            window.setFrameOrigin(NSPoint(x: x, y: y))
+        }
         createWorkspaceSheetWindow = window
         createWorkspaceSheetCloseObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
@@ -9579,7 +10139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         guard let config = socketListenerConfigurationIfEnabled() else {
             writeMultiWindowNotificationTestData([
-                "socketExpectedPath": env["CMUX_SOCKET_PATH"] ?? "",
+                "socketExpectedPath": c11Env("C11_SOCKET_PATH", in: env) ?? "",
                 "socketMode": "off",
                 "socketReady": "0",
                 "socketPingResponse": "",

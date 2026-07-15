@@ -6,7 +6,7 @@ c11 restores lifecycle-integrated agent sessions by reading per-surface session 
 
 Claude Code emits a `SessionStart` hook event on startup with a JSON payload that includes `session_id`, `cwd`, and `transcript_path`. Operators forward that payload to `c11 claude-hook session-start`, which:
 
-1. Upserts the session into `~/.cmuxterm/claude-hook-sessions.json` (the sidebar's long-lived session register).
+1. Upserts the session into c11's long-lived session register (the store the sidebar reads from).
 2. Writes `claude.session_id = <id>` onto the current surface's metadata via `surface.set_metadata` (mode `merge`, source `explicit`). This is the value the Phase 1 restart registry consults at restore time.
 
 Both writes are best-effort: the hook never surfaces an error banner to Claude Code just because the c11 control socket is unreachable. The `surface.set_metadata` write in particular follows the existing advisory pattern and emits one of three breadcrumbs — `claude-hook.session-id.metadata-write.{ok,skipped,failed}` — so the outcome is visible in telemetry.
@@ -52,15 +52,15 @@ C11_SESSION_RESUME=1 c11 restore 01KQ0XYZ…
 c11 restore --in-place 01KQ0XYZ…
 ```
 
-- `C11_SESSION_RESUME` (mirror: `CMUX_SESSION_RESUME`) is read at the CLI layer only.  A truthy value (anything except empty / `0` / `false` / `no` / `off`) threads `restart_registry: "phase1"` into the `snapshot.restore` v2 call.
-- The registry is **not** serialised onto the snapshot file. A snapshot written today stays restorable after Phase 5 adds `codex` / `opencode` / `kimi` rows because the registry is resolved by name app-side at restore time.
+- `C11_SESSION_RESUME` is read at the CLI layer only.  A truthy value (anything except empty / `0` / `false` / `no` / `off`) threads `restart_registry: "phase1"` into the `snapshot.restore` v2 call.
+- The registry is **not** serialised onto the snapshot file. It is resolved by name app-side at restore time, so snapshots stay restorable as new agent types (`codex`, `opencode`, `kimi`, …) are added to the registry.
 - An explicit `SurfaceSpec.command` on a terminal surface always wins; registry synthesis only fires when the command field is nil or empty.
 
 ## What ends up where
 
 | Layer | Where the session id lives | How it's consumed |
 |---|---|---|
-| `~/.cmuxterm/claude-hook-sessions.json` | SessionStore record | Sidebar UI, stale-session detection |
+| Session register (on-disk JSON store) | SessionStore record | Sidebar UI, stale-session detection |
 | Surface metadata (`SurfaceMetadataStore`) | `claude.session_id` / `codex.session_id`, plus `codex.session_project_dir` and `codex.session_store`, source `.declare`/`.heuristic` for runtime bridge writes or `.explicit` for operator-authored writes | Phase 1 restart registry; serialised into snapshot envelopes |
 | Snapshot envelope (`WorkspaceSnapshotFile`) | Embedded plan → `surfaces[i].metadata[...]` | Loaded at restore time; executor synthesises the matching resume command when registry is set |
 
@@ -70,7 +70,7 @@ Snapshot envelopes store `claude.session_id` and `codex.session_id` values in cl
 
 The threat model is narrow: a local attacker who already has read access to the operator's home directory can pair a captured session id with `~/.claude/projects/<project>/` to enumerate historical Claude transcripts. If that is outside your threat model, no action is needed. If it is inside, treat `~/.c11-snapshots/` with the same hygiene you give `~/.claude/projects/`: restrict permissions, exclude from shared-volume backups, or delete snapshots after restore.
 
-c11 does not encrypt at rest (no Keychain round-trip). The restart registry synthesises the resume command in-process well before the operator would be prompted for biometrics, so Keychain storage would block non-interactive restore without meaningfully raising the attacker bar (anyone with local read access to the snapshot file already has local read access to `~/.claude/projects/`). Operator decision (C11-14): document the threat model and ship as-is. Revisit if the threat model ever includes untrusted local processes.
+c11 does not encrypt at rest (no Keychain round-trip). The restart registry synthesises the resume command in-process well before the operator would be prompted for biometrics, so Keychain storage would block non-interactive restore without meaningfully raising the attacker bar — anyone with local read access to the snapshot file already has local read access to `~/.claude/projects/`. Revisit if the threat model ever includes untrusted local processes.
 
 ## Troubleshooting
 

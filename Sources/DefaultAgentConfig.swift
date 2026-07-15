@@ -6,8 +6,12 @@ import Foundation
 enum AgentType: String, Codable, CaseIterable, Identifiable {
     case claudeCode = "claude-code"
     case codex
+    case grok
     case kimi
     case opencode
+    case githubCopilot = "github-copilot"
+    case pi
+    case omp
     case custom
 
     var id: String { rawValue }
@@ -20,10 +24,18 @@ enum AgentType: String, Codable, CaseIterable, Identifiable {
             return String(localized: "agentType.claudeCode", defaultValue: "Claude Code")
         case .codex:
             return String(localized: "agentType.codex", defaultValue: "Codex")
+        case .grok:
+            return String(localized: "agentType.grok", defaultValue: "Grok Build")
         case .kimi:
             return String(localized: "agentType.kimi", defaultValue: "Kimi")
         case .opencode:
             return String(localized: "agentType.opencode", defaultValue: "OpenCode")
+        case .githubCopilot:
+            return String(localized: "agentType.githubCopilot", defaultValue: "GitHub Copilot")
+        case .pi:
+            return String(localized: "agentType.pi", defaultValue: "Pi")
+        case .omp:
+            return String(localized: "agentType.omp", defaultValue: "oh-my-pi")
         case .custom:
             return String(localized: "agentType.custom", defaultValue: "Custom")
         }
@@ -33,22 +45,86 @@ enum AgentType: String, Codable, CaseIterable, Identifiable {
     /// in Settings; persisted per-agent so flipping the picker doesn't wipe
     /// values for the other agents.
     var factoryCommand: String {
-        switch self {
-        case .claudeCode: return "claude --dangerously-skip-permissions"
-        case .codex:      return "codex --yolo"
-        case .kimi:       return "kimi"
-        case .opencode:   return "opencode run --dangerously-skip-permissions"
-        case .custom:     return ""
-        }
+        AgentRegistry.shared.manifest(for: self)?.factoryCommand ?? ""
     }
 
     /// Factory default for the optional initial prompt that gets typed into
     /// the agent after launch. Empty for `custom` (operator authors their
     /// own); identical for the four built-ins.
     var factoryInitialPrompt: String {
+        AgentRegistry.shared.manifest(for: self)?.factoryInitialPrompt ?? ""
+    }
+
+    /// Factory default for the pinned model family. Only Claude Code carries
+    /// one out of the box — c11 pins `opus` so agents launched here stay on
+    /// Opus even when the operator flips their ambient Claude default to
+    /// another family. Every other agent inherits its own default (empty).
+    /// See `ClaudeModelFamily` for the set of families c11 offers, and
+    /// `DefaultAgentResolver.buildCommand` for where the flag is injected.
+    var factoryModel: String {
+        self == .claudeCode ? ClaudeModelFamily.opus.rawValue : ""
+    }
+}
+
+/// The Claude model-family aliases c11 offers as a pinned launch default.
+///
+/// Each raw value is exactly what `claude --model <alias>` accepts, and Claude
+/// Code resolves a family alias to the *latest* version of that family. Pinning
+/// the family (not a versioned id like `claude-opus-4-8`) means new model
+/// releases need no c11 change — the whole point of the setting.
+enum ClaudeModelFamily: String, CaseIterable, Identifiable {
+    case opus
+    case sonnet
+    case haiku
+    case fable
+
+    var id: String { rawValue }
+
+    /// Human-readable label for the Settings picker. Localized at the call site.
+    var displayName: String {
         switch self {
-        case .custom: return ""
-        default:      return "you are operating inside a c11 workspace. load the skill."
+        case .opus:
+            return String(localized: "claudeModelFamily.opus", defaultValue: "Opus")
+        case .sonnet:
+            return String(localized: "claudeModelFamily.sonnet", defaultValue: "Sonnet")
+        case .haiku:
+            return String(localized: "claudeModelFamily.haiku", defaultValue: "Haiku")
+        case .fable:
+            return String(localized: "claudeModelFamily.fable", defaultValue: "Fable")
+        }
+    }
+}
+
+/// The reasoning-effort levels c11 offers as an optional pinned launch default.
+///
+/// Each raw value is exactly what `claude --effort` accepts. There is no
+/// "inherit" case — an empty stored value means inherit, and c11 injects no
+/// flag so the agent keeps its ambient effort. Higher levels may be restricted
+/// by the operator's plan; c11 passes the value through and lets Claude Code
+/// enforce. See `DefaultAgentResolver.buildCommand` for where the flag is
+/// injected.
+enum ClaudeEffort: String, CaseIterable, Identifiable {
+    case low
+    case medium
+    case high
+    case xhigh
+    case max
+
+    var id: String { rawValue }
+
+    /// Human-readable label for the Settings picker. Localized at the call site.
+    var displayName: String {
+        switch self {
+        case .low:
+            return String(localized: "claudeEffort.low", defaultValue: "Low")
+        case .medium:
+            return String(localized: "claudeEffort.medium", defaultValue: "Medium")
+        case .high:
+            return String(localized: "claudeEffort.high", defaultValue: "High")
+        case .xhigh:
+            return String(localized: "claudeEffort.xhigh", defaultValue: "Extra high")
+        case .max:
+            return String(localized: "claudeEffort.max", defaultValue: "Max")
         }
     }
 }
@@ -65,11 +141,24 @@ struct AgentConfig: Codable, Equatable {
     /// Multi-line `KEY=value` text, one entry per line. Parsed at use time;
     /// keeps the UI to a single text editor instead of a row-editor list.
     var envOverridesText: String
+    /// Pinned model family (e.g. `opus`). Injected as `--model <model>` at
+    /// launch for agents whose CLI accepts it (currently Claude Code). Empty
+    /// means "don't pin" — inherit the agent's own default. A model the
+    /// operator hardcoded into `command` always wins; see
+    /// `DefaultAgentResolver.buildCommand`.
+    var model: String
+    /// Pinned reasoning-effort level (e.g. `high`). Injected as
+    /// `--effort <effort>` at launch for agents whose CLI accepts it (currently
+    /// Claude Code). Empty means "don't pin" — inherit the agent's ambient
+    /// effort. An effort the operator hardcoded into `command` always wins.
+    var effort: String
 
-    init(command: String, initialPrompt: String, envOverridesText: String) {
+    init(command: String, initialPrompt: String, envOverridesText: String, model: String = "", effort: String = "") {
         self.command = command
         self.initialPrompt = initialPrompt
         self.envOverridesText = envOverridesText
+        self.model = model
+        self.effort = effort
     }
 
     init(from decoder: Decoder) throws {
@@ -77,6 +166,10 @@ struct AgentConfig: Codable, Equatable {
         self.command = (try? c.decode(String.self, forKey: .command)) ?? ""
         self.initialPrompt = (try? c.decode(String.self, forKey: .initialPrompt)) ?? ""
         self.envOverridesText = (try? c.decode(String.self, forKey: .envOverridesText)) ?? ""
+        // Both absent in configs written before these settings existed; they
+        // decode to "" (inherit), preserving prior launch behavior.
+        self.model = (try? c.decode(String.self, forKey: .model)) ?? ""
+        self.effort = (try? c.decode(String.self, forKey: .effort)) ?? ""
     }
 
     /// Factory defaults for a given agent type.
@@ -84,7 +177,8 @@ struct AgentConfig: Codable, Equatable {
         AgentConfig(
             command: agent.factoryCommand,
             initialPrompt: agent.factoryInitialPrompt,
-            envOverridesText: ""
+            envOverridesText: "",
+            model: agent.factoryModel
         )
     }
 
@@ -108,7 +202,7 @@ struct AgentConfig: Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case command, initialPrompt, envOverridesText
+        case command, initialPrompt, envOverridesText, model, effort
     }
 }
 
@@ -125,10 +219,35 @@ struct DefaultAgentConfig: Codable, Equatable {
     /// fall back to factory defaults at use time.
     var agents: [AgentType: AgentConfig]
 
+    /// Whether `defaultAgent` was explicitly specified by the source this
+    /// config was decoded from. `true` for programmatically-built configs and
+    /// for JSON that carries a `defaultAgent` key; `false` only when a decoded
+    /// blob omits the key (and `defaultAgent` therefore holds the fallback).
+    ///
+    /// Project-level overrides key off this: a `.c11/agents.json` that doesn't
+    /// state a `defaultAgent` must NOT silently force the fallback over the
+    /// user's Settings pick (see `overrideDefaultAgent`). Excluded from
+    /// `Equatable` so value comparisons stay shape-based.
+    var hasExplicitDefaultAgent: Bool = true
+
+    /// The agent this config should impose on a *consumer* that already has its
+    /// own default (i.e. project config overriding the user default). `nil` when
+    /// the default was never explicitly stated, so the consumer keeps its own.
+    var overrideDefaultAgent: AgentType? {
+        hasExplicitDefaultAgent ? defaultAgent : nil
+    }
+
     /// Returns the config for `agent`, falling back to factory if the operator
     /// never edited that one.
     func config(for agent: AgentType) -> AgentConfig {
         agents[agent] ?? .factory(for: agent)
+    }
+
+    // Shape-based equality: `hasExplicitDefaultAgent` is provenance metadata,
+    // not part of the config's value, so two configs with the same selection
+    // and per-agent entries compare equal regardless of how they were built.
+    static func == (lhs: DefaultAgentConfig, rhs: DefaultAgentConfig) -> Bool {
+        lhs.defaultAgent == rhs.defaultAgent && lhs.agents == rhs.agents
     }
 
     /// Factory shape: claude-code is the default, every agent pre-filled with
@@ -144,12 +263,33 @@ struct DefaultAgentConfig: Codable, Equatable {
     init(defaultAgent: AgentType, agents: [AgentType: AgentConfig]) {
         self.defaultAgent = defaultAgent
         self.agents = agents
+        self.hasExplicitDefaultAgent = true
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.defaultAgent = (try? c.decode(AgentType.self, forKey: .defaultAgent)) ?? .claudeCode
-        if let agentsByRaw = try? c.decode([String: AgentConfig].self, forKey: .agents) {
+        // Track explicit presence so an omitted `defaultAgent` doesn't read as
+        // a deliberate "launch claude-code" override when this config is used at
+        // the project level. A present-but-corrupt value (e.g. an unknown agent
+        // name) is treated like the user-level store has always treated it:
+        // fall back to claude-code, and — since the stated value was unusable —
+        // do NOT count it as an explicit override.
+        if let decoded = try? c.decode(AgentType.self, forKey: .defaultAgent) {
+            self.defaultAgent = decoded
+            self.hasExplicitDefaultAgent = true
+        } else {
+            self.defaultAgent = .claudeCode
+            self.hasExplicitDefaultAgent = false
+        }
+        // `agents` must be the v2 dict shape when present. A legacy pre-v0.48
+        // file (an *array* of {id,displayName,command}) must NOT silently decode
+        // to an empty dict and let this whole config masquerade as a valid
+        // override — that's the bug where a stale ~/.c11/agents.json pinned the
+        // A button to claude-code regardless of Settings. Throwing here makes
+        // `DefaultAgentProjectConfig.find`'s `try?` reject the file outright so
+        // resolution falls through to the user's Settings default.
+        if c.contains(.agents) {
+            let agentsByRaw = try c.decode([String: AgentConfig].self, forKey: .agents)
             var byType: [AgentType: AgentConfig] = [:]
             for (raw, cfg) in agentsByRaw {
                 if let t = AgentType(rawValue: raw) { byType[t] = cfg }

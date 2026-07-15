@@ -6,6 +6,241 @@ Note: historical entries below pre-date the `c11mux` → `c11` rename and refere
 
 ## [Unreleased]
 
+## [0.59.0] - 2026-07-14
+
+Headline: **`c11 send` actually submits.** Sending a message to an agent in a background workspace — the normal fleet case, where only one workspace is on screen — used to type the text and silently drop the Return, so the message sat unsent in the composer while `send` reported OK. A briefed-looking agent that never received anything was the single biggest source of friction in multi-agent runs. That path is fixed four ways, and `send` now tells you what actually happened (`submitted` / `queued` / `delivered`) instead of only "bytes accepted."
+
+### Added
+
+- **Fresh Claude Code sessions get oriented to c11 automatically.** A session-start claude-hook injects a short c11 orientation into new Claude sessions, so an agent launched inside a c11 surface knows it can drive panes, report status, and target other surfaces without being told. ([#328](https://github.com/Stage-11-Agentics/c11/pull/328)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+
+### Changed
+
+- **Waiting Agent button restyled.** The sidebar's next-notification control gets a gold lit state and a cleaner gap above the workspace-nav arrows. ([#329](https://github.com/Stage-11-Agentics/c11/pull/329)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **Every workspace card now carries a rule-gray hairline outline** in the sidebar, so cards read as discrete surfaces at a glance. ([#331](https://github.com/Stage-11-Agentics/c11/pull/331)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+
+### Fixed
+
+- **`c11 send` reliably submits — including into a background workspace.** Four defects fixed together: (1) the submit Return was dropped for any pane not in an on-screen window (the fleet case — a background agent got typed at but never submitted), now injected straight into Ghostty so it lands regardless of window; (2) multi-line briefs fragmented into one turn per line or tripped the TUI's paste heuristic and submitted nothing — prose now goes out as a real bracketed paste with a single trailing Return, so a brief arrives whole; (3) `send-key space` wrote nothing (keycode-only printable keys encoded to zero bytes) and now emits its character; (4) an empty or stale `--surface` ref silently misrouted to the caller's own input box and is now a hard error, while an explicit surface ref resolves across workspaces. `send` also reports `submitted` / `queued` / `delivered` rather than a bare OK. ([#340](https://github.com/Stage-11-Agentics/c11/pull/340)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **Crash-recovery resume works for working directories with underscores** (or any non-alphanumeric character). A path like `~/Projects/my_app` no longer blocks a surface's conversation from resuming after a crash or force-quit. ([#330](https://github.com/Stage-11-Agentics/c11/pull/330)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+
+### Thanks to 1 contributor!
+
+[@BenevolentFutures](https://github.com/BenevolentFutures)
+
+## [0.58.0] - 2026-07-08
+
+The Truth & Stability release. Headline: **the sidebar stops lying.** Every status an agent reports now carries its age and visibly decays when it goes stale, and c11 itself derives a live working/idle state for every terminal from what it can observe externally — so a pane whose agent never self-reports (or stopped reporting twenty minutes ago) still shows the truth. Alongside it: a subscribable **events stream** (`c11 events tail`) so agents and tools can react to workspace changes instead of polling, **crash-proof session resume** (force-quit or crash, relaunch, your agent conversations come back), and the elimination of a class of main-thread hangs and silent write-misroutes on the socket.
+
+### Added
+
+- **Events stream — file-first pub/sub for the whole workspace.** c11 appends structured NDJSON events (surface created/closed, workspace selected, status/title/description/progress changes with their source tier, derived working/idle transitions, waiting-agent transitions, mailbox deliveries) to an append-only per-instance log, rotated at a size cap. `c11 events tail --follow --filter type=... --since ...` subscribes from the CLI; any process can consume the file directly — the envelope schema ships in `spec/`. Orchestrators and monitoring tools can now react in under a second instead of polling. ([#318](https://github.com/Stage-11-Agentics/c11/pull/318), [#322](https://github.com/Stage-11-Agentics/c11/pull/322)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **Derived liveness — the sidebar shows what c11 observes, not just what agents claim.** c11 derives a working/idle state per terminal from PTY output flow and prompt state, with zero agent cooperation required. When an agent's self-reported status goes stale past its expiry, the derived state takes over the pill, visually marked as observed-not-claimed; when the agent reports again, its status resumes. ([#320](https://github.com/Stage-11-Agentics/c11/pull/320)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **Status age and decay.** Self-reported status and progress pills carry a last-updated timestamp, dim past a staleness threshold, and gray out past expiry (defaults 5m/15m, tunable in settings), so a confident green "working" from forty minutes ago no longer reads as current truth. ([#320](https://github.com/Stage-11-Agentics/c11/pull/320)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+
+### Changed
+
+- **Waiting Agent sidebar cluster restyled.** The next-notification control becomes a two-row Waiting Agent cluster with workspace prev/next arrows, a paper-fill lit state, and two-tier adaptive sizing. ([#320](https://github.com/Stage-11-Agentics/c11/pull/320)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **Surface-scoped socket writes now reject empty or absent surface refs** (set-metadata, set-status, rename-tab, and the rest of the write family) instead of silently defaulting to the operator-focused surface. If you have automation that relied on the implicit fallback, pass `--surface "$C11_SURFACE_ID"` explicitly — the c11 skill has always taught this form. ([#319](https://github.com/Stage-11-Agentics/c11/pull/319)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **Model and Effort agent-launch settings are now localized** in all six translations (ja, uk, ko, zh-Hans, zh-Hant, ru), closing the gap noted in 0.57.0. ([#313](https://github.com/Stage-11-Agentics/c11/pull/313)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+
+### Fixed
+
+- **Crash-resume: agent conversations now survive a crash or force-quit.** Relaunching after a dirty shutdown recovers each surface's conversation via per-kind scrape with a persisted per-surface activity floor for disambiguation, and Codex sessions recover their real working directory (distinct-cwd Codex panes resume instead of reading as mutually ambiguous). Where resume is genuinely ambiguous, the surface says so with a specific diagnostic instead of silently starting fresh. Validated by a repeatable multi-kind force-kill acceptance harness (12 conversations, 4 agent kinds, kill -9: 49/49 checks green). ([#321](https://github.com/Stage-11-Agentics/c11/pull/321)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **Session save no longer drops workspace conversations under load.** Saving read the conversation store once per workspace with a 2-second timeout each — under heavy telemetry load some reads lost the race and those workspaces persisted empty conversation lists. One bulk read per save ends the dice-rolls and cuts save-time main-thread blocking. ([#325](https://github.com/Stage-11-Agentics/c11/pull/325)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **Two more main-thread-hang paths eliminated on the socket** (`pane.confirm`, `feedback.submit`, and a nested run-loop pattern), verified by a scripted multi-agent hook flood with the hang monitor clean — the same genre as the 0.55.0 beachball fix, now with a regression test that fails if main-thread sync work is reintroduced. ([#319](https://github.com/Stage-11-Agentics/c11/pull/319)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+
+### Thanks to 1 contributor!
+
+- [@BenevolentFutures](https://github.com/BenevolentFutures)
+
+## [0.57.0] - 2026-07-06
+
+Feature release. Headline: **agents launched from c11 now boot straight to a ready prompt — zero orientation turn — and can hold a pinned model and reasoning effort.** Starting an agent from c11 (the A-button, a new workspace, or the socket) no longer types an orientation prompt and waits out a first turn: the agent comes up idle and ready at 0s dead-time, and c11 itself stamps the sidebar identity (agent type, model chip, and an "Awaiting first task" placeholder title). Settings → Agents gains **Model** and **Effort** dropdowns, so a c11-launched agent runs at a chosen model family and reasoning effort regardless of your ambient default. Alongside the app changes, the installable skill library (Settings → Agent Skills) grows substantially: the **Tone** and **Chord** workflow families, plus **Sounding**, **Resonance**, **venture-partner**, and **distribution**, and a reworked **lattice-orchestrator**.
+
+### Added
+
+- **Pin a default model for c11-launched agents.** Settings → Agents has a **Model** dropdown; a launched agent gets `--model <family>` injected at launch so it runs at your chosen model family regardless of the ambient default. Opt-in (unset = inherit) and scoped to c11's launch paths — typing `claude` yourself is untouched. ([#307](https://github.com/Stage-11-Agentics/c11/pull/307)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **Pin a reasoning-effort level for c11-launched agents.** An **Effort** dropdown (Inherit / Low / Medium / High / Extra high / Max) sits beside Model; c11 injects `--effort <level>` at launch. Together they pin the full triple an agent runs at — harness + model family + effort. Opt-in and Claude Code-scoped. ([#311](https://github.com/Stage-11-Agentics/c11/pull/311)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **A large expansion of the installable skill library** (Settings → Agent Skills). New skills that now ship with c11: the **Tone** workflow (initiation / prototype / architect — idea → validated prototype → build contract), the **Chord** family (Tone in plural — one problem carried to a portfolio of complete, instrumented solutions), **Sounding** (idea generation upstream of Tone/Chord), **Resonance** (a marketing-capability program), **venture-partner** (evidence-first idea pressure-testing), and **distribution** (audience, channels, and instrumented-funnel planning). ([#306](https://github.com/Stage-11-Agentics/c11/pull/306), [#307](https://github.com/Stage-11-Agentics/c11/pull/307)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+
+### Changed
+
+- **Launched agents boot with no orientation prompt (0s dead-time).** A launch prompt used to be injected to make the agent c11-aware, which forced a first conversational turn (~10s at high effort before you could hand it a task). c11 now supplies that context itself — the agent-type chip comes from process inspection, and the model chip plus an "Awaiting first task" placeholder title are stamped by c11 at launch — so the agent comes up idle and ready and loads the c11 skill on demand once a task actually drives the workspace. A per-agent launch prompt is still configurable for operators who want one. ([#310](https://github.com/Stage-11-Agentics/c11/pull/310)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **`lattice-orchestrator` reworked to pure execution.** The orchestrator skill no longer plans; it takes a complete build contract (authored by the Tone workflow or by hand) and drives tickets → dispatch → audit, so the build is judged against a spec its builders did not write. ([#306](https://github.com/Stage-11-Agentics/c11/pull/306)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+
+_Note: the new Model and Effort dropdown labels ship English-only this release; the other six locales fall back to English until the next localization pass._
+
+### Thanks to 1 contributor!
+
+- [@BenevolentFutures](https://github.com/BenevolentFutures)
+
+## [0.56.1] - 2026-07-01
+
+Patch release. Headline: **auto-update failures are no longer a dead end.** When Sparkle can't launch its installer (error 4005 — most often a damaged `Sparkle.framework` on the installed copy, not a real location problem), the update popover used to show a misleading "c11 needs to live in Applications" message with only a Retry that re-hit the same wall. It now explains the failure plainly and offers a **Download Latest** button that opens the releases page so you can reinstall in one click. If auto-update ever errors with 4005, download the latest DMG and drag it over c11 in Applications once — auto-update resumes afterward.
+
+### Fixed
+
+- **Sparkle update error 4005 no longer dead-ends.** A 4005 ("couldn't launch the installer") now reads "Update Couldn't Be Installed" and offers a prominent **Download Latest** button to the releases page instead of a futile Retry and a misleading "move to Applications" message. Genuine "app isn't in Applications" cases (Sparkle 1003 disk-image / 1005 translocated) keep their move-and-relaunch guidance. ([#304](https://github.com/Stage-11-Agentics/c11/pull/304))
+
+## [0.56.0] - 2026-06-30
+
+Re-signing release — **no functional changes from 0.55.0.** 0.54.0 and 0.55.0 were signed under a different Apple Developer ID team, so existing installs couldn't auto-update across the team boundary (Sparkle declines a cross-team swap). This build is re-signed under the original Developer ID team, restoring seamless auto-update. Updating from 0.53.x lands all of the 0.54.0 and 0.55.0 changes (exact-session resume for Pi/oh-my-pi/opencode, the agent registry, size-aware splits, the collapsing tab bar, chrome themes, `c11 tree --report`, the Agent Skills sheet fix, and the resume/socket hardening) in one step — see those sections below.
+
+## [0.55.0] - 2026-06-30
+
+Tooling + hardening release. Headline: **`c11 tree --report` — a one-command, human-readable Markdown snapshot of your whole fleet** (every workspace's layout plus each surface's title, agent, live status, and description), built for "save the state before I close c11" handoffs. Alongside it: a fix for a main-thread hang that could beachball c11 under a heavy multi-agent fleet, the Agent Skills onboarding sheet stops re-popping on every launch, a workspace-navigation latch fix, socket-collision hardening so parallel c11 instances don't stomp each other's IPC socket, and a session-resume fix so Pi/oh-my-pi reconnect to the right session when a working directory holds several.
+
+### Added
+
+- **`c11 tree --report` — human-readable fleet snapshot.** A new flag on `tree` (alias `--markdown`) emits a Markdown report of what every agent is doing: per workspace, the pane layout and, for each surface, its title, agent type + model, live status/role, description, mailbox address, and browser URL — closed by a summary table. Unlike `workspace export-blueprint` (a layout template that drops live metadata), this is the legible status artifact for handoffs. `--out <path>` writes to a file; scope with `--window`/`--workspace`. ([#263](https://github.com/Stage-11-Agentics/c11/pull/263)) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+
+### Fixed
+
+- **c11 no longer beachballs under a heavy multi-agent fleet.** Every Claude Code hook (one `c11 claude-hook` per tool call, per agent) ran its sidebar/notification socket commands on the GUI main thread, so a fleet of agents — or a crash-restore that resumed them all at once — could saturate the main thread and freeze the UI for tens of seconds. Those status/notification commands now ack off the main thread and apply asynchronously, the redundant per-hook workspace probe is gone, and agent resumes are staggered on restore. ([#296](https://github.com/Stage-11-Agentics/c11/pull/296)) (C11-156) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **Pi and oh-my-pi resume no longer skip when a working directory holds more than one session.** Pi/omp resolve their session id by scraping the cwd's session store at restore time, but with no launch-time claim the scrape had no time floor to tell a heavily-used cwd's accumulated sessions apart — so it returned "ambiguous" and the pane came up fresh instead of resuming (the v0.55 staging "Pi did not resume" report). New PATH-scoped `pi` and `omp` wrappers mint a wrapper-claim at launch (mirroring the codex wrapper), giving the restore scrape a time floor that narrows past the stale sessions to this pane's own. ([#300](https://github.com/Stage-11-Agentics/c11/pull/300))
+- **Claude Code wrapper-claim fallback now actually fires.** A `cmux` → `c11` rename left `Resources/bin/claude` testing an undefined variable (`cmux_set_agent_bin` instead of the assigned `C11_SET_AGENT_BIN`), so `conversation claim --kind claude-code` was silently skipped — the fallback meant to leave a resumable claim when the SessionStart hook is dropped never ran. One-line fix restores it. ([#300](https://github.com/Stage-11-Agentics/c11/pull/300))
+- **Workspace Previous/Next navigation no longer latches on the first workspace.** A selection latch could trap navigation on the first workspace; the Prev/Next controls release correctly now. ([#269](https://github.com/Stage-11-Agentics/c11/pull/269)) — thanks [@ajroberts0417](https://github.com/ajroberts0417)!
+- **Parallel c11 instances no longer stomp each other's IPC socket.** The control socket is namespaced per bundle, so a second instance binding its socket can't unlink a live peer's out from under it. (C11-155) — thanks [@BenevolentFutures](https://github.com/BenevolentFutures)!
+- **The Agent Skills onboarding sheet stops re-popping on every launch.** A row could auto-open the sheet yet render the "Done" branch (whose handler persists nothing), so the sheet re-fired each launch with no way to dismiss it for good. The actionable-row check now matches the auto-show gate exactly, so a satisfied row no longer re-triggers. ([#299](https://github.com/Stage-11-Agentics/c11/pull/299))
+- **Socket-control password is read from the current `c11/` dir, not the old `c11mux/`.** A `cmux` → `c11` rename casualty left the CLI reading the local socket password from a `c11mux/` directory the app no longer creates, so it returned nil and CLI auth could silently fail. It now reads the renamed location (falling back to the legacy dir only if present). ([#302](https://github.com/Stage-11-Agentics/c11/pull/302))
+
+### Thanks to 2 contributors!
+
+- [@ajroberts0417](https://github.com/ajroberts0417)
+- [@BenevolentFutures](https://github.com/BenevolentFutures)
+
+## [0.54.0] - 2026-06-29
+
+Feature release. Headline: **exact-session conversation resume arrives for Pi, oh-my-pi, and opencode — when c11 restores a workspace, these agents reconnect to the exact session they were in before the restart, not a fresh shell.** Alongside it: Pi and oh-my-pi become first-class agents via a new data-driven registry, splits get size-aware, the tab bar collapses responsively when space runs short, four new chrome themes ship, and surfaces now export the `C11_*` environment namespace the skill documents.
+
+### Added
+
+- **Exact-session resume for Pi, oh-my-pi (omp), and opencode.** On workspace restore, each agent reconnects to its precise prior session rather than starting cold. Per-kind scrapers resolve the real session id at restore time and the conversation store reattaches it. ([#274](https://github.com/Stage-11-Agentics/c11/pull/274), [#275](https://github.com/Stage-11-Agentics/c11/pull/275), [#276](https://github.com/Stage-11-Agentics/c11/pull/276))
+- **Pi and oh-my-pi as first-class agents.** A new data-driven agent registry recognizes Pi and oh-my-pi as agent types, driving detection, the sidebar chip, restart, and canonical typing from one source. ([#271](https://github.com/Stage-11-Agentics/c11/pull/271))
+- **Size-aware splits.** Splitting a pane now adapts to the space available, so new panes land at sensible sizes instead of bisecting blindly. ([#262](https://github.com/Stage-11-Agentics/c11/pull/262))
+- **Responsive collapsing tab bar.** When horizontal space runs short, the tab bar collapses into a single bordered dropdown chip (three-tier responsive behavior) instead of overflowing. ([#266](https://github.com/Stage-11-Agentics/c11/pull/266))
+- **Surface Details.** Right-click a tab for a Surface Details view, including one-click copy of its surface / pane / tab / workspace handles. ([#265](https://github.com/Stage-11-Agentics/c11/pull/265))
+- **Four new chrome themes:** Obsidian, Command Deck, Blueprint, and Spatial. ([#270](https://github.com/Stage-11-Agentics/c11/pull/270))
+- **Terminal-only mode.** New Settings toggles can disable the browser and markdown surface types — hiding their spawn buttons and rejecting those types over the CLI/socket. ([#264](https://github.com/Stage-11-Agentics/c11/pull/264))
+- **`C11_*` surface environment variables.** Surfaces now export `C11_SURFACE_ID`, `C11_TAB_ID`, `C11_SHELL_INTEGRATION`, `C11_WORKSPACE_ID`, and friends alongside the legacy `CMUX_*` names, so agents can read the `C11_*` namespace the skill documents. ([#284](https://github.com/Stage-11-Agentics/c11/pull/284))
+- **`C11_QA_LAUNCH` automation flag.** Launching with `C11_QA_LAUNCH=fresh|resume` suppresses the startup Agent Skills and resume-picker dialogs so automated and QA launches don't block on modals. ([#268](https://github.com/Stage-11-Agentics/c11/pull/268))
+- **Skill install for Pi and oh-my-pi.** The Agent Skills installer now targets Pi (`~/.pi/agent/skills/`) and oh-my-pi (`~/.omp/agent/skills/`) alongside Claude Code, Codex, Grok, Kimi, OpenCode, and Copilot — so the agents c11 already recognizes can also receive the c11 skill.
+- **Bundled opencode status + notification plugin,** auto-installed so opencode surfaces report status and notifications out of the box.
+
+### Changed
+
+- **The Agent Skills onboarding sheet stops over-firing.** "Later" now persists a hash-pinned dismissal so the sheet doesn't reappear on every launch, and dev/tagged builds suppress the auto-popup entirely. ([#272](https://github.com/Stage-11-Agentics/c11/pull/272))
+- **The resume picker no longer blocks on local dev/tagged builds** — it only prompts where it should. ([#283](https://github.com/Stage-11-Agentics/c11/pull/283))
+- **Agent orientation seed prompt reworded** to read as discovery, not command. ([#282](https://github.com/Stage-11-Agentics/c11/pull/282))
+
+### Fixed
+
+- **Codex sessions resume on restore again.** The codex scraper parsed the whole `rollout-<timestamp>-<uuid>.jsonl` filename as the session id, so it never matched a real codex session and a restored codex surface came back as a bare shell. It now extracts the trailing UUID, so a restored codex pane resumes its session like the other agents.
+- **Conversation detection hardening:** Pi/omp auto-detect (including bun-launched sessions), omp session cwd-scoping, and crash-path resume. ([#281](https://github.com/Stage-11-Agentics/c11/pull/281))
+- **Tab bar polish:** tool-button tooltips now show, the collapsed header gets a clear hover affordance, and collapse is tighter with a full-width accent line and whole-header hit area. ([#266](https://github.com/Stage-11-Agentics/c11/pull/266))
+- **Correct split sizing on Retina:** `cellSize` is now converted from backing pixels to points so size-aware split math is right. ([#262](https://github.com/Stage-11-Agentics/c11/pull/262))
+
+### Thanks to 1 contributor!
+
+- [@BenevolentFutures](https://github.com/BenevolentFutures)
+
+## [0.53.0] - 2026-06-16
+
+Feature release. Headline: **the inter-agent mailbox grows up — it routes across every workspace and stops dropping messages silently.** `c11 mailbox send --to <name>` now resolves the recipient across the whole c11 instance (local-first; ambiguous names disambiguate with `--to-workspace`), an unresolved recipient is rejected with a non-zero exit instead of vanishing, surfaces gain stable `mailbox.address` / `mailbox.role` addressing decoupled from their mutable tab title, and stdin delivery is prompt-gated — buffered while a recipient is busy and flushed when it returns to its shell prompt — so a pushed message can never corrupt a running command.
+
+### Added
+
+- **Cross-workspace mailbox routing.** `c11 mailbox send --to <name>` resolves the recipient across every workspace in the instance, local-first: a match in your own workspace wins, otherwise the one other workspace holding that name receives it. If the name lives in more than one other workspace the send fails *ambiguous* — disambiguate with `--to-workspace <ref>`. ([#251](https://github.com/Stage-11-Agentics/c11/pull/251))
+- **Stable mailbox addressing (`mailbox.address` / `mailbox.role`).** Addressing is decoupled from the surface's mutable title, so renaming a tab no longer changes who a message routes to. ([#253](https://github.com/Stage-11-Agentics/c11/pull/253))
+
+### Changed
+
+- **The mailbox no longer drops messages silently.** A recipient that matches no live surface anywhere is rejected with a non-zero `unresolved` exit instead of vanishing; the cross-workspace seam emits a loud socket fallback and a global trace (`c11 mailbox trace <id>` now finds a message wherever it was dispatched), and a `content_type` cap bounds envelope bodies. ([#251](https://github.com/Stage-11-Agentics/c11/pull/251), [#252](https://github.com/Stage-11-Agentics/c11/pull/252))
+
+### Fixed
+
+- **Prompt-gated stdin delivery (C11-144).** c11 no longer pastes a framed `<c11-msg>` block into a PTY that has a foreground command running, where it would corrupt a build, REPL, or another agent's raw-mode stdin. The push is buffered while the recipient is busy and flushed when the surface returns to its shell prompt; buffered messages are still delivered and logged (`buffered` → `flushed`), never dropped. ([#254](https://github.com/Stage-11-Agentics/c11/pull/254))
+
+### Thanks to 1 contributor!
+
+- [@BenevolentFutures](https://github.com/BenevolentFutures)
+
+### Built and shipped by
+
+Stage 11 Agentics. Operator:agent, fused.
+
+## [0.52.0] - 2026-06-14
+
+Feature release. Headline: **two new coding agents and a hang catcher** — GitHub Copilot CLI and Grok Build join as first-class c11 agents with full conversation-store resume wiring, and a real-time main-thread hang monitor now suspends the stalled thread, captures its stack off-thread, and reports to a local log plus Sentry/PostHog (on by default in Release). Alongside it: a batch of resume/reliability fixes (crash-resume, browser-freeze, inspector divider hit-test), a markdown-pane live-reload and font-zoom pass, and a consistent white-outline selection signal in the sidebar.
+
+### Added
+
+- **GitHub Copilot CLI as a built-in agent.** Launches as a first-class c11 coding agent with conversation-store resume wiring, so a Copilot surface resumes its own session on restore; the agent name is localized in all six locales. ([265414a88](https://github.com/Stage-11-Agentics/c11/commit/265414a88), [234022829](https://github.com/Stage-11-Agentics/c11/commit/234022829))
+- **Grok Build as a first-class coding agent.** Same first-class treatment — launcher entry, conversation-store resume, localized name. ([c279a085e](https://github.com/Stage-11-Agentics/c11/commit/c279a085e), [4d8e66a84](https://github.com/Stage-11-Agentics/c11/commit/4d8e66a84))
+- **Real-time main-thread hang monitor.** A watchdog thread detects main-thread stalls, suspends the stuck thread, and captures its stack off-thread, writing a local log and reporting to Sentry/PostHog. On by default in Release builds. Workspace-shape breadcrumbs are attached to each report so hang triage in Sentry shows the layout state at the time of the stall. ([#244](https://github.com/Stage-11-Agentics/c11/pull/244), [#236](https://github.com/Stage-11-Agentics/c11/pull/236))
+- **`c11 state save` / `state verify` / `app restart` CLI.** Operator-grade whole-app session verbs: checkpoint the full app session synchronously while c11 keeps running, dry-run the resume decision per terminal panel (exits non-zero if any conversation wouldn't resume), and perform a clean-shutdown-then-relaunch that brings layout and conversations back. Ships alongside the crash-resume fix below. ([#239](https://github.com/Stage-11-Agentics/c11/pull/239))
+- **Markdown pane: font zoom.** `Cmd+=` / `Cmd+-` / `Cmd+0` zoom the rendered markdown in and out and reset it. ([#241](https://github.com/Stage-11-Agentics/c11/pull/241))
+
+### Changed
+
+- **Markdown pane live-reload is debounced and theme rendering is cached.** Rapid edits to an open markdown file reload smoothly instead of thrashing, and theme application no longer re-parses on every render. ([#241](https://github.com/Stage-11-Agentics/c11/pull/241))
+- **The white outline is now the single, consistent selection signal in the sidebar.** Selected workspaces — including custom-colored ones — get one uniform thick white border instead of the prior mix of selection treatments. ([#234](https://github.com/Stage-11-Agentics/c11/pull/234), [a8870deeb](https://github.com/Stage-11-Agentics/c11/commit/a8870deeb))
+- **Etch session capture enabled (local-only).** Session capture is on for the Etch surface under a local-only, public-repo-safe posture. ([a2cfd1106](https://github.com/Stage-11-Agentics/c11/commit/a2cfd1106))
+- **c11-browser skill prefers `get text` / `get html` over `eval` for content extraction.** `eval` is rejected by strict-CSP sites (e.g. Hacker News); the skill now nudges agents toward the content-read verbs that work everywhere. ([#247](https://github.com/Stage-11-Agentics/c11/pull/247))
+
+### Fixed
+
+- **Crash-resume reliability (C11-131).** After an unclean exit, c11 now restores layout and verifies each conversation against its on-disk transcript before resuming, with an e2e harness covering the path. ([#239](https://github.com/Stage-11-Agentics/c11/pull/239))
+- **Browser portal geometry-sync / browser-freeze (C11-132).** Hardened the browser portal's geometry sync — dirty-ID batching, settled-layout deferral, and an epsilon guard — to stop the WebContent process from freezing during split/workspace churn. ([#237](https://github.com/Stage-11-Agentics/c11/pull/237))
+- **Inspector divider hit-test gated to pointer events (C11-133).** The hosted-inspector divider hit-test no longer runs on keyboard events, and divider candidates are cached — removing work from a typing-latency-sensitive path. ([#240](https://github.com/Stage-11-Agentics/c11/pull/240))
+- **Hang monitor: suspend-window deadlock removed and floating-point reads validated (#245).** Fixes a deadlock in the suspend window and adds validation of the captured FP register reads. ([#245](https://github.com/Stage-11-Agentics/c11/pull/245))
+- **`c11 trigger-flash` / `cancel-flash` resolve cross-workspace surface refs.** A `surface:N` ref owned by another workspace used to fail with "Surface not found" unless `--workspace` was also passed; the flash handlers now resolve the owning workspace globally (a shared `v2ResolveTargetSurface` helper), matching `get-metadata` / `set-metadata` and the title-bar verbs. ([#247](https://github.com/Stage-11-Agentics/c11/pull/247))
+
+### Thanks to 1 contributor!
+
+- [@BenevolentFutures](https://github.com/BenevolentFutures)
+
+### Built and shipped by
+
+Stage 11 Agentics. Operator:agent, fused.
+
+## [0.51.0] - 2026-06-04
+
+Feature release. Headline: **session resume, rebuilt** — a TUI-agnostic conversation store replaces the per-TUI wrapper pattern, so Claude Code, Codex, Opencode, and Kimi surfaces each resume their own session instead of racing lifecycle hooks, and a per-workspace launch picker lets the operator choose exactly which workspaces come back. Alongside it: the sidebar gains a Waiting Agent + workspace nav cluster, and the CLI grows `--cwd` on `new-split`/`new-pane` and `--title` on `new-workspace`.
+
+### Added
+
+- **TUI-agnostic conversation store for session resume.** Each surface persists its own `Conversation` refs on the workspace snapshot, and per-kind strategies (Claude Code, Codex, Opencode, Kimi) interpret them into resume actions. Fixes two 0.44.0-era failures: multiple Codex panes in one project all restoring to the same global most-recent session, and Claude panes restoring blank when the SessionEnd hook raced shutdown snapshot capture. Explicit `/exit` no longer auto-resumes on reopen (intentional contract). Kill switch: `CMUX_DISABLE_CONVERSATION_STORE=1` falls back to the legacy path for one release window. ([#95](https://github.com/Stage-11-Agentics/c11/pull/95))
+- **Per-workspace launch resume picker.** A sheet at launch lists the prior session's workspaces with checkboxes; resume all, some, or none. Policy lives at `c11.launch.resumePolicy ∈ {ask, always, never}` (default `ask`; `always` is the legacy restore-everything behavior). ([#137](https://github.com/Stage-11-Agentics/c11/pull/137))
+- **Workspace nav cluster in the sidebar.** The "Next Notification" button grows into a two-row cluster: the notification row (solid gold lit fill with count badge when agents are waiting) plus ▲/▼ workspace navigation arrows with hover stroke, first/last disabling, and press-and-hold auto-repeat for fast scrubbing. ([#214](https://github.com/Stage-11-Agentics/c11/pull/214), refined [a10b024ff](https://github.com/Stage-11-Agentics/c11/commit/a10b024ff))
+- **"Open in Default Browser" button in the browser toolbar.** Pops the current page out to the system default browser. ([#211](https://github.com/Stage-11-Agentics/c11/pull/211))
+- **`--cwd <path>` on `c11 new-split` and `c11 new-pane`.** The spawned shell starts in the given directory (absolute, relative, or tilde-expanded) instead of inheriting the parent surface's cwd — no more `cd /path && …` prefixes on every sub-agent spawn. Bad paths return a clear socket error instead of silently spawning in `$HOME`. ([#226](https://github.com/Stage-11-Agentics/c11/pull/226))
+- **`c11 new-workspace --title <text>`.** Sets the durable workspace title at creation in one call — survives snapshot/restore and wins over blueprint titles when combined with `--layout`. ([#225](https://github.com/Stage-11-Agentics/c11/pull/225))
+- **Double-click a layout tile on the New Workspace dialog to launch immediately.** ([#208](https://github.com/Stage-11-Agentics/c11/pull/208), [#213](https://github.com/Stage-11-Agentics/c11/pull/213))
+
+### Changed
+
+- **CLI rejects empty `--workspace` / `--surface` values instead of silently falling back to the focused surface.** An empty env-var expansion (`--surface ""`) used to write to whatever surface happened to be focused — usually a peer agent's tab. It now errors. ([d6d0f76e9](https://github.com/Stage-11-Agentics/c11/commit/d6d0f76e9))
+- **Resume picker strings translated in all six locales** (ja, uk, ko, zh-Hans, zh-Hant, ru). ([#224](https://github.com/Stage-11-Agentics/c11/pull/224))
+
+### Fixed
+
+- **The A (Agent Launcher) button no longer ignores Settings → Default Agent.** A stale pre-v0.48 `~/.c11/agents.json` (legacy array format, or any file without an explicit `defaultAgent` key) decoded into a non-nil config that short-circuited the resolver to Claude before the user's Settings pick was read. A project config now only overrides the agent when it actually states one. ([#217](https://github.com/Stage-11-Agentics/c11/pull/217))
+- **Fresh `new-split` refs are immediately addressable, and `default-agent launch` resolves refs the same way `send` does.** `--in-surface` used to resolve only against the focused workspace (failing client-side on any other workspace, with no `--workspace` flag to scope it), and the server could send the launch line into an unattached PTY. The CLI now resolves across all workspaces (new `--workspace` flag honors explicit scope), and the server refreshes known refs and boots background surfaces before sending, so the returned `OK` is truthful. ([#229](https://github.com/Stage-11-Agentics/c11/pull/229))
+- **`c11 restore` reliably submits the resume command.** The registry-synthesized resume line was typed via the bracketed-paste path, leaving the command stranded at the prompt; it now dispatches a real synthetic Return. ([#137](https://github.com/Stage-11-Agentics/c11/pull/137))
+- **New Workspace dialog centers on the active display** instead of landing off-center on multi-monitor setups (`NSWindow.center()` fired against a pre-layout frame on `NSScreen.main`). ([#208](https://github.com/Stage-11-Agentics/c11/pull/208), [#213](https://github.com/Stage-11-Agentics/c11/pull/213))
+- **Mermaid rendering shows an actionable hint when puppeteer's chrome-headless-shell is missing** (routine after `npm prune` / mmdc upgrade) — a copy-pasteable install command instead of the misleading generic mermaid-cli hint. ([#213](https://github.com/Stage-11-Agentics/c11/pull/213))
+- **Close-confirm overlay focuses its tab before showing**, so the confirmation always appears over the surface it's about to close. ([#206](https://github.com/Stage-11-Agentics/c11/pull/206))
+
+### Thanks to 1 contributor!
+
+- [@BenevolentFutures](https://github.com/BenevolentFutures)
+
+### Built and shipped by
+
+Stage 11 Agentics. Operator:agent, fused.
+
 ## [0.50.0] - 2026-05-22
 
 Feature release. Headline: **state-aware skill install/update** — the Agent Skills onboarding sheet now keeps a per-(target, skill) dismissal store keyed against the bundled skill's content hash, so a new c11 release that updates a skill's body automatically re-surfaces the affected row instead of staying silenced forever (the v0.49.0 silence-flag bug, fixed for upgraders via a one-shot migration). Alongside it: the New Workspace dialog gets a recents-as-panel redesign with sort and pin, blueprint icons gain letter-labeled cells, the Lattice Orchestrator workflow ships as a first-class installable c11 skill, and `$C11_DEFAULT_AGENT_LAUNCH` stops smuggling the operator's seed prompt into sub-agent launches.

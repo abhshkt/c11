@@ -3,27 +3,31 @@
 #
 # When running inside a c11 terminal (CMUX_SURFACE_ID set + socket live),
 # this wrapper marks the surface as terminal_type=codex, injects Codex's
-# `notify` command for the no-trust turn-complete path, and starts Codex with a
-# c11-owned `--profile-v2 c11` hook layer. That layer lives under c11's runtime
-# state, refreshes the operator's Codex auth seed, and is reviewed by Codex's
-# own hook-trust UI. The operator's `config.toml` is copied into the c11-owned
-# overlay only when missing, so Codex hook-trust writes persist locally without
-# mutating `~/.codex/config.toml`. c11 never writes tenant-owned project
-# `.codex/` files or shell rc files. c11 captures codex.session_id from trusted
-# hook payloads, from explicit `codex resume <id>` invocations, or from a
-# guarded local Codex state lookup when exactly one fresh session exists. It also
-# pins Codex to the pane's effective project directory with `--cd` when needed
-# and exports that directory so trusted hooks can ignore nested/background Codex
-# sessions whose payload cwd does not match the pane.
-# That lets restore use deterministic `codex resume <id>`, while Codex's TUI
-# notifications (and the notify bridge when Codex invokes it) give Codex the
-# same completion-notification path Claude already has. When the invocation
-# includes an initial prompt, the wrapper also marks the workspace Running until
-# Codex's notify bridge marks it Idle. Outside c11 (or when the socket is
-# unreachable), it passes through to the real codex binary unchanged.
-# In c11, every exec path first strips private parent-Codex session,
-# sandbox, and network/proxy markers so a Codex-launched c11 process does not
-# poison later c11 Codex panes or remote MCP startup.
+# `notify` command for the no-trust turn-complete path, wrapper-claims a
+# placeholder ConversationRef, and starts Codex with a c11-owned `--profile-v2
+# c11` hook layer. That layer lives under c11's runtime state, refreshes the
+# operator's Codex auth seed, and is reviewed by Codex's own hook-trust UI. The
+# operator's `config.toml` is copied into the c11-owned overlay only when
+# missing, so Codex hook-trust writes persist locally without mutating
+# `~/.codex/config.toml`. c11 never writes tenant-owned project `.codex/` files
+# or shell rc files. c11 captures codex.session_id from trusted hook payloads,
+# from explicit `codex resume <id>` invocations, or from a guarded local-state
+# lookup when exactly one fresh session exists. It also pins Codex to the pane's
+# effective project directory with `--cd` when needed and exports that directory
+# so trusted hooks can ignore nested/background Codex sessions whose payload cwd
+# does not match the pane.
+# That lets restore use deterministic `codex resume <id>`, while the
+# ConversationStore/Codex strategy has a placeholder to reconcile when hookless
+# capture has to fall back to file scraping. Ambiguous multi-candidate cases skip
+# auto-resume and surface a sidebar advisory rather than resuming the wrong pane.
+# Codex's TUI notifications (and the notify bridge when Codex invokes it) give
+# Codex the same completion-notification path Claude already has. When the
+# invocation includes an initial prompt, the wrapper also marks the workspace
+# Running until Codex's notify bridge marks it Idle. Outside c11 (or when the
+# socket is unreachable), it passes through to the real codex binary unchanged.
+# In c11, every exec path first strips private parent-Codex session, sandbox,
+# and network/proxy markers so a Codex-launched c11 process does not poison
+# later c11 Codex panes or remote MCP startup.
 #
 # Codex lifecycle hooks are discovered from real config layers such as
 # `$CODEX_HOME/config.toml`, `--profile-v2 <name>`, or `<repo>/.codex/config.toml`;
@@ -1210,14 +1214,24 @@ if [[ -z "$c11_bin" ]]; then
     exec_real_codex_clean "$@"
 fi
 
-# Best-effort surface-metadata write: mark this surface as a codex terminal
-# immediately, before Codex's notify path or any trusted hook has
-# a chance to fire.
+export CMUX_CODEX_PID="$$"
+export CMUX_CODEX_START_SEC="$(date +%s 2>/dev/null || printf '0')"
+CODEX_PROJECT_DIR="$(codex_effective_project_dir "$@" || true)"
+if [[ -n "$CODEX_PROJECT_DIR" ]]; then
+    export CMUX_CODEX_PROJECT_DIR="$CODEX_PROJECT_DIR"
+fi
+
+# (1) Mark the surface as terminal_type=codex (sidebar chip / role hint).
+# (2) Wrapper-claim a placeholder ConversationRef so the conversation
+#     store has *something* to attach to. Idempotent: a second invocation
+#     in the same surface cannot regress a real id back to a placeholder
+#     (ConversationStore.claim is conservative — never displaces a non-
+#     wrapperClaim source). Use Codex's effective project directory when
+#     the invocation supplied `--cd`; otherwise fall back to the shell cwd.
 #
-# Run in the background so codex startup latency is unaffected;
+# Both run in the background so codex startup latency is unaffected;
 # `disown` so a stale write can't keep the wrapper process alive after
-# `exec` (which is moot since exec replaces this process anyway, but
-# defensive).
+# `exec` (moot since exec replaces this process anyway, but defensive).
 if [[ -n "$c11_bin" ]]; then
     (
         CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC=0.75 \
@@ -1225,14 +1239,16 @@ if [[ -n "$c11_bin" ]]; then
             >/dev/null 2>&1
     ) &
     disown 2>/dev/null || true
+
+    (
+        CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC=0.75 \
+            "$c11_bin" --socket "${CMUX_SOCKET_PATH}" \
+            conversation claim --kind codex --cwd "${CODEX_PROJECT_DIR:-$PWD}" \
+            >/dev/null 2>&1
+    ) &
+    disown 2>/dev/null || true
 fi
 
-export CMUX_CODEX_PID="$$"
-export CMUX_CODEX_START_SEC="$(date +%s 2>/dev/null || printf '0')"
-CODEX_PROJECT_DIR="$(codex_effective_project_dir "$@" || true)"
-if [[ -n "$CODEX_PROJECT_DIR" ]]; then
-    export CMUX_CODEX_PROJECT_DIR="$CODEX_PROJECT_DIR"
-fi
 CODEX_LEGACY_RESUME_LAST=0
 if [[ "${CMUX_CODEX_LEGACY_RESUME_LAST:-}" == "1" ]] || codex_resume_last_arg "$@"; then
     CODEX_LEGACY_RESUME_LAST=1

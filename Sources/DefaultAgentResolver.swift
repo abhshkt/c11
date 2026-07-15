@@ -32,8 +32,12 @@ enum DefaultAgentResolver {
         userDefault: DefaultAgentConfig,
         projectConfig: DefaultAgentConfig?
     ) -> (agent: AgentType, launch: ResolvedAgentLaunch) {
+        // A project config only overrides the agent selection when it actually
+        // states a `defaultAgent`; a file that omits the key (or a legacy file
+        // that no longer decodes) must not displace the user's Settings pick.
+        let projectDefault: AgentType? = projectConfig?.overrideDefaultAgent ?? nil
         let agent = explicitAgent
-            ?? projectConfig?.defaultAgent
+            ?? projectDefault
             ?? userDefault.defaultAgent
 
         // Project-level per-agent config beats user-level for the chosen agent.
@@ -42,7 +46,7 @@ enum DefaultAgentResolver {
             ?? userDefault.config(for: agent)
 
         let command = buildCommand(agent: agent, config: chosenConfig)
-        let bare = chosenConfig.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bare = launcherCommand(agent: agent, config: chosenConfig)
         return (agent, ResolvedAgentLaunch(
             command: command,
             bareCommand: bare,
@@ -57,15 +61,73 @@ enum DefaultAgentResolver {
     /// separate post-launch sendText so each TUI's input contract is honored.
     /// Visible for testing.
     static func buildCommand(agent: AgentType, config: AgentConfig) -> String {
-        let base = config.command.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !base.isEmpty else { return "" }
+        let launcher = launcherCommand(agent: agent, config: config)
+        guard !launcher.isEmpty else { return "" }
         if agent == .claudeCode {
             let prompt = config.initialPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
             if !prompt.isEmpty {
-                return "\(base) \(shellQuote(prompt))"
+                return "\(launcher) \(shellQuote(prompt))"
             }
         }
-        return base
+        return launcher
+    }
+
+    /// The launcher: the operator's `command` with the pinned model flag
+    /// applied, but no positional prompt baked in. This is what feeds
+    /// `bareCommand` / the `C11_DEFAULT_AGENT_LAUNCH` export, so an orchestrator
+    /// that composes its own prompt still inherits the pinned model. The
+    /// model flag must precede claude-code's positional prompt (which stays
+    /// last), so it's applied here rather than after prompt-baking.
+    /// Visible for testing.
+    static func launcherCommand(agent: AgentType, config: AgentConfig) -> String {
+        var result = config.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !result.isEmpty else { return "" }
+        if let flag = modelFlag(agent: agent, config: config, command: result) {
+            result += " \(flag)"
+        }
+        if let flag = effortFlag(agent: agent, config: config, command: result) {
+            result += " \(flag)"
+        }
+        return result
+    }
+
+    /// Whether c11 injects a `--model` flag for this agent kind. Only agents
+    /// whose CLI accepts `--model <family-alias>` qualify; today that's Claude
+    /// Code. Kept as a seam so codex (also `--model`) can opt in later.
+    static func supportsModelFlag(_ agent: AgentType) -> Bool {
+        agent == .claudeCode
+    }
+
+    /// The `--model <family>` flag to append for a launch, or `nil` when none
+    /// should be injected: the agent doesn't support it, no family is pinned,
+    /// or the operator already put a model in the command themselves (their
+    /// explicit choice wins, and we must not pass `--model` twice).
+    /// Visible for testing.
+    static func modelFlag(agent: AgentType, config: AgentConfig, command: String) -> String? {
+        guard supportsModelFlag(agent) else { return nil }
+        let model = config.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else { return nil }
+        guard !command.lowercased().contains("--model") else { return nil }
+        return "--model \(model)"
+    }
+
+    /// Whether c11 injects an `--effort` flag for this agent kind. Same set as
+    /// the model flag today (Claude Code); kept separate so an agent that
+    /// accepts one flag but not the other can diverge later.
+    static func supportsEffortFlag(_ agent: AgentType) -> Bool {
+        agent == .claudeCode
+    }
+
+    /// The `--effort <level>` flag to append for a launch, or `nil` when none
+    /// should be injected: the agent doesn't support it, no level is pinned, or
+    /// the operator already put an effort in the command themselves (their
+    /// explicit choice wins). Visible for testing.
+    static func effortFlag(agent: AgentType, config: AgentConfig, command: String) -> String? {
+        guard supportsEffortFlag(agent) else { return nil }
+        let effort = config.effort.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !effort.isEmpty else { return nil }
+        guard !command.lowercased().contains("--effort") else { return nil }
+        return "--effort \(effort)"
     }
 
     /// Single-quote a value for /bin/sh, escaping embedded single quotes via

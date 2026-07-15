@@ -298,6 +298,53 @@ final class WindowBrowserHostView: NSView {
     private var cachedSidebarDividerX: CGFloat?
     private var sidebarDividerMissCount = 0
     private var trackingArea: NSTrackingArea?
+
+    // Per-slot cache of the resolved hosted-inspector divider candidate.
+    // hostedInspectorDividerHit(at:) runs from hitTest on every pointer event;
+    // without the cache it re-walks the slot's entire descendant tree each time
+    // (20-50+ views with DevTools attached). A `hit: nil` entry is a cached
+    // negative ("scanned, no inspector here") — the common case for slots
+    // without DevTools. Entries are invalidated on slot hierarchy changes
+    // (didAddSubview/willRemoveSubview — docked DevTools attach as direct slot
+    // children), slot layout, and the reapply paths, and positive hits are
+    // cheaply revalidated before use.
+    private struct HostedInspectorCandidateCacheEntry {
+        weak var slotView: WindowBrowserSlotView?
+        var hit: HostedInspectorDividerHit?
+    }
+
+    private var hostedInspectorCandidateCache: [ObjectIdentifier: HostedInspectorCandidateCacheEntry] = [:]
+
+    fileprivate func invalidateHostedInspectorCandidateCache(for slot: WindowBrowserSlotView) {
+        hostedInspectorCandidateCache.removeValue(forKey: ObjectIdentifier(slot))
+    }
+
+    private func cachedHostedInspectorDividerCandidate(in slot: WindowBrowserSlotView) -> HostedInspectorDividerHit? {
+        let key = ObjectIdentifier(slot)
+        if let entry = hostedInspectorCandidateCache[key], entry.slotView === slot {
+            if let hit = entry.hit {
+                if Self.isHostedInspectorDividerHitStillValid(hit) {
+                    return hit
+                }
+                // Stale positive: fall through to a fresh scan.
+            } else {
+                return nil
+            }
+        }
+        let hit = hostedInspectorDividerCandidate(in: slot)
+        hostedInspectorCandidateCache[key] = HostedInspectorCandidateCacheEntry(slotView: slot, hit: hit)
+        return hit
+    }
+
+    private static func isHostedInspectorDividerHitStillValid(_ hit: HostedInspectorDividerHit) -> Bool {
+        hit.inspectorView.window != nil &&
+            hit.pageView.window != nil &&
+            hit.inspectorView.isDescendant(of: hit.slotView) &&
+            hit.pageView.isDescendant(of: hit.slotView) &&
+            hit.pageView.superview === hit.containerView &&
+            hit.inspectorView.superview != nil &&
+            isVisibleHostedInspectorCandidate(hit.inspectorView)
+    }
     private var activeDividerCursorKind: DividerCursorKind?
     private var hostedInspectorDividerDrag: HostedInspectorDividerDragState?
     private var lastHostedInspectorLayoutBoundsSize: NSSize?
@@ -384,11 +431,20 @@ final class WindowBrowserHostView: NSView {
         slot.onHostedInspectorLayout = { [weak self] slotView in
             self?.reapplyHostedInspectorDividerIfNeeded(in: slotView, reason: "slot.layout")
         }
+        // Docked DevTools attach/detach lands as a direct subview change on the
+        // slot (the page web view is pinned straight to it). Drop the slot's
+        // cached divider candidate so the next hit test rescans.
+        slot.onHierarchyChanged = { [weak self] slotView in
+            self?.invalidateHostedInspectorCandidateCache(for: slotView)
+        }
+        invalidateHostedInspectorCandidateCache(for: slot)
     }
 
     override func willRemoveSubview(_ subview: NSView) {
         if let slot = subview as? WindowBrowserSlotView {
             slot.onHostedInspectorLayout = nil
+            slot.onHierarchyChanged = nil
+            invalidateHostedInspectorCandidateCache(for: slot)
         }
         super.willRemoveSubview(subview)
     }
@@ -443,10 +499,31 @@ final class WindowBrowserHostView: NSView {
         clearActiveDividerCursor(restoreArrow: true)
     }
 
+    // Called on every event, including keyboard. Divider scans, cursor updates,
+    // and pass-through routing are pointer-only; keep the non-pointer path
+    // minimal. Do not add work outside the isPointerEvent guard.
+    // (Mirrors WindowTerminalHostView.hitTest.)
     override func hitTest(_ point: NSPoint) -> NSView? {
+        let isPointerEvent: Bool
+        switch NSApp.currentEvent?.type {
+        case .mouseMoved, .mouseEntered, .mouseExited,
+             .leftMouseDown, .leftMouseUp, .leftMouseDragged,
+             .rightMouseDown, .rightMouseUp, .rightMouseDragged,
+             .otherMouseDown, .otherMouseUp, .otherMouseDragged,
+             .scrollWheel, .cursorUpdate:
+            isPointerEvent = true
+        default:
+            isPointerEvent = false
+        }
+        guard isPointerEvent else {
+            // Non-pointer event: skip divider/drag routing, just do standard hit testing.
+            let hitView = super.hitTest(point)
+            return hitView === self ? nil : hitView
+        }
+
         let dividerHit = splitDividerHit(at: point)
         let hostedInspectorHit = dividerHit == nil ? hostedInspectorDividerHit(at: point) : nil
-        updateDividerCursor(at: point, dividerHit: dividerHit, hostedInspectorHit: hostedInspectorHit)
+        updateDividerCursor(at: point, resolvedDividerHit: dividerHit, resolvedHostedInspectorHit: hostedInspectorHit)
 
         let titlebarPassThrough = shouldPassThroughToTitlebar(at: point)
         let sidebarPassThrough = shouldPassThroughToSidebarResizer(
@@ -623,8 +700,8 @@ final class WindowBrowserHostView: NSView {
         )
         updateDividerCursor(
             at: convert(event.locationInWindow, from: nil),
-            dividerHit: nil,
-            hostedInspectorHit: HostedInspectorDividerHit(
+            resolvedDividerHit: nil,
+            resolvedHostedInspectorHit: HostedInspectorDividerHit(
                 slotView: dragState.slotView,
                 containerView: dragState.containerView,
                 pageView: dragState.pageView,
@@ -746,13 +823,25 @@ final class WindowBrowserHostView: NSView {
         return point.x >= regionMinX && point.x <= regionMaxX
     }
 
+    private func updateDividerCursor(at point: NSPoint) {
+        let resolvedDividerHit = splitDividerHit(at: point)
+        let resolvedHostedInspectorHit = resolvedDividerHit == nil ? hostedInspectorDividerHit(at: point) : nil
+        updateDividerCursor(
+            at: point,
+            resolvedDividerHit: resolvedDividerHit,
+            resolvedHostedInspectorHit: resolvedHostedInspectorHit
+        )
+    }
+
+    // Trusts the caller's resolved hits verbatim — a caller-computed nil is a
+    // real "no hit", not a request to re-scan. (The previous `hit ?? rescan`
+    // contract re-ran the per-slot descendant scan on every pointer event in
+    // the common no-inspector case, doubling hitTest's divider cost.)
     private func updateDividerCursor(
         at point: NSPoint,
-        dividerHit: DividerHit? = nil,
-        hostedInspectorHit: HostedInspectorDividerHit? = nil
+        resolvedDividerHit: DividerHit?,
+        resolvedHostedInspectorHit: HostedInspectorDividerHit?
     ) {
-        let resolvedDividerHit = dividerHit ?? splitDividerHit(at: point)
-        let resolvedHostedInspectorHit = resolvedDividerHit == nil ? (hostedInspectorHit ?? hostedInspectorDividerHit(at: point)) : nil
         if shouldPassThroughToSidebarResizer(
             at: point,
             dividerHit: resolvedDividerHit,
@@ -853,7 +942,7 @@ final class WindowBrowserHostView: NSView {
         for slot in visibleSlots {
             let pointInSlot = slot.convert(point, from: self)
             guard slot.bounds.contains(pointInSlot),
-                  let hit = hostedInspectorDividerCandidate(in: slot) else {
+                  let hit = cachedHostedInspectorDividerCandidate(in: slot) else {
                 continue
             }
 
@@ -866,8 +955,11 @@ final class WindowBrowserHostView: NSView {
     }
 
     private func hostedInspectorDividerCandidate(in slot: WindowBrowserSlotView) -> HostedInspectorDividerHit? {
-        let inspectorCandidates = Self.visibleDescendants(in: slot)
-            .filter { Self.isVisibleHostedInspectorCandidate($0) && Self.isInspectorView($0) }
+        // Reached only on cache miss/invalidation (see
+        // cachedHostedInspectorDividerCandidate). A stream of these per pointer
+        // move in /tmp/c11-portal.log means the cache is not holding.
+        portalLog("browser.inspectorScan", "slot=\(portalLogToken(slot))")
+        let inspectorCandidates = Self.collectVisibleInspectorCandidates(in: slot)
             .sorted { lhs, rhs in
                 let lhsFrame = slot.convert(lhs.bounds, from: lhs)
                 let rhsFrame = slot.convert(rhs.bounds, from: rhs)
@@ -989,7 +1081,11 @@ final class WindowBrowserHostView: NSView {
             return false
         }
         guard let preferredWidth = slot.resolvedPreferredHostedInspectorWidth(in: slot.bounds) else { return false }
-        guard let hit = hostedInspectorDividerCandidate(in: slot) else { return false }
+        // Layout/sync churn can rearrange the slot's subtree without tripping the
+        // cheap validity check (same views, different frames/dock side). Rescan
+        // here and let the fresh result repopulate the cache for the hit-test path.
+        invalidateHostedInspectorCandidateCache(for: slot)
+        guard let hit = cachedHostedInspectorDividerCandidate(in: slot) else { return false }
         let oldPageFrame = hit.pageView.frame
         let oldInspectorFrame = hit.inspectorView.frame
         _ = applyHostedInspectorDividerWidth(
@@ -1135,14 +1231,23 @@ final class WindowBrowserHostView: NSView {
             abs(lhs.height - rhs.height) <= epsilon
     }
 
-    private static func visibleDescendants(in root: NSView) -> [NSView] {
-        var descendants: [NSView] = []
+    /// Collect visible WKInspector* candidate views under `root`, pruning each
+    /// matched view's subtree. Nested inspector views resolve to the same
+    /// top-level container pair via the upward walk in
+    /// `hostedInspectorDividerCandidate(in:startingAt:)` (bestHit is overwritten
+    /// up to the highest container with a valid page sibling), so descending
+    /// into a match only re-derives the same hit.
+    private static func collectVisibleInspectorCandidates(in root: NSView) -> [NSView] {
+        var candidates: [NSView] = []
         var stack = Array(root.subviews.reversed())
         while let view = stack.popLast() {
-            descendants.append(view)
+            if isVisibleHostedInspectorCandidate(view), isInspectorView(view) {
+                candidates.append(view)
+                continue
+            }
             stack.append(contentsOf: view.subviews.reversed())
         }
-        return descendants
+        return candidates
     }
 
     private static func isInspectorView(_ view: NSView) -> Bool {
@@ -1612,8 +1717,17 @@ final class WindowBrowserSlotView: NSView {
     private var preferredHostedInspectorWidthFraction: CGFloat?
     fileprivate var isHostedInspectorDividerDragActive = false
     var onHostedInspectorLayout: ((WindowBrowserSlotView) -> Void)?
+    // Fired on direct subview add/remove. The host uses this to invalidate its
+    // per-slot inspector-divider candidate cache (docked DevTools attach/detach
+    // is a direct subview change here).
+    var onHierarchyChanged: ((WindowBrowserSlotView) -> Void)?
     fileprivate var isApplyingHostedInspectorLayout = false
     private var lastHostedInspectorLayoutBoundsSize: NSSize?
+
+    override func willRemoveSubview(_ subview: NSView) {
+        super.willRemoveSubview(subview)
+        onHierarchyChanged?(self)
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1930,6 +2044,7 @@ final class WindowBrowserSlotView: NSView {
 
     override func didAddSubview(_ subview: NSView) {
         super.didAddSubview(subview)
+        onHierarchyChanged?(self)
         guard subview !== paneDropTargetView else { return }
         bringInteractionLayersToFrontIfNeeded()
     }
@@ -2095,6 +2210,11 @@ final class WindowBrowserPortal: NSObject {
     private weak var installedReferenceView: NSView?
     private var hasDeferredFullSyncScheduled = false
     private var hasExternalGeometrySyncScheduled = false
+    // Web views needing a deferred re-sync on the next scheduled tick. Mirrors
+    // TerminalWindowPortal.dirtyHostedIds: the deferred pass touches only entries
+    // marked here, so unrelated browsers don't re-sync (and re-render) on every
+    // anchor-geometry callback in a multi-browser workspace.
+    private var dirtyWebViewIds: Set<ObjectIdentifier> = []
     private var geometryObservers: [NSObjectProtocol] = []
 
     private struct Entry {
@@ -2160,7 +2280,7 @@ final class WindowBrowserPortal: NSObject {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.scheduleExternalGeometrySynchronize()
+                self?.scheduleExternalGeometrySynchronize(trigger: "windowDidResize")
             }
         })
         geometryObservers.append(center.addObserver(
@@ -2169,7 +2289,7 @@ final class WindowBrowserPortal: NSObject {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.scheduleExternalGeometrySynchronize()
+                self?.scheduleExternalGeometrySynchronize(trigger: "windowDidEndLiveResize")
             }
         })
         geometryObservers.append(center.addObserver(
@@ -2186,7 +2306,7 @@ final class WindowBrowserPortal: NSObject {
                           window: window,
                           hostView: self.hostView
                       ) else { return }
-                self.scheduleExternalGeometrySynchronize()
+                self.scheduleExternalGeometrySynchronize(trigger: "splitViewDidResize")
             }
         })
     }
@@ -2198,18 +2318,36 @@ final class WindowBrowserPortal: NSObject {
         geometryObservers.removeAll()
     }
 
-    private func scheduleExternalGeometrySynchronize() {
+    private func scheduleExternalGeometrySynchronize(trigger: String) {
         guard !hasExternalGeometrySyncScheduled else { return }
         hasExternalGeometrySyncScheduled = true
+        // Outside live resize / divider drags, defer one extra runloop turn so
+        // SwiftUI/AppKit layout settles before the sync pass — otherwise the pass
+        // reads mid-flight frames and a follow-up notification re-runs it, doubling
+        // the per-change sync cost. Mirrors TerminalWindowPortal's twin.
+        let isDragEvent = TerminalWindowPortalRegistry.isInteractiveGeometryResizeActive
+        let requiresSettledLayout = !(hostView.inLiveResize || window?.inLiveResize == true || isDragEvent)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.hasExternalGeometrySyncScheduled = false
-            self.synchronizeAllEntriesFromExternalGeometryChange()
+            let performSync = {
+                self.hasExternalGeometrySyncScheduled = false
+                self.synchronizeAllEntriesFromExternalGeometryChange(trigger: trigger)
+            }
+            if requiresSettledLayout {
+                DispatchQueue.main.async(execute: performSync)
+            } else {
+                performSync()
+            }
         }
     }
 
-    private func synchronizeAllEntriesFromExternalGeometryChange() {
+    private func synchronizeAllEntriesFromExternalGeometryChange(trigger: String) {
         guard ensureInstalled() else { return }
+        portalLog("browser.geom.external",
+            "windowNumber=\(window?.windowNumber ?? -1) " +
+            "trigger=\(trigger) " +
+            "entryCount=\(entriesByWebViewId.count)"
+        )
         installedContainerView?.layoutSubtreeIfNeeded()
         installedReferenceView?.layoutSubtreeIfNeeded()
         hostView.superview?.layoutSubtreeIfNeeded()
@@ -2258,7 +2396,6 @@ final class WindowBrowserPortal: NSObject {
             entriesByWebViewId[webViewId] = entry
             entry.containerView?.isHidden = true
             didHide = true
-#if DEBUG
             let anchorWindowDesc: String
             if anchor == nil {
                 anchorWindowDesc = "deallocated"
@@ -2269,11 +2406,23 @@ final class WindowBrowserPortal: NSObject {
             } else {
                 anchorWindowDesc = "other"
             }
+            portalLog("browser.orphan.hide",
+                "webViewId=\(portalLogToken(webViewId)) " +
+                "anchor=\(portalLogToken(anchor)) anchorWindow=\(anchorWindowDesc)"
+            )
+#if DEBUG
             dlog(
                 "browser.portal.orphan.hide web=\(browserPortalDebugToken(entry.webView)) " +
                 "anchor=\(browserPortalDebugToken(anchor)) anchorWindow=\(anchorWindowDesc)"
             )
 #endif
+            // C11-134: orphaned portal entries signal teardown/remount churn —
+            // the shape we need visible in Sentry hang reports.
+            sentryBreadcrumb("portal.orphan.hide", category: "portal", data: [
+                "layer": "browser",
+                "anchor": anchorWindowDesc,
+                "entryCount": entriesByWebViewId.count,
+            ])
         }
         return didHide
     }
@@ -2795,9 +2944,15 @@ final class WindowBrowserPortal: NSObject {
 
     func detachWebView(withId webViewId: ObjectIdentifier) {
         guard let entry = entriesByWebViewId.removeValue(forKey: webViewId) else { return }
+        dirtyWebViewIds.remove(webViewId)
         if let anchor = entry.anchorView {
             webViewByAnchorId.removeValue(forKey: ObjectIdentifier(anchor))
         }
+        portalLog("browser.detach",
+            "webViewId=\(portalLogToken(webViewId)) " +
+            "anchorId=\(portalLogToken(entry.anchorView.map(ObjectIdentifier.init))) " +
+            "entryCount=\(entriesByWebViewId.count)"
+        )
 #if DEBUG
         let hadContainerSuperview = (entry.containerView?.superview === hostView) ? 1 : 0
         let hadWebSuperview = entry.webView?.superview == nil ? 0 : 1
@@ -2945,6 +3100,14 @@ final class WindowBrowserPortal: NSObject {
         let webViewId = ObjectIdentifier(webView)
         let anchorId = ObjectIdentifier(anchorView)
         let previousEntry = entriesByWebViewId[webViewId]
+        portalLog("browser.bind.before",
+            "webViewId=\(portalLogToken(webViewId)) " +
+            "anchorId=\(portalLogToken(anchorId)) " +
+            "anchorWindowNumber=\(anchorView.window?.windowNumber ?? -1) " +
+            "visibleInUI=\(visibleInUI ? 1 : 0) " +
+            "prevAnchorId=\(portalLogToken(previousEntry?.anchorView.map(ObjectIdentifier.init))) " +
+            "entryCount=\(entriesByWebViewId.count)"
+        )
         let containerView = ensureContainerView(
             for: previousEntry ?? Entry(
                 webView: nil,
@@ -3072,7 +3235,19 @@ final class WindowBrowserPortal: NSObject {
             source: "bind",
             forcePresentationRefresh: didChangeAnchor
         )
+        // Re-check this web view on the next tick — the bind just reparented/resized
+        // it and ancestor layout may still settle. Other entries are unaffected.
+        dirtyWebViewIds.insert(webViewId)
+        scheduleDeferredFullSynchronizeAll()
         pruneDeadEntries()
+
+        portalLog("browser.bind.after",
+            "webViewId=\(portalLogToken(webViewId)) " +
+            "anchorId=\(portalLogToken(anchorId)) " +
+            "seededFrame=\(portalLogFrame(containerView.frame)) " +
+            "containerInHostView=\(containerView.superview === hostView ? 1 : 0) " +
+            "entryCount=\(entriesByWebViewId.count)"
+        )
     }
 
     func synchronizeWebViewForAnchor(_ anchorView: NSView) {
@@ -3084,6 +3259,11 @@ final class WindowBrowserPortal: NSObject {
         }
 
         synchronizeAllWebViews(excluding: primaryWebViewId, source: "anchorSecondary")
+        // Only the primary web view (whose anchor moved) needs a deferred re-check
+        // after layout settles; the others were just synchronized inline above.
+        if let primaryWebViewId {
+            dirtyWebViewIds.insert(primaryWebViewId)
+        }
         scheduleDeferredFullSynchronizeAll()
     }
 
@@ -3096,10 +3276,39 @@ final class WindowBrowserPortal: NSObject {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.hasDeferredFullSyncScheduled = false
+            self.runDeferredWebViewSync()
+        }
+    }
+
+    /// Body of the deferred sync. Iterates only entries marked dirty since the
+    /// schedule call; skips entirely when nothing's dirty. Re-entrant marks added
+    /// during iteration (e.g., transient-recovery retries) re-arm a fresh deferred
+    /// via the schedule call, so they're handled on the next tick rather than in
+    /// the current sweep. Mirrors TerminalWindowPortal.runDeferredHostedSync.
+    private func runDeferredWebViewSync() {
+        guard ensureInstalled() else {
+            dirtyWebViewIds.removeAll(keepingCapacity: true)
+            return
+        }
+        let snapshot = dirtyWebViewIds
+        dirtyWebViewIds.removeAll(keepingCapacity: true)
+        guard !snapshot.isEmpty else {
+            portalLog("browser.deferredSync.skip", "count=0")
+            return
+        }
+        portalLog("browser.deferredSync.run",
+            "count=\(snapshot.count) entryCount=\(entriesByWebViewId.count)"
+        )
 #if DEBUG
-            dlog("browser.portal.sync.defer.tick entries=\(self.entriesByWebViewId.count)")
+        dlog("browser.portal.sync.defer.tick dirty=\(snapshot.count) entries=\(entriesByWebViewId.count)")
 #endif
-            self.synchronizeAllWebViews(excluding: nil, source: "deferredTick")
+        pruneDeadEntries()
+        for webViewId in snapshot {
+            // Skip ids that no longer correspond to a live entry (detached between
+            // schedule and run). synchronizeWebView would no-op anyway, but skipping
+            // here avoids the lookup churn.
+            guard entriesByWebViewId[webViewId] != nil else { continue }
+            synchronizeWebView(withId: webViewId, source: "deferredTick")
         }
     }
 
@@ -3149,6 +3358,9 @@ final class WindowBrowserPortal: NSObject {
         )
 #endif
         if entry.transientRecoveryRetriesRemaining > 0 {
+            // Retry only the entry whose recovery is in flight; other entries aren't
+            // affected by this transient-recovery cycle.
+            dirtyWebViewIds.insert(webViewId)
             scheduleDeferredFullSynchronizeAll()
         }
         return true
@@ -3384,6 +3596,8 @@ final class WindowBrowserPortal: NSObject {
                     reason: "hostBoundsNotReady"
                 )
             } else {
+                // Retry only this web view on the next tick once host bounds settle.
+                dirtyWebViewIds.insert(webViewId)
                 scheduleDeferredFullSynchronizeAll()
             }
             containerView.setPaneTopChromeHeight(0)
@@ -3651,6 +3865,15 @@ final class WindowBrowserPortal: NSObject {
             _ = hostView.reapplyHostedInspectorDividerIfNeeded(in: containerView, reason: "portal.sync.postRefresh")
         }
         ensureChromeOverlayOnTop()
+        portalLog("browser.sync.result",
+            "webViewId=\(portalLogToken(webViewId)) " +
+            "source=\(source) " +
+            "oldFrame=\(portalLogFrame(oldFrame)) " +
+            "targetFrame=\(portalLogFrame(targetFrame)) " +
+            "shouldHide=\(shouldHide ? 1 : 0) " +
+            "containerHidden=\(containerView.isHidden ? 1 : 0) " +
+            "entryCount=\(entriesByWebViewId.count)"
+        )
 #if DEBUG
         dlog(
             "browser.portal.sync.result web=\(browserPortalDebugToken(webView)) source=\(source) " +

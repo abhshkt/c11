@@ -43,6 +43,7 @@ Notes:
 - CLI output defaults to short refs (`surface:N`, `pane:N`, `workspace:N`, `window:N`).
 - UUIDs are still accepted on input; only request UUID output when needed (`--id-format uuids|both`).
 - Keep using one `surface:N` per task unless you intentionally switch.
+- **Default to a tab in the existing browser pane.** If the workspace already has a browser pane, open new pages as tabs inside it rather than spawning a new browser pane — browsers are tabbed by default, and a fresh pane each time is the awkward interaction to avoid. Find the browser pane in `c11 tree --json` and add the tab with `c11 new-surface --type browser --url <url> --pane <browser-pane-ref>`. Open a new browser pane (`c11 new-pane --type browser`) only when none exists yet, or when the operator explicitly wants pages side by side. `c11 browser open` reuses an existing browser surface when one is available.
 
 ## Wait Support
 
@@ -128,6 +129,8 @@ Use supported high-level commands (`click`, `fill`, `press`, `scroll`, `wait`, `
 ### `js_error` on `snapshot --interactive` or `eval`
 
 Some complex pages can reject or break the JavaScript used for rich snapshots and ad-hoc evaluation.
+
+**Prefer `get text body` / `get html body` for reading page content; reserve `eval` for interaction and computed checks.** `eval` and `snapshot --interactive` run injected JavaScript that strict-CSP or framebusting sites (Hacker News is a known case) reject with `js_error` — even for something as trivial as `eval "1+1"` — whereas `get text`/`get html` read the already-rendered DOM and keep working. Reach for `eval` when you genuinely need to run script on the page, not as the default way to extract content.
 
 Recovery steps:
 

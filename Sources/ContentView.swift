@@ -3038,18 +3038,18 @@ struct ContentView: View {
             // Sidebar width changes are pure SwiftUI layout updates, so portal-hosted
             // terminals need an explicit post-layout geometry resync.
             if let observedWindow {
-                TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: observedWindow)
+                TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: observedWindow, trigger: "sidebarWidthChange")
             } else {
-                TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronizeForAllWindows()
+                TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronizeForAllWindows(trigger: "sidebarWidthChange")
             }
             updateSidebarResizerBandState()
         })
 
         view = AnyView(view.onChange(of: sidebarState.isVisible) { _ in
             if let observedWindow {
-                TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: observedWindow)
+                TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: observedWindow, trigger: "sidebarVisibilityChange")
             } else {
-                TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronizeForAllWindows()
+                TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronizeForAllWindows(trigger: "sidebarVisibilityChange")
             }
             updateSidebarResizerBandState()
         })
@@ -3527,7 +3527,7 @@ struct ContentView: View {
         let availableWidth = window.contentView?.bounds.width ?? window.contentLayoutRect.width
         clampSidebarWidthIfNeeded(availableWidth: availableWidth)
         updateSidebarResizerBandState()
-        TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: window)
+        TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: window, trigger: "mainWindowGeometryReconcile")
 
         updateTitlebarPadding(from: window)
     }
@@ -5534,6 +5534,15 @@ struct ContentView: View {
         )
         contributions.append(
             CommandPaletteCommandContribution(
+                commandId: "palette.surfaceDetails",
+                title: constant(String(localized: "command.surfaceDetails.title", defaultValue: "Surface Details")),
+                subtitle: panelSubtitle,
+                keywords: ["surface", "details", "manifest", "metadata", "id", "number", "tab"],
+                when: { $0.bool(CommandPaletteContextKeys.hasFocusedPanel) }
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
                 commandId: "palette.closeTab",
                 title: constant(String(localized: "command.closeTab.title", defaultValue: "Close Tab")),
                 subtitle: constant(String(localized: "command.closeTab.subtitle", defaultValue: "Tab")),
@@ -6198,6 +6207,15 @@ struct ContentView: View {
             DispatchQueue.main.async {
                 _ = AppDelegate.shared?.openBrowserAndFocusAddressBar()
             }
+        }
+        registry.register(commandId: "palette.surfaceDetails") {
+            guard let workspace = tabManager.selectedWorkspace,
+                  let panelId = workspace.focusedPanelId,
+                  let panel = workspace.panels[panelId] else {
+                NSSound.beep()
+                return
+            }
+            workspace.showSurfaceDetails(for: panel)
         }
         registry.register(commandId: "palette.closeTab") {
             tabManager.closeCurrentPanelWithConfirmation()
@@ -9875,7 +9893,7 @@ private struct SidebarFooterButtons: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            SidebarJumpToUnreadButton()
+            SidebarWaitingAgentCluster()
             HStack(spacing: 4) {
                 SidebarHelpMenuButton(onSendFeedback: onSendFeedback)
                 UpdatePill(model: updateViewModel)
@@ -10820,34 +10838,77 @@ private struct SidebarHelpMenuButton: View {
     }
 }
 
-private struct SidebarJumpToUnreadButton: View {
+// MARK: - Waiting Agent + Workspace Nav Cluster
+
+private struct SidebarWaitingAgentCluster: View {
     @EnvironmentObject private var notificationStore: TerminalNotificationStore
+    @EnvironmentObject private var tabManager: TabManager
 
     private var display: StatusBarButtonDisplay {
         StatusBarButtonDisplay(unreadCount: notificationStore.unreadCount)
     }
 
-    private var label: String {
-        String(
-            localized: "statusBar.nextNotification.title",
-            defaultValue: "Next Notification"
-        )
+    private var isFirstWorkspace: Bool {
+        guard let currentId = tabManager.selectedTabId,
+              let idx = tabManager.tabs.firstIndex(where: { $0.id == currentId }) else { return true }
+        return idx == 0
     }
 
-    private var accessibilityLabel: String {
-        String(
-            localized: "statusBar.jumpToUnread.accessibility",
-            defaultValue: "Jump to next unread notification"
-        )
+    private var isLastWorkspace: Bool {
+        guard let currentId = tabManager.selectedTabId,
+              let idx = tabManager.tabs.firstIndex(where: { $0.id == currentId }) else { return true }
+        return idx == tabManager.tabs.count - 1
+    }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            WaitingAgentRow(display: display, onJump: jump)
+            WorkspaceNavRow(
+                isFirstDisabled: isFirstWorkspace,
+                isLastDisabled: isLastWorkspace,
+                onPrevious: goToPreviousWorkspace,
+                onNext: goToNextWorkspace
+            )
+        }
+    }
+
+    private func jump() {
+        DispatchQueue.main.async {
+            AppDelegate.shared?.jumpToLatestUnread()
+        }
+    }
+
+    private func goToPreviousWorkspace() {
+        guard !isFirstWorkspace else { return }
+        tabManager.selectPreviousTab()
+    }
+
+    private func goToNextWorkspace() {
+        guard !isLastWorkspace else { return }
+        tabManager.selectNextTab()
+    }
+}
+
+private struct WaitingAgentRow: View {
+    let display: StatusBarButtonDisplay
+    let onJump: () -> Void
+
+    private var isLit: Bool { display.isEnabled }
+
+    private var label: String {
+        String(localized: "statusBar.waitingAgent.title", defaultValue: "Waiting Agent")
     }
 
     private var shortcutText: String {
         KeyboardShortcutSettings.shortcut(for: .jumpToUnread).displayString
     }
 
+    private var accessibilityLabel: String {
+        String(localized: "statusBar.jumpToUnread.accessibility", defaultValue: "Jump to next unread notification")
+    }
+
     var body: some View {
-        let display = self.display
-        return Button(action: jump) {
+        Button(action: onJump) {
             HStack(spacing: 6) {
                 Text(label)
                     .font(.system(size: 11, weight: .semibold))
@@ -10869,41 +10930,167 @@ private struct SidebarJumpToUnreadButton: View {
 
                 Spacer(minLength: 4)
 
-                Text(shortcutText)
-                    .font(.system(size: 10, weight: .medium))
-                    .monospacedDigit()
-                    .opacity(0.72)
-                    .lineLimit(1)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\u{2192}")
+                        .font(.system(size: 13, weight: .medium))
+                    Text(shortcutText)
+                        .font(.system(size: 9, weight: .medium))
+                        .opacity(isLit ? 0.6 : 0.5)
+                }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 16)
+            .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
+            // Sustained "agent is waiting" lit state is a solid c11-gold
+            // fill with void (black) content — the standard c11 gold button.
+            // Deliberately no motion; the gold does the attention work. Rest
+            // state stays paper-white-on-void with a rule outline.
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(cmuxAccentColor().opacity(display.isEnabled ? 1.0 : 0.18))
+                    .fill(isLit ? BrandColors.goldSwiftUI : BrandColors.surfaceSwiftUI)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(cmuxAccentColor().opacity(display.isEnabled ? 0 : 0.5), lineWidth: 1)
+                    .stroke(
+                        isLit ? BrandColors.goldSwiftUI : BrandColors.ruleSwiftUI,
+                        lineWidth: isLit ? 0.75 : 1
+                    )
             )
-            .foregroundColor(display.isEnabled ? BrandColors.blackSwiftUI : .secondary)
+            .foregroundColor(isLit ? BrandColors.blackSwiftUI : BrandColors.whiteSwiftUI.opacity(0.4))
             .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
-        .disabled(!display.isEnabled)
-        .opacity(display.isEnabled ? 1.0 : 0.72)
-        .accessibilityIdentifier("SidebarJumpToUnreadButton")
+        .disabled(!isLit)
+        .accessibilityIdentifier("SidebarWaitingAgentButton")
         .accessibilityLabel(accessibilityLabel)
         .accessibilityValue(display.badgeText ?? "")
         .safeHelp(
             KeyboardShortcutSettings.Action.jumpToUnread.tooltip(label)
         )
     }
+}
 
-    private func jump() {
-        DispatchQueue.main.async {
-            AppDelegate.shared?.jumpToLatestUnread()
+private struct WorkspaceNavRow: View {
+    let isFirstDisabled: Bool
+    let isLastDisabled: Bool
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+
+    var body: some View {
+        HStack(spacing: 1) {
+            WorkspaceArrowButton(
+                glyph: "\u{25B2}",
+                isDisabled: isFirstDisabled,
+                action: onPrevious,
+                tooltipText: KeyboardShortcutSettings.Action.prevSidebarTab.tooltip(
+                    String(localized: "sidebar.workspaceNav.previous", defaultValue: "Previous Workspace")
+                ),
+                accessibilityText: String(localized: "sidebar.workspaceNav.previous.accessibility", defaultValue: "Go to previous workspace")
+            )
+            WorkspaceArrowButton(
+                glyph: "\u{25BC}",
+                isDisabled: isLastDisabled,
+                action: onNext,
+                tooltipText: KeyboardShortcutSettings.Action.nextSidebarTab.tooltip(
+                    String(localized: "sidebar.workspaceNav.next", defaultValue: "Next Workspace")
+                ),
+                accessibilityText: String(localized: "sidebar.workspaceNav.next.accessibility", defaultValue: "Go to next workspace")
+            )
         }
+    }
+}
+
+private struct WorkspaceArrowButton: View {
+    let glyph: String
+    let isDisabled: Bool
+    let action: () -> Void
+    let tooltipText: String
+    let accessibilityText: String
+
+    @State private var isHovering = false
+    @State private var isPressed = false
+    @State private var repeatTimer: Timer?
+
+    private var isActive: Bool { (isHovering || isPressed) && !isDisabled }
+
+    var body: some View {
+        Text(glyph)
+            .font(.system(size: 10, weight: .medium))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(BrandColors.surfaceSwiftUI)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .stroke(
+                        isActive ? BrandColors.goldSwiftUI : BrandColors.ruleSwiftUI,
+                        lineWidth: isActive ? 1.5 : 1
+                    )
+            )
+            .foregroundColor(
+                isDisabled
+                    ? BrandColors.whiteSwiftUI.opacity(0.3)
+                    : isActive
+                        ? BrandColors.goldSwiftUI
+                        : BrandColors.whiteSwiftUI
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .onHover { hovering in
+                guard !isDisabled else { return }
+                isHovering = hovering
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard !isDisabled, !isPressed else { return }
+                        isPressed = true
+                        action()
+                        startRepeat()
+                    }
+                    .onEnded { _ in
+                        isPressed = false
+                        stopRepeat()
+                    }
+            )
+            .onChange(of: isDisabled) {
+                // The press action mutates the selected workspace, which can rebuild
+                // this view mid-gesture and cause DragGesture.onEnded to be dropped —
+                // leaving `isPressed` stuck true and the auto-repeat Timer orphaned, so
+                // the sidebar keeps walking selection back to the first/last workspace.
+                // Reaching the first/last workspace disables the button; use that as a
+                // reliable signal to release the latch and cancel the repeat.
+                if isDisabled {
+                    isPressed = false
+                    stopRepeat()
+                }
+            }
+            .accessibilityLabel(accessibilityText)
+            .accessibilityAddTraits(isDisabled ? .isStaticText : .isButton)
+            .safeHelp(isDisabled ? "" : tooltipText)
+            .onDisappear { stopRepeat() }
+    }
+
+    private func startRepeat() {
+        repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in
+            DispatchQueue.main.async {
+                self.repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { _ in
+                    DispatchQueue.main.async {
+                        guard self.isPressed, !self.isDisabled else {
+                            self.stopRepeat()
+                            return
+                        }
+                        self.action()
+                    }
+                }
+            }
+        }
+    }
+
+    private func stopRepeat() {
+        repeatTimer?.invalidate()
+        repeatTimer = nil
     }
 }
 
@@ -11488,30 +11675,24 @@ private struct TabItemView: View, Equatable {
         explicitRailColor != nil
     }
 
+    // Every workspace row carries a rule-gray hairline so it reads as one
+    // cohesive card against the void. Selection is conveyed by one consistent
+    // signal in every indicator style: the hairline thickens into a white
+    // outline. Custom-colored workspaces keep their color as a rail
+    // (.leftRail) or fill (.solidFill) for identity, but selection itself is
+    // always the white outline.
     private var activeBorderLineWidth: CGFloat {
-        switch activeTabIndicatorStyle {
-        case .leftRail:
-            return 0
-        case .solidFill:
-            guard isActive else { return 0 }
-            return hasActiveCustomColorFill ? 1.5 : 1.0
-        }
+        isActive ? 2.5 : 1
     }
 
     private var activeBorderColor: Color {
-        guard isActive else { return .clear }
-        switch activeTabIndicatorStyle {
-        case .leftRail:
-            return .clear
-        case .solidFill:
-            return hasActiveCustomColorFill ? BrandColors.blackSwiftUI : BrandColors.goldSwiftUI
-        }
+        isActive ? BrandColors.whiteSwiftUI : BrandColors.ruleSwiftUI
     }
 
     // When a workspace has a custom color and is selected in .solidFill mode,
     // the fill stays the workspace color (subconsciously reinforcing which
-    // workspace you're in) and emphasis comes from a black outline instead of
-    // swapping the fill to black.
+    // workspace you're in) and emphasis comes from the white outline above
+    // instead of swapping the fill to black.
     private var hasActiveCustomColorFill: Bool {
         isActive && activeTabIndicatorStyle == .solidFill && resolvedCustomTabColor != nil
     }
@@ -11806,16 +11987,16 @@ private struct TabItemView: View, Equatable {
             remoteWorkspaceSection
 
             if detailVisibility.showsMetadata {
-                let metadataEntries = tab.sidebarStatusEntriesInDisplayOrder()
                 let metadataBlocks = tab.sidebarMetadataBlocksInDisplayOrder()
-                if !metadataEntries.isEmpty {
-                    SidebarMetadataRows(
-                        entries: metadataEntries,
-                        isActive: usesInvertedActiveForeground,
-                        onFocus: { updateSelection() }
-                    )
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-                }
+                // TEL-2/TEL-4: the status section owns the decay-clock observation
+                // and renders either the explicit status rows (with age decay) or,
+                // once they expire, the single derived-activity takeover pill.
+                SidebarStatusSection(
+                    tab: tab,
+                    isActive: usesInvertedActiveForeground,
+                    onFocus: { updateSelection() }
+                )
+                .transition(.opacity.combined(with: .move(edge: .top)))
                 if !metadataBlocks.isEmpty {
                     SidebarMetadataMarkdownBlocks(
                         blocks: metadataBlocks,
@@ -11841,27 +12022,18 @@ private struct TabItemView: View, Equatable {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
-            // Progress bar
+            // Progress bar. TEL-2: rendered by a dedicated child subview so
+            // the age-decay clock is observed there — never in TabItemView's
+            // Equatable body — letting the bar dim/gray as it goes stale
+            // without invalidating the whole row on every clock tick.
             if detailVisibility.showsProgress, let progress = tab.progress {
-                VStack(alignment: .leading, spacing: 2) {
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule()
-                                .fill(activeProgressTrackColor)
-                            Capsule()
-                                .fill(activeProgressFillColor)
-                                .frame(width: max(0, geo.size.width * CGFloat(progress.value)))
-                        }
-                    }
-                    .frame(height: 3)
-
-                    if let label = progress.label {
-                        Text(label)
-                            .font(.system(size: chromeTokens.sidebarWorkspaceProgressLabel))
-                            .foregroundColor(activeSecondaryColor(0.6))
-                            .lineLimit(1)
-                    }
-                }
+                SidebarProgressIndicator(
+                    progress: progress,
+                    trackColor: activeProgressTrackColor,
+                    fillColor: activeProgressFillColor,
+                    labelColor: activeSecondaryColor(0.6),
+                    labelFontSize: chromeTokens.sidebarWorkspaceProgressLabel
+                )
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
@@ -12323,11 +12495,11 @@ private struct TabItemView: View, Equatable {
 
     private var explicitRailColor: Color? {
         guard activeTabIndicatorStyle == .leftRail else { return nil }
+        // The custom color shows as a rail for identity (whether selected or
+        // not). Selection itself is the white outline (see activeBorderColor),
+        // so there is no gold selection rail for uncolored workspaces.
         if let custom = resolvedCustomTabColor {
             return custom.opacity(0.95)
-        }
-        if isActive {
-            return BrandColors.goldSwiftUI
         }
         return nil
     }
@@ -13034,6 +13206,58 @@ private struct SidebarMetadataEntryRow: View {
     let onFocus: () -> Void
 
     @Environment(\.chromeScaleTokens) private var chromeTokens
+    // TEL-2: observe the coarse decay clock here in the CHILD subview (never
+    // in TabItemView's Equatable body) so the pill can age visually even when
+    // the parent row does not re-evaluate. The two @AppStorage thresholds are
+    // declared for reactive redraw when the operator retunes them in Settings;
+    // resolution goes through the static (which also honors env overrides).
+    @ObservedObject private var decayClock = SidebarDecayClock.shared
+    @AppStorage(SidebarStalenessSettings.staleThresholdKey)
+    private var staleThresholdRaw = SidebarStalenessSettings.defaultStaleSeconds
+    @AppStorage(SidebarStalenessSettings.expiryThresholdKey)
+    private var expiryThresholdRaw = SidebarStalenessSettings.defaultExpirySeconds
+
+    private var ageSeconds: Double {
+        decayClock.now.timeIntervalSince(entry.timestamp)
+    }
+
+    private var decayStage: SidebarDecayStage {
+        // C11-162 (m5): touch the two @AppStorage thresholds so this view
+        // re-renders when the operator retunes them live. The values are
+        // resolved through the SidebarStalenessSettings statics (env-aware +
+        // ordering-clamped), so these bindings exist only for invalidation —
+        // do not remove them as "unused".
+        _ = (staleThresholdRaw, expiryThresholdRaw)
+        return SidebarStalenessSettings.stage(
+            ageSeconds: ageSeconds,
+            staleSeconds: SidebarStalenessSettings.staleSeconds(),
+            expirySeconds: SidebarStalenessSettings.expirySeconds()
+        )
+    }
+
+    /// Small trailing relative-age hint shown once a pill goes stale.
+    private var ageIndicatorText: String? {
+        guard decayStage != .fresh else { return nil }
+        let secs = Int(ageSeconds)
+        if secs >= 3600 {
+            let hours = secs / 3600
+            return String(localized: "sidebar.decay.ageHours", defaultValue: "\(hours)h")
+        }
+        let minutes = max(1, secs / 60)
+        return String(localized: "sidebar.decay.ageMinutes", defaultValue: "\(minutes)m")
+    }
+
+    private var decayOpacity: Double {
+        switch decayStage {
+        case .fresh: return entry.staleFromRestart ? 0.55 : 1.0
+        case .stale: return 0.6
+        case .expired: return 0.5
+        }
+    }
+
+    private var decayIsItalic: Bool {
+        entry.staleFromRestart || decayStage != .fresh
+    }
 
     var body: some View {
         Group {
@@ -13064,16 +13288,28 @@ private struct SidebarMetadataEntryRow: View {
             metadataText(underlined: underlined)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            if let ageIndicatorText {
+                Text(ageIndicatorText)
+                    .font(.system(size: chromeTokens.sidebarWorkspaceProgressLabel, weight: .medium))
+                    .foregroundColor(foregroundColor.opacity(0.7))
+                    .monospacedDigit()
+                    .layoutPriority(1)
+            }
             Spacer(minLength: 0)
         }
-        .font(entry.staleFromRestart
+        .font(decayIsItalic
             ? .system(size: chromeTokens.sidebarWorkspaceMetadata, weight: .regular).italic()
             : .system(size: chromeTokens.sidebarWorkspaceMetadata, weight: .regular))
-        .opacity(entry.staleFromRestart ? 0.55 : 1.0)
+        .opacity(decayOpacity)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var foregroundColor: Color {
+        // TEL-2: an expired pill grays out entirely regardless of its
+        // author-supplied color, signalling the writer has gone silent.
+        if decayStage == .expired {
+            return BrandColors.dimSwiftUI
+        }
         if isActive,
            let raw = entry.color,
            Color(hex: raw) != nil {
@@ -13126,6 +13362,206 @@ private struct SidebarMetadataEntryRow: View {
             Text(display)
                 .underline(underlined)
                 .foregroundColor(foregroundColor)
+        }
+    }
+}
+
+/// TEL-2: the workspace progress bar, extracted into its own child subview so
+/// it can observe the coarse `SidebarDecayClock` (never done in TabItemView's
+/// Equatable body). As the progress write ages it dims; once expired the fill
+/// grays to `BrandColors.dim`, signalling the reporter has gone silent.
+private struct SidebarProgressIndicator: View {
+    let progress: SidebarProgressState
+    let trackColor: Color
+    let fillColor: Color
+    let labelColor: Color
+    let labelFontSize: CGFloat
+
+    @ObservedObject private var decayClock = SidebarDecayClock.shared
+    @AppStorage(SidebarStalenessSettings.staleThresholdKey)
+    private var staleThresholdRaw = SidebarStalenessSettings.defaultStaleSeconds
+    @AppStorage(SidebarStalenessSettings.expiryThresholdKey)
+    private var expiryThresholdRaw = SidebarStalenessSettings.defaultExpirySeconds
+
+    private var ageSeconds: Double {
+        decayClock.now.timeIntervalSince(progress.timestamp)
+    }
+
+    private var decayStage: SidebarDecayStage {
+        // C11-162 (m5): touch the two @AppStorage thresholds so this view
+        // re-renders when the operator retunes them live. The values are
+        // resolved through the SidebarStalenessSettings statics (env-aware +
+        // ordering-clamped), so these bindings exist only for invalidation —
+        // do not remove them as "unused".
+        _ = (staleThresholdRaw, expiryThresholdRaw)
+        return SidebarStalenessSettings.stage(
+            ageSeconds: ageSeconds,
+            staleSeconds: SidebarStalenessSettings.staleSeconds(),
+            expirySeconds: SidebarStalenessSettings.expirySeconds()
+        )
+    }
+
+    private var decayOpacity: Double {
+        switch decayStage {
+        case .fresh: return 1.0
+        case .stale: return 0.6
+        case .expired: return 0.4
+        }
+    }
+
+    private var effectiveFillColor: Color {
+        decayStage == .expired ? BrandColors.dimSwiftUI : fillColor
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(trackColor)
+                    Capsule()
+                        .fill(effectiveFillColor)
+                        .frame(width: max(0, geo.size.width * CGFloat(progress.value)))
+                }
+            }
+            .frame(height: 3)
+
+            if let label = progress.label {
+                Text(label)
+                    .font(.system(size: labelFontSize))
+                    .foregroundColor(labelColor)
+                    .lineLimit(1)
+            }
+        }
+        .opacity(decayOpacity)
+    }
+}
+
+/// TEL-4: derived-activity takeover pill. When a workspace's explicit
+/// agent-claimed status is absent or has aged past expiry, the sidebar falls
+/// back to a *derived* pill computed from low-level activity so the row still
+/// tells the truth. Rendered visually distinct from an agent-claimed pill
+/// (outlined capsule + italic + a "sensed" glyph). Observes the decay clock
+/// in this child subview so the takeover flips without invalidating the row.
+/// C11-162 (TEL-4, m1): owns the single-pill takeover decision for a workspace
+/// row's status region. Observes the decay clock here (a child, never in
+/// `TabItemView`'s Equatable body) and renders EITHER the explicit status rows
+/// OR — once the representative explicit status has expired and a derived
+/// activity exists — the derived pill in their place, so the operator sees one
+/// pill, not a grayed tombstone plus a derived pill.
+private struct SidebarStatusSection: View {
+    @ObservedObject var tab: Tab
+    let isActive: Bool
+    let onFocus: () -> Void
+
+    @ObservedObject private var decayClock = SidebarDecayClock.shared
+    // These invalidation-only bindings force a re-render when the operator
+    // retunes the thresholds live; resolution itself goes through the
+    // `SidebarStalenessSettings` statics (which also honor the env overrides).
+    // Do not remove as "unused" — see also SidebarMetadataEntryRow.
+    @AppStorage(SidebarStalenessSettings.staleThresholdKey)
+    private var staleThresholdRaw = SidebarStalenessSettings.defaultStaleSeconds
+    @AppStorage(SidebarStalenessSettings.expiryThresholdKey)
+    private var expiryThresholdRaw = SidebarStalenessSettings.defaultExpirySeconds
+
+    private var entries: [SidebarStatusEntry] { tab.sidebarStatusEntriesInDisplayOrder() }
+
+    /// The representative explicit status (most recently written) — the one the
+    /// derived takeover is decided against. If it has expired, every other
+    /// status entry is at least as old, so the whole block yields to derived.
+    private var takeoverActive: Bool {
+        _ = (staleThresholdRaw, expiryThresholdRaw)
+        guard let entry = entries.max(by: { $0.timestamp < $1.timestamp }) else {
+            // No explicit status at all: a bare derived reading (if any) shows.
+            return tab.aggregatedDerivedActivity != nil
+        }
+        let text = entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pill = SidebarActivityProjector.project(
+            explicitText: text,
+            explicitAgeSeconds: decayClock.now.timeIntervalSince(entry.timestamp),
+            derived: tab.aggregatedDerivedActivity,
+            staleSeconds: SidebarStalenessSettings.staleSeconds(),
+            expirySeconds: SidebarStalenessSettings.expirySeconds()
+        )
+        return pill?.isDerived == true
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if takeoverActive {
+                SidebarDerivedActivityPill(tab: tab, isActive: isActive, onFocus: onFocus)
+            } else if !entries.isEmpty {
+                SidebarMetadataRows(entries: entries, isActive: isActive, onFocus: onFocus)
+            }
+        }
+    }
+}
+
+private struct SidebarDerivedActivityPill: View {
+    @ObservedObject var tab: Tab
+    let isActive: Bool
+    let onFocus: () -> Void
+
+    @Environment(\.chromeScaleTokens) private var chromeTokens
+    @ObservedObject private var decayClock = SidebarDecayClock.shared
+    @AppStorage(SidebarStalenessSettings.staleThresholdKey)
+    private var staleThresholdRaw = SidebarStalenessSettings.defaultStaleSeconds
+    @AppStorage(SidebarStalenessSettings.expiryThresholdKey)
+    private var expiryThresholdRaw = SidebarStalenessSettings.defaultExpirySeconds
+
+    /// Most-recently-written explicit status entry, used as the representative
+    /// against which the derived takeover is decided.
+    private var representativeEntry: SidebarStatusEntry? {
+        tab.sidebarStatusEntriesInDisplayOrder().max { $0.timestamp < $1.timestamp }
+    }
+
+    private var pill: SidebarVisiblePill? {
+        let entry = representativeEntry
+        // C11-162 (m4): pass the trimmed value through even when empty, so the
+        // projector's empty-string handling (empty explicit → derived takeover)
+        // works instead of being defeated by substituting the key name.
+        let explicitText: String? = entry.map { e in
+            e.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let age = entry.map { decayClock.now.timeIntervalSince($0.timestamp) }
+        return SidebarActivityProjector.project(
+            explicitText: explicitText,
+            explicitAgeSeconds: age,
+            derived: tab.aggregatedDerivedActivity,
+            staleSeconds: SidebarStalenessSettings.staleSeconds(),
+            expirySeconds: SidebarStalenessSettings.expirySeconds()
+        )
+    }
+
+    private var derivedColor: Color {
+        isActive ? Color.white.opacity(0.7) : .secondary
+    }
+
+    var body: some View {
+        // Only surface this row when the projection is a derived takeover;
+        // a fresh/stale explicit status is already rendered by the metadata
+        // rows above (with their own TEL-2 decay treatment).
+        if let pill, pill.isDerived {
+            HStack(spacing: 4) {
+                Image(systemName: "wave.3.right")
+                    .font(.system(size: chromeTokens.sidebarWorkspaceLogIcon, weight: .medium))
+                Text(pill.text)
+                    .font(.system(size: chromeTokens.sidebarWorkspaceMetadata, weight: .regular).italic())
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+            }
+            .foregroundColor(derivedColor)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .stroke(derivedColor.opacity(0.5), lineWidth: 0.75)
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture { onFocus() }
+            .safeHelp(String(localized: "sidebar.derivedActivity.tooltip", defaultValue: "Derived activity — no recent agent status"))
         }
     }
 }

@@ -891,9 +891,13 @@ class TabManager: ObservableObject {
         }
         didSet {
             guard selectedTabId != oldValue else { return }
-            sentryBreadcrumb("workspace.switch", data: [
-                "tabCount": tabs.count
-            ])
+            // C11-163: workspace selected → events stream. Fires on every
+            // selection route (socket, keyboard, click, close-fallback) since
+            // they all land here.
+            if let selected = selectedTabId {
+                EventEmitter.shared.emitWorkspaceSelected(previous: oldValue, selected: selected)
+            }
+            sentryBreadcrumb("workspace.switch", data: surfaceShapeSummary(tabCount: tabs.count))
 
             // Phase 0 instrumentation: open a signpost interval spanning the
             // entire switch (didSet → queued async block) so Instruments.app
@@ -1358,7 +1362,7 @@ class TabManager: ObservableObject {
         let snapshot = workspaceCreationSnapshot()
         let nextTabCount = snapshot.tabs.count + 1
         let defaultTitle = Self.defaultWorkspaceTitle(number: nextTabCount)
-        sentryBreadcrumb("workspace.create", data: ["tabCount": nextTabCount])
+        sentryBreadcrumb("workspace.create", data: surfaceShapeSummary(tabCount: nextTabCount))
         let explicitWorkingDirectory = normalizedWorkingDirectory(overrideWorkingDirectory)
         let workingDirectory = explicitWorkingDirectory ?? preferredWorkingDirectoryForNewTab(snapshot: snapshot)
         let inheritedConfig = inheritedTerminalConfigForNewWorkspace(snapshot: snapshot)
@@ -2465,9 +2469,31 @@ class TabManager: ObservableObject {
         return trimmed
     }
 
+    /// C11-134: global per-type surface counts across all workspaces, merged
+    /// into lifecycle breadcrumbs so Sentry hang reports carry workspace
+    /// shape. Counts only — never titles or URLs.
+    private func surfaceShapeSummary(tabCount: Int) -> [String: Any] {
+        var counts = SurfaceShapeCounts()
+        for workspace in tabs {
+            for panel in workspace.panels.values {
+                switch panel.panelType {
+                case .terminal: counts.terminals += 1
+                case .browser: counts.browsers += 1
+                case .markdown: counts.markdown += 1
+                }
+            }
+        }
+        return [
+            "tabCount": tabCount,
+            "terminals": counts.terminals,
+            "browsers": counts.browsers,
+            "markdown": counts.markdown,
+        ]
+    }
+
     func closeWorkspace(_ workspace: Workspace) {
         guard tabs.count > 1 else { return }
-        sentryBreadcrumb("workspace.close", data: ["tabCount": tabs.count - 1])
+        sentryBreadcrumb("workspace.close", data: surfaceShapeSummary(tabCount: tabs.count - 1))
         clearWorkspaceGitProbes(workspaceId: workspace.id)
         sidebarSelectedWorkspaceIds.remove(workspace.id)
 
@@ -3695,7 +3721,9 @@ class TabManager: ObservableObject {
         guard let tab = tabs.first(where: { $0.id == tabId }),
               tab.panels[surfaceId] != nil else { return nil }
         tab.clearSplitZoom()
-        sentryBreadcrumb("split.create", data: ["direction": String(describing: direction)])
+        var splitCrumbData = surfaceShapeSummary(tabCount: tabs.count)
+        splitCrumbData["direction"] = String(describing: direction)
+        sentryBreadcrumb("split.create", data: splitCrumbData)
         return newSplit(tabId: tabId, surfaceId: surfaceId, direction: direction, focus: focus)
     }
 
@@ -3811,13 +3839,14 @@ class TabManager: ObservableObject {
 
     /// Create a new split in the specified direction
     /// Returns the new panel's ID (which is also the surface ID for terminals)
-    func newSplit(tabId: UUID, surfaceId: UUID, direction: SplitDirection, focus: Bool = true) -> UUID? {
+    func newSplit(tabId: UUID, surfaceId: UUID, direction: SplitDirection, focus: Bool = true, workingDirectory: String? = nil) -> UUID? {
         guard let tab = tabs.first(where: { $0.id == tabId }) else { return nil }
         return tab.newTerminalSplit(
             from: surfaceId,
             orientation: direction.orientation,
             insertFirst: direction.insertFirst,
-            focus: focus
+            focus: focus,
+            workingDirectory: workingDirectory
         )?.id
     }
 
@@ -5474,12 +5503,21 @@ extension TabManager {
         return hasher.finalize()
     }
 
-    func sessionSnapshot(includeScrollback: Bool) -> SessionTabManagerSnapshot {
+    func sessionSnapshot(
+        includeScrollback: Bool,
+        conversationsByPanelId: [String: SurfaceConversations]? = nil
+    ) -> SessionTabManagerSnapshot {
         let restorableTabs = tabs
             .filter { !$0.isRemoteWorkspace }
             .prefix(SessionPersistencePolicy.maxWorkspacesPerWindow)
+        // C11-170: thread the single pre-read store map (from
+        // `AppDelegate.buildSessionSnapshot`) into every workspace so the
+        // full-app save does one actor round-trip, not one per workspace.
         let workspaceSnapshots = restorableTabs
-            .map { $0.sessionSnapshot(includeScrollback: includeScrollback) }
+            .map { $0.sessionSnapshot(
+                includeScrollback: includeScrollback,
+                conversationsByPanelId: conversationsByPanelId
+            ) }
         let selectedWorkspaceIndex = selectedTabId.flatMap { selectedTabId in
             restorableTabs.firstIndex(where: { $0.id == selectedTabId })
         }
@@ -5524,13 +5562,9 @@ extension TabManager {
             // Tier 1 persistence, Phase 1.5: thread the snapshot's workspace
             // UUID into the restored workspace so `(workspaceId, surfaceId)`
             // tuples cached by external consumers (Lattice, CLI, scripted
-            // tests) stay valid across restart. `CMUX_DISABLE_STABLE_WORKSPACE_IDS=1`
-            // reverts to fresh-UUID minting for one-release rollback.
-            let restoredWorkspaceId: UUID? = SessionPersistencePolicy.stableWorkspaceIdsEnabled
-                ? workspaceSnapshot.id
-                : nil
+            // tests) stay valid across restart.
             let workspace = Workspace(
-                id: restoredWorkspaceId,
+                id: workspaceSnapshot.id,
                 title: workspaceSnapshot.stableDefaultTitle ?? workspaceSnapshot.processTitle,
                 stableDefaultTitle: workspaceSnapshot.stableDefaultTitle,
                 workingDirectory: workspaceSnapshot.currentDirectory,

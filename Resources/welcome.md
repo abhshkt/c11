@@ -21,7 +21,7 @@ stage 11 is an outpost in a very large dark. we built this because we needed it.
 ## the grammar
 
 - **window** — a macOS window
-- **workspace** — one project, one place
+- **workspace** — a screen of panes you switch between in a keystroke; commonly one project, but organize it however fits
 - **pane** — a region of a workspace (splits, bonsplit under the hood)
 - **surface** — a terminal, browser, or markdown view inside a pane. panes carry surfaces as tabs
 

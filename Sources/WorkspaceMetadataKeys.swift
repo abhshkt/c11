@@ -65,6 +65,26 @@ public enum SurfaceMetadataKeyName {
     public static let codexSessionStoreManagedOverlay = "managed_overlay"
     public static let codexSessionStoreRealHome = "real_home"
 
+    /// **Reserved namespace — not currently written by any production path.**
+    /// Opencode capture rides the plugin push rail (`session.created` →
+    /// `c11 conversation push`) and the SQLite scrape rail; both produce a
+    /// `ConversationRef` directly, and neither writes this metadata key. The
+    /// key + its `isValidOpencodeSessionId` grammar are kept reserved (and
+    /// validated at the store boundary) so a future opencode hook that records
+    /// the id has a safe, ready home — mirroring the live `claude.session_id`
+    /// wrapper rail. Opencode session IDs are `ses_` + a 26-character
+    /// **base62** body (`[0-9A-Za-z]`), NOT UUIDs — see
+    /// `isValidOpencodeSessionId`. The `opencode.*` prefix does not collide
+    /// with the C11-13 `mailbox.*` namespace.
+    public static let opencodeSessionId = "opencode.session_id"
+
+    /// **Reserved namespace — not currently written by any production path**
+    /// (companion to `opencodeSessionId`; same rationale — capture rides the
+    /// plugin/scrape rails, not metadata keys). Same project-dir grammar as
+    /// the claude key, validated via `isValidOpencodeSessionProjectDir`, which
+    /// delegates to the shared `isValidClaudeSessionProjectDir`.
+    public static let opencodeSessionProjectDir = "opencode.session_project_dir"
+
     /// Canonical `terminal_type` key (same literal as
     /// `SurfaceMetadataStore.reservedKeys`). Named here for executor
     /// readability; validation still flows through the store's reserved
@@ -149,6 +169,46 @@ nonisolated public func isValidClaudeSessionProjectDir(_ candidate: String) -> B
 /// grammar as Claude: absolute POSIX path, no shell-breaking control bytes.
 nonisolated public func isValidCodexSessionProjectDir(_ candidate: String) -> Bool {
     isValidClaudeSessionProjectDir(candidate)
+}
+
+/// Grammar for `opencode.session_id`: `ses_` + a 26-character **base62**
+/// body (`[0-9A-Za-z]`). Verified against a live opencode 1.17.5 store —
+/// all 131 local `session` rows match this exactly, and 83 of them contain
+/// `I`/`L`/`O`/`U` in the body. A Crockford-base32 alphabet (which excludes
+/// those four letters) would wrongly reject those 83 ids, so base62 is the
+/// load-bearing grammar, not a stylistic choice. Anchored so any
+/// non-matching prefix/suffix — shell metacharacters, embedded newlines,
+/// extra tokens — is rejected. Declared `nonisolated` + `public` so
+/// `SurfaceMetadataStore.validateReservedKey` (off the main actor) and the
+/// strategy/CLI validation share one compiled regex without cross-actor
+/// traffic.
+///
+/// Defence in depth mirrors `isValidClaudeSessionId`: the store rejects
+/// malformed writes at the boundary; the strategy re-validates at resume
+/// time so a value that slipped past the store cannot become a shell
+/// command.
+let opencodeSessionIdPattern: NSRegularExpression = {
+    // swiftlint:disable:next force_try
+    return try! NSRegularExpression(
+        pattern: "^ses_[0-9A-Za-z]{26}$",
+        options: []
+    )
+}()
+
+/// Returns true iff `candidate` matches `ses_` + 26-char base62 body
+/// exactly. Trims nothing — callers normalise whitespace before calling.
+nonisolated public func isValidOpencodeSessionId(_ candidate: String) -> Bool {
+    let range = NSRange(location: 0, length: (candidate as NSString).length)
+    return opencodeSessionIdPattern.firstMatch(in: candidate, options: [], range: range) != nil
+}
+
+/// Path grammar for `opencode.session_project_dir`. Identical to
+/// `claude.session_project_dir` (absolute POSIX path, no NUL/newline/
+/// carriage-return/single-quote, ≤4096). Delegates to the shared
+/// `isValidClaudeSessionProjectDir` rather than duplicating the body — the
+/// grammar is operator-path-shaped, not agent-specific.
+nonisolated public func isValidOpencodeSessionProjectDir(_ candidate: String) -> Bool {
+    return isValidClaudeSessionProjectDir(candidate)
 }
 
 /// Validation for workspace metadata writes.

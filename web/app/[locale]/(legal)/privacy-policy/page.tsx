@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import { Link } from "../../../../i18n/navigation";
 
 export const metadata: Metadata = {
-  title: "Privacy Policy — cmux",
-  description: "Privacy policy for cmux",
+  title: "Privacy Policy — c11",
+  description: "Privacy policy for c11",
   alternates: { canonical: "./" },
 };
 
@@ -14,7 +14,7 @@ export default function PrivacyPolicyPage() {
       <p>Last updated: March 18, 2026</p>
 
       <p>
-        Manaflow (the &ldquo;Company&rdquo;) is committed to maintaining robust
+        Stage 11 Agentics (the &ldquo;Company&rdquo;) is committed to maintaining robust
         privacy protections for its users. This Privacy Policy is designed to
         help you understand how we collect, use and safeguard the information you
         provide to us.
@@ -22,8 +22,8 @@ export default function PrivacyPolicyPage() {
       <p>
         For purposes of this policy, &ldquo;Site&rdquo; refers to the
         Company&rsquo;s website at{" "}
-        <a href="https://cmux.com">cmux.com</a>.
-        &ldquo;Application&rdquo; refers to the cmux desktop application for
+        <a href="https://c11.stage11.systems">c11.stage11.systems</a>.
+        &ldquo;Application&rdquo; refers to the c11 desktop application for
         macOS. &ldquo;Service&rdquo; refers to the Site and Application
         collectively. The terms &ldquo;we,&rdquo; &ldquo;us,&rdquo; and
         &ldquo;our&rdquo; refer to the Company. &ldquo;You&rdquo; refers to
@@ -77,7 +77,7 @@ export default function PrivacyPolicyPage() {
         The Service is not directed to anyone under the age of 13. We do not
         knowingly collect information from anyone under 13. If you believe we
         have collected such information, please contact us at{" "}
-        <a href="mailto:founders@manaflow.com">founders@manaflow.com</a>.
+        <a href="mailto:founders@stage11.ai">founders@stage11.ai</a>.
       </p>
 
       <h2>II. Third-Party Services</h2>
@@ -145,7 +145,7 @@ export default function PrivacyPolicyPage() {
       </ul>
       <p>
         To exercise any of these rights, please contact us at{" "}
-        <a href="mailto:founders@manaflow.com">founders@manaflow.com</a>.
+        <a href="mailto:founders@stage11.ai">founders@stage11.ai</a>.
       </p>
 
       <h2>VI. Links to Other Websites</h2>
@@ -166,7 +166,7 @@ export default function PrivacyPolicyPage() {
       <p>
         If you have any questions regarding this Privacy Policy, please contact
         us at{" "}
-        <a href="mailto:founders@manaflow.com">founders@manaflow.com</a>.
+        <a href="mailto:founders@stage11.ai">founders@stage11.ai</a>.
       </p>
 
       <h2>IX. Data Retention</h2>
@@ -174,7 +174,7 @@ export default function PrivacyPolicyPage() {
         Crash reports and diagnostics are retained only as long as needed to
         diagnose and fix issues. You may request deletion of any data associated
         with you by contacting us at{" "}
-        <a href="mailto:founders@manaflow.com">founders@manaflow.com</a>.
+        <a href="mailto:founders@stage11.ai">founders@stage11.ai</a>.
       </p>
     </>
   );

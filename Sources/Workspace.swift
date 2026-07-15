@@ -157,7 +157,10 @@ extension Workspace {
         )
     }
 
-    func sessionSnapshot(includeScrollback: Bool) -> SessionWorkspaceSnapshot {
+    func sessionSnapshot(
+        includeScrollback: Bool,
+        conversationsByPanelId injectedConversations: [String: SurfaceConversations]? = nil
+    ) -> SessionWorkspaceSnapshot {
         let tree = bonsplitController.treeSnapshot()
         let layout = sessionLayoutSnapshot(from: tree)
 
@@ -171,9 +174,36 @@ extension Workspace {
             allPanelIds.append(panelId)
         }
 
+        // C11-24: bulk-read conversation refs once from the actor before
+        // building any panel snapshots. Replaces the per-panel sync-bridge
+        // that deadlocked because the spawned `Task` inherited
+        // `@MainActor` isolation from this `@MainActor` class and could
+        // not run while main was blocked on the semaphore wait. Single
+        // `Task.detached` breaks the isolation inheritance; one
+        // round-trip per save instead of N.
+        //
+        // C11-170: the store snapshot is *global* (all panels across all
+        // workspaces), so a full-app `session.save` iterating W workspaces
+        // used to fire W independent `Task.detached` + 2s-semaphore reads —
+        // one per workspace, each an independent timeout dice-roll on the
+        // main thread. Under the concurrent load the TEL/EVT telemetry now
+        // generates during pane build, some of those reads missed the
+        // window and the workspace persisted an empty `surface_conversations`
+        // (dropped `active` refs → RES acceptance-harness flake). The caller
+        // (`AppDelegate.buildSessionSnapshot`) now reads the store once and
+        // injects the same map into every workspace; the self-read below is
+        // the fallback for the standalone call sites that snapshot a single
+        // workspace (DebugHandlers).
+        let conversationsByPanelId = injectedConversations
+            ?? Workspace.readConversationsByPanelIdSync()
+
         let panelSnapshots = allPanelIds
             .prefix(SessionPersistencePolicy.maxPanelsPerWorkspace)
-            .compactMap { sessionPanelSnapshot(panelId: $0, includeScrollback: includeScrollback) }
+            .compactMap { sessionPanelSnapshot(
+                panelId: $0,
+                includeScrollback: includeScrollback,
+                conversationsByPanelId: conversationsByPanelId
+            ) }
 
         let statusSnapshots = statusEntries.values
             .sorted { lhs, rhs in lhs.key < rhs.key }
@@ -200,7 +230,11 @@ extension Workspace {
         }
 
         let progressSnapshot = progress.map { progress in
-            SessionProgressSnapshot(value: progress.value, label: progress.label)
+            SessionProgressSnapshot(
+                value: progress.value,
+                label: progress.label,
+                timestamp: progress.timestamp.timeIntervalSince1970
+            )
         }
         let gitBranchSnapshot = gitBranch.map { branch in
             SessionGitBranchSnapshot(branch: branch.branch, isDirty: branch.isDirty)
@@ -237,28 +271,19 @@ extension Workspace {
 
         let panelSnapshotsById = Dictionary(uniqueKeysWithValues: snapshot.panels.map { ($0.id, $0) })
         let leafEntries = restoreSessionLayout(snapshot.layout)
-        // When `SessionPersistencePolicy.stablePanelIdsEnabled` is true (default),
-        // this map is an identity: snapshot id == restored panel id, because
-        // `createPanel` threads `snapshot.id` into the panel constructor. When
-        // `CMUX_DISABLE_STABLE_PANEL_IDS=1` is set, restored panels mint fresh
-        // UUIDs and this map genuinely remaps old→new. Both focus restore (below)
-        // and pane selection (inside `restorePane`) route through this map so the
-        // two paths share one lookup.
-        var oldToNewPanelIds: [UUID: UUID] = [:]
+        // Panel UUIDs are stable across restart: `createPanel` threads each
+        // `snapshot.id` into the panel constructor, so a restored panel keeps
+        // the snapshot's id. Restore paths key directly on the snapshot id.
 
         for entry in leafEntries {
             restorePane(
                 entry.paneId,
                 snapshot: entry.snapshot,
-                panelSnapshotsById: panelSnapshotsById,
-                oldToNewPanelIds: &oldToNewPanelIds
+                panelSnapshotsById: panelSnapshotsById
             )
         }
 
-        restoreSurfaceMetadataFromSnapshot(
-            panels: snapshot.panels,
-            oldToNewPanelIds: oldToNewPanelIds
-        )
+        restoreSurfaceMetadataFromSnapshot(panels: snapshot.panels)
 
         // CMUX-11 Phase 3: rehydrate PaneMetadataStore entries from each
         // restored leaf and prune any pane metadata not in the live set.
@@ -291,26 +316,20 @@ extension Workspace {
         // each entry with `staleFromRestart: true` so the sidebar can render
         // them with reduced emphasis until the agent re-announces the value.
         // `agentPIDs` stays cleared — a PID from a prior boot is meaningless.
-        // `CMUX_DISABLE_STATUS_ENTRY_PERSIST=1` reverts to the pre-Phase-3
-        // discard-on-restore behavior.
-        if SessionPersistencePolicy.statusEntryPersistEnabled {
-            statusEntries = snapshot.statusEntries.reduce(into: [:]) { acc, snap in
-                let url = snap.url.flatMap { URL(string: $0) }
-                let format = snap.format.flatMap { SidebarMetadataFormat(rawValue: $0) } ?? .plain
-                acc[snap.key] = SidebarStatusEntry(
-                    key: snap.key,
-                    value: snap.value,
-                    icon: snap.icon,
-                    color: snap.color,
-                    url: url,
-                    priority: snap.priority ?? 0,
-                    format: format,
-                    timestamp: Date(timeIntervalSince1970: snap.timestamp),
-                    staleFromRestart: true
-                )
-            }
-        } else {
-            statusEntries.removeAll()
+        statusEntries = snapshot.statusEntries.reduce(into: [:]) { acc, snap in
+            let url = snap.url.flatMap { URL(string: $0) }
+            let format = snap.format.flatMap { SidebarMetadataFormat(rawValue: $0) } ?? .plain
+            acc[snap.key] = SidebarStatusEntry(
+                key: snap.key,
+                value: snap.value,
+                icon: snap.icon,
+                color: snap.color,
+                url: url,
+                priority: snap.priority ?? 0,
+                format: format,
+                timestamp: Date(timeIntervalSince1970: snap.timestamp),
+                staleFromRestart: true
+            )
         }
         agentPIDs.removeAll()
         logEntries = snapshot.logEntries.map { entry in
@@ -321,27 +340,60 @@ extension Workspace {
                 timestamp: Date(timeIntervalSince1970: entry.timestamp)
             )
         }
-        progress = snapshot.progress.map { SidebarProgressState(value: $0.value, label: $0.label) }
+        // C11-162 (MAJOR-2): restore the original write time so a restored
+        // progress bar carries its real age instead of appearing freshly written.
+        // Falls back to now for pre-existing snapshots that lack the field.
+        progress = snapshot.progress.map {
+            SidebarProgressState(
+                value: $0.value,
+                label: $0.label,
+                timestamp: $0.timestamp.map { Date(timeIntervalSince1970: $0) } ?? Date()
+            )
+        }
         gitBranch = snapshot.gitBranch.map { SidebarGitBranchState(branch: $0.branch, isDirty: $0.isDirty) }
 
         recomputeListeningPorts()
 
-        if let focusedOldPanelId = snapshot.focusedPanelId,
-           let focusedNewPanelId = oldToNewPanelIds[focusedOldPanelId],
-           panels[focusedNewPanelId] != nil {
-            focusPanel(focusedNewPanelId)
-        } else if let fallbackFocusedPanelId = focusedPanelId, panels[fallbackFocusedPanelId] != nil {
+        if let focusedPanelId = snapshot.focusedPanelId,
+           panels[focusedPanelId] != nil {
+            focusPanel(focusedPanelId)
+        } else if let fallbackFocusedPanelId = self.focusedPanelId, panels[fallbackFocusedPanelId] != nil {
             focusPanel(fallbackFocusedPanelId)
         } else {
             scheduleFocusReconcile()
         }
 
         // C11-24: schedule agent-resume for restored terminal surfaces that
-        // carry a captured session id. The dispatch is deferred so Ghostty
-        // PTYs + their shells have time to come up; `CMUX_DISABLE_AGENT_RESTART=1`
-        // suppresses the whole pass. Layout/metadata/status restore above
-        // is independent — failures here cannot break a normal restore.
-        scheduleAgentRestart(from: snapshot, registry: .phase1, oldToNewPanelIds: oldToNewPanelIds)
+        // carry a ConversationRef in the store. The dispatch is deferred so
+        // Ghostty PTYs + their shells have time to come up;
+        // `CMUX_DISABLE_AGENT_RESTART=1` suppresses the whole pass. Layout/
+        // metadata/status restore above is independent — failures here
+        // cannot break a normal restore.
+        //
+        // Kill switch (`CMUX_DISABLE_CONVERSATION_STORE=1`): falls back to
+        // the legacy AgentRestartRegistry path for snapshots already
+        // containing `claude.session_id` reserved metadata (i.e., 0.43.0
+        // / 0.44.0-pre captures). New 0.44.0+ sessions captured under
+        // the kill switch do NOT capture (claude-hook session-start no
+        // longer writes that key), so they will not resume on restart.
+        // The kill switch is a one-release safety net for already-captured
+        // state, not a full rollback. Removed in 0.46.0 / v1.1 alongside
+        // the legacy claude.session_id metadata bridge.
+        if ConversationStorePolicy.isDisabled {
+            let restoredPanelIds = Dictionary(
+                uniqueKeysWithValues: snapshot.panels.map { ($0.id, $0.id) }
+            )
+            scheduleAgentRestartLegacy(
+                from: snapshot,
+                registry: .phase1,
+                oldToNewPanelIds: restoredPanelIds
+            )
+        } else {
+            scheduleAgentRestart(
+                from: snapshot,
+                registry: ConversationStrategyRegistry.v1
+            )
+        }
     }
 
     /// C11-24: collect resume commands for terminal panels that have a
@@ -413,6 +465,100 @@ extension Workspace {
         return result
     }
 
+    /// Legacy fallback path used only when CMUX_DISABLE_CONVERSATION_STORE=1.
+    /// Reads reserved Claude/Codex session metadata directly from the panel
+    /// snapshot via AgentRestartRegistry. Removed in 0.46.0/v1.1.
+    private func scheduleAgentRestartLegacy(
+        from snapshot: SessionWorkspaceSnapshot,
+        registry: AgentRestartRegistry,
+        oldToNewPanelIds: [UUID: UUID]
+    ) {
+        let commands = Self.pendingRestartCommands(from: snapshot, registry: registry)
+        guard !commands.isEmpty else { return }
+        // C11-156: stagger resumes (see scheduleAgentRestart) so the legacy
+        // path doesn't herd either.
+        let base = SessionPersistencePolicy.agentRestartDelay
+        let stagger = SessionPersistencePolicy.agentRestartStagger
+        for (index, (panelId, command)) in commands.enumerated() {
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + base + Double(index) * stagger
+            ) { [weak self] in
+                let livePanelId = oldToNewPanelIds[panelId] ?? panelId
+                guard let self,
+                      let terminalPanel = self.panels[livePanelId] as? TerminalPanel else {
+                    return
+                }
+                TextBoxSubmit.send(command, via: terminalPanel.surface)
+            }
+        }
+    }
+
+    /// C11-24: synchronous bulk read of the `ConversationStore` for use
+    /// from `@MainActor` contexts (snapshot capture, restore, dirty-boot
+    /// transitions). Uses `Task.detached` so the spawned task does NOT
+    /// inherit `@MainActor` isolation from the caller — otherwise the
+    /// task body could not run while the calling thread blocks on the
+    /// semaphore wait, deadlocking until the timeout. The previous
+    /// pattern (`Task { await actor.method(); sema.signal() }`) was
+    /// buggy in every `@MainActor` call site; per-panel snapshot capture
+    /// hit it once per panel per save and produced empty conversation
+    /// state in every persisted snapshot. Verified by reproducer at
+    /// `notes/c11-24-snapshot-capture-bug.md`.
+    ///
+    /// `nonisolated` so it can be called without an actor hop and
+    /// without inheriting the caller's isolation. The actor call inside
+    /// `Task.detached` still hops to `ConversationStore`'s executor in
+    /// the normal way.
+    nonisolated static func readConversationsByPanelIdSync(
+        timeout: TimeInterval = 2.0
+    ) -> [String: SurfaceConversations] {
+        guard !ConversationStorePolicy.isDisabled else { return [:] }
+        let sema = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var captured: [String: SurfaceConversations] = [:]
+        Task.detached(priority: .userInitiated) {
+            captured = await ConversationStore.shared.snapshot()
+            sema.signal()
+        }
+        _ = sema.wait(timeout: .now() + timeout)
+        return captured
+    }
+
+    /// C11-24: collect ResumeActions for terminal panels by consulting the
+    /// `ConversationStore`. Reads via the strategy registry: each panel's
+    /// active ref is handed to its strategy's `resume(ref:)`; the action
+    /// is then executed via `execute(_:on:panelMap:)`.
+    ///
+    /// Internal (not private) so unit tests can exercise it without going
+    /// through the full live workspace restore path.
+    func pendingRestartPlans(
+        from snapshot: SessionWorkspaceSnapshot,
+        registry: ConversationStrategyRegistry
+    ) -> [(panelId: UUID, action: ResumeAction)] {
+        guard SessionPersistencePolicy.agentRestartOnRestoreEnabled else { return [] }
+        var result: [(panelId: UUID, action: ResumeAction)] = []
+        // C11-24: bulk-read the actor via the shared sync helper. The
+        // previous inline `Task { ... }` deadlocked from `@MainActor`
+        // contexts because the unstructured Task inherited that
+        // isolation and could not run while main was blocked on the
+        // semaphore. `readConversationsByPanelIdSync` uses
+        // `Task.detached` to break the inheritance.
+        let storeSnapshot = Workspace.readConversationsByPanelIdSync(timeout: 1.0)
+        for panelSnapshot in snapshot.panels {
+            guard panelSnapshot.type == .terminal else { continue }
+            let key = panelSnapshot.id.uuidString
+            guard let surface = storeSnapshot[key], let ref = surface.active else {
+                continue
+            }
+            guard let strategy = registry.strategy(forKind: ref.kind) else {
+                continue
+            }
+            let action = strategy.resume(ref: ref)
+            if case .skip = action { continue }
+            result.append((panelId: panelSnapshot.id, action: action))
+        }
+        return result
+    }
+
     enum PersistedStringValue {
         case absent
         case string(String)
@@ -451,10 +597,10 @@ extension Workspace {
         return out
     }
 
-    /// Schedule deferred submission of synthesised resume commands for
-    /// terminal panels resolved via `pendingRestartCommands`. The dispatch
-    /// runs on the main actor after `SessionPersistencePolicy.agentRestartDelay`
-    /// so Ghostty surfaces have time to initialise.
+    /// Schedule deferred submission of `ResumeAction`s for terminal panels
+    /// resolved via `pendingRestartPlans`. The dispatch runs on the main
+    /// actor after `SessionPersistencePolicy.agentRestartDelay` so Ghostty
+    /// surfaces have time to initialise.
     ///
     /// Submission goes through `TerminalSurface.sendSubmitFormText`.
     /// Ghostty's text-input path (`sendText` → `ghostty_surface_text`)
@@ -471,28 +617,51 @@ extension Workspace {
     /// still nil at the 2.5s mark (and `sendKey` silently drops) no
     /// longer hides the submission.
     ///
-    /// `oldToNewPanelIds` lets the routine remap snapshot panel ids to
-    /// the freshly minted ids when the stable-panel-id rollback flag is
-    /// set. Under default behaviour (`stablePanelIdsEnabled` true) the
-    /// map is an identity and the lookup is the snapshot id directly.
+    /// Panel ids are stable across restart, so the live panel id equals the
+    /// snapshot panel id resolved in `pendingRestartPlans`.
     private func scheduleAgentRestart(
         from snapshot: SessionWorkspaceSnapshot,
-        registry: AgentRestartRegistry,
-        oldToNewPanelIds: [UUID: UUID]
+        registry: ConversationStrategyRegistry
     ) {
-        let commands = Self.pendingRestartCommands(from: snapshot, registry: registry)
-        guard !commands.isEmpty else { return }
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + SessionPersistencePolicy.agentRestartDelay
-        ) { [weak self] in
-            guard let self else { return }
-            for (snapshotPanelId, command) in commands {
-                let livePanelId = oldToNewPanelIds[snapshotPanelId] ?? snapshotPanelId
-                guard let terminalPanel = self.panels[livePanelId] as? TerminalPanel else {
-                    continue
-                }
-                terminalPanel.surface.sendSubmitFormText(command)
+        let plans = pendingRestartPlans(from: snapshot, registry: registry)
+        guard !plans.isEmpty else { return }
+        // C11-156: stagger the resumes so N agents don't all boot in the same
+        // main-queue turn and fire their SessionStart hooks at once (the
+        // mass-resume thundering herd that beachballs the app). Each agent
+        // resumes one `agentRestartStagger` after the previous.
+        let base = SessionPersistencePolicy.agentRestartDelay
+        let stagger = SessionPersistencePolicy.agentRestartStagger
+        for (index, (panelId, action)) in plans.enumerated() {
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + base + Double(index) * stagger
+            ) { [weak self] in
+                self?.executeResumeAction(action, on: panelId)
             }
+        }
+    }
+
+    /// Execute a `ResumeAction` against a live terminal panel. Logs `.skip`
+    /// reasons for diagnostic visibility. Main-actor; only called from
+    /// `scheduleAgentRestart`'s deferred dispatch.
+    private func executeResumeAction(_ action: ResumeAction, on panelId: UUID) {
+        switch action {
+        case .typeCommand(let text, let submit):
+            guard let terminalPanel = self.panels[panelId] as? TerminalPanel else { return }
+            if submit {
+                // Use the deferred-Return submission path (see
+                // scheduleAgentRestart's doc comment): sendSubmitFormText
+                // queues the Return until the pending-text flush on surface
+                // attach, so the 2.5s boot-time race where view.window is
+                // still nil no longer silently drops the submission.
+                terminalPanel.surface.sendSubmitFormText(text)
+            } else {
+                terminalPanel.surface.sendText(text)
+            }
+        case .skip(let reason):
+            #if DEBUG
+            dlog("conversation.resume.skipped panel=\(panelId.uuidString.prefix(8)) reason=\(reason)")
+            #endif
+            _ = reason // silence release-build unused warning
         }
     }
 
@@ -537,13 +706,12 @@ extension Workspace {
 
     /// CMUX-11 Phase 3: pull `PaneMetadataStore` values + sources for a pane,
     /// run them through the persistence bridge, and apply the 64 KiB cap.
-    /// Returns `(nil, nil)` when the store is empty, the rollback flag is
-    /// set, or the pane UUID could not be parsed — keeping snapshots minimal.
+    /// Returns `(nil, nil)` when the store is empty or the pane UUID could
+    /// not be parsed — keeping snapshots minimal.
     private func persistedPaneMetadata(
         forPaneUUID paneUUID: UUID?
     ) -> ([String: PersistedJSONValue]?, [String: PersistedMetadataSource]?) {
         guard let paneUUID else { return (nil, nil) }
-        if PersistedMetadataBridge.isPersistDisabled { return (nil, nil) }
         let snapshot = PaneMetadataStore.shared.getMetadata(workspaceId: id, paneId: paneUUID)
         if snapshot.metadata.isEmpty && snapshot.sources.isEmpty {
             return (nil, nil)
@@ -601,7 +769,11 @@ extension Workspace {
         return decoded.id
     }
 
-    private func sessionPanelSnapshot(panelId: UUID, includeScrollback: Bool) -> SessionPanelSnapshot? {
+    private func sessionPanelSnapshot(
+        panelId: UUID,
+        includeScrollback: Bool,
+        conversationsByPanelId: [String: SurfaceConversations]
+    ) -> SessionPanelSnapshot? {
         guard let panel = panels[panelId] else { return nil }
 
         let panelTitle = panelTitle(panelId: panelId)
@@ -662,16 +834,14 @@ extension Workspace {
             markdownSnapshot = SessionMarkdownPanelSnapshot(
                 filePath: markdownPanel.filePath,
                 editMode: markdownPanel.editMode,
-                markdownFontSize: Double(markdownPanel.markdownFontSize)
+                markdownFontSize: Double(markdownPanel.markdownFontSize),
+                fontScale: markdownPanel.fontScale
             )
         }
 
         let persistedMetadata: [String: PersistedJSONValue]?
         let persistedMetadataSources: [String: PersistedMetadataSource]?
-        if PersistedMetadataBridge.isPersistDisabled {
-            persistedMetadata = nil
-            persistedMetadataSources = nil
-        } else {
+        do {
             let snapshot = SurfaceMetadataStore.shared.getMetadata(
                 workspaceId: id,
                 surfaceId: panelId
@@ -697,6 +867,30 @@ extension Workspace {
             }
         }
 
+        // C11-24: lookup the surface's ConversationRefs from the
+        // pre-built map (bulk-read once at the workspace level — see
+        // `readConversationsByPanelIdSync` in `sessionSnapshot`). The
+        // previous implementation did a per-panel sync-bridge here, which
+        // deadlocked: this method is `@MainActor`-isolated, the spawned
+        // `Task { ... }` inherited that isolation and could not run while
+        // main was blocked on `sema.wait`. Every call timed out and the
+        // resulting snapshot wrote `.empty` for every panel, regardless of
+        // what the live store actually held. Empty `SurfaceConversations`
+        // (`active: nil, history: []`) is still written for terminal
+        // surfaces with no captured conversation — the empty shape is part
+        // of the v1 JSON contract.
+        var surfaceConversations: SurfaceConversations? = nil
+        if !ConversationStorePolicy.isDisabled, panel.panelType == .terminal {
+            surfaceConversations = conversationsByPanelId[panelId.uuidString] ?? .empty
+        }
+        // C11-164 (RES-2): persist the surface's live activity floor so the
+        // Codex/pi/omp scrape disambiguation survives a crash. Only terminal
+        // surfaces carry a meaningful floor; `lastActivity(for:)` is a bounded
+        // synchronous queue read (no main-thread hot-path work).
+        var lastActivityAt: Date? = nil
+        if !ConversationStorePolicy.isDisabled, panel.panelType == .terminal {
+            lastActivityAt = SurfaceActivityTracker.shared.lastActivity(for: panelId.uuidString)
+        }
         return SessionPanelSnapshot(
             id: panelId,
             type: panel.panelType,
@@ -713,7 +907,9 @@ extension Workspace {
             browser: browserSnapshot,
             markdown: markdownSnapshot,
             metadata: persistedMetadata,
-            metadataSources: persistedMetadataSources
+            metadataSources: persistedMetadataSources,
+            surfaceConversations: surfaceConversations,
+            lastActivityAt: lastActivityAt
         )
     }
 
@@ -803,38 +999,31 @@ extension Workspace {
     private func restorePane(
         _ paneId: PaneID,
         snapshot: SessionPaneLayoutSnapshot,
-        panelSnapshotsById: [UUID: SessionPanelSnapshot],
-        oldToNewPanelIds: inout [UUID: UUID]
+        panelSnapshotsById: [UUID: SessionPanelSnapshot]
     ) {
         let existingPanelIds = bonsplitController
             .tabs(inPane: paneId)
             .compactMap { panelIdFromSurfaceId($0.id) }
-        let desiredOldPanelIds = snapshot.panelIds.filter { panelSnapshotsById[$0] != nil }
+        let desiredPanelIds = snapshot.panelIds.filter { panelSnapshotsById[$0] != nil }
 
         var createdPanelIds: [UUID] = []
-        for oldPanelId in desiredOldPanelIds {
-            guard let panelSnapshot = panelSnapshotsById[oldPanelId] else { continue }
+        for desiredPanelId in desiredPanelIds {
+            guard let panelSnapshot = panelSnapshotsById[desiredPanelId] else { continue }
             guard let createdPanelId = createPanel(from: panelSnapshot, inPane: paneId) else { continue }
             createdPanelIds.append(createdPanelId)
-            oldToNewPanelIds[oldPanelId] = createdPanelId
         }
 
         guard !createdPanelIds.isEmpty else { return }
 
-        for oldPanelId in existingPanelIds where !createdPanelIds.contains(oldPanelId) {
-            _ = closePanel(oldPanelId, force: true)
+        for existingPanelId in existingPanelIds where !createdPanelIds.contains(existingPanelId) {
+            _ = closePanel(existingPanelId, force: true)
         }
 
         for (index, panelId) in createdPanelIds.enumerated() {
             _ = reorderSurface(panelId: panelId, toIndex: index)
         }
 
-        let selectedPanelId: UUID? = {
-            if let selectedOldId = snapshot.selectedPanelId {
-                return oldToNewPanelIds[selectedOldId]
-            }
-            return createdPanelIds.first
-        }()
+        let selectedPanelId: UUID? = snapshot.selectedPanelId ?? createdPanelIds.first
 
         if let selectedPanelId,
            let selectedTabId = surfaceIdFromPanelId(selectedPanelId) {
@@ -844,13 +1033,11 @@ extension Workspace {
     }
 
     private func createPanel(from snapshot: SessionPanelSnapshot, inPane paneId: PaneID) -> UUID? {
-        // Phase 1 of the Tier 1 persistence plan: restore-time ID injection.
-        // When stable panel IDs are enabled, pass the snapshot's id through to
-        // the panel constructor so external consumers (surface.list callers,
-        // cached-id scripts) see the same UUID across restarts.
-        let restoredPanelId: UUID? = SessionPersistencePolicy.stablePanelIdsEnabled
-            ? snapshot.id
-            : nil
+        // Tier 1 persistence: restore-time ID injection. Pass the snapshot's
+        // id through to the panel constructor so external consumers
+        // (surface.list callers, cached-id scripts) see the same UUID across
+        // restarts.
+        let restoredPanelId: UUID? = snapshot.id
 
         switch snapshot.type {
         case .terminal:
@@ -908,6 +1095,9 @@ extension Workspace {
             if let persistedFontSize = snapshot.markdown?.markdownFontSize,
                persistedFontSize.isFinite {
                 _ = markdownPanel.setMarkdownFontSize(CGFloat(persistedFontSize))
+            } else if let restoredScale = snapshot.markdown?.fontScale,
+                      restoredScale.isFinite {
+                markdownPanel.applyRestoredFontScale(restoredScale)
             }
             applySessionPanelMetadata(snapshot, toPanelId: markdownPanel.id)
             return markdownPanel.id
@@ -4646,11 +4836,13 @@ final class WorkspaceRemoteSessionController {
             .deletingLastPathComponent() // repo root
         candidates.append(compileTimeRoot)
         let environment = ProcessInfo.processInfo.environment
-        if let envRoot = environment["CMUX_REMOTE_DAEMON_SOURCE_ROOT"],
+        if let envRoot = c11Env("C11_REMOTE_DAEMON_SOURCE_ROOT", in: environment),
            !envRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             candidates.append(URL(fileURLWithPath: envRoot, isDirectory: true))
         }
-        if let envRoot = environment["CMUXTERM_REPO_ROOT"],
+        // `CMUXTERM_REPO_ROOT` predates the `CMUX_`/`C11_` twin scheme (note the
+        // `CMUXTERM_` prefix), so its canonical twin is read explicitly here.
+        if let envRoot = environment["C11_REPO_ROOT"] ?? environment["CMUXTERM_REPO_ROOT"],
            !envRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             candidates.append(URL(fileURLWithPath: envRoot, isDirectory: true))
         }
@@ -4769,6 +4961,11 @@ struct SidebarLogEntry {
 struct SidebarProgressState {
     let value: Double
     let label: String?
+    /// TEL-2: wall-clock stamp of when this progress value was written. Defaulted
+    /// to `Date()` so the synthesized memberwise initializer keeps every existing
+    /// `SidebarProgressState(value:label:)` call site compiling while stamping each
+    /// fresh write "now".
+    var timestamp: Date = Date()
 }
 
 struct SidebarGitBranchState {
@@ -5067,6 +5264,13 @@ struct ClosedBrowserPanelRestoreSnapshot {
     let fallbackAnchorPaneId: UUID?
 }
 
+/// C11-134: per-type surface counts carried by `surface.shape` breadcrumbs.
+struct SurfaceShapeCounts: Equatable {
+    var terminals = 0
+    var browsers = 0
+    var markdown = 0
+}
+
 /// Workspace represents a sidebar tab.
 /// Each workspace contains one BonsplitController that manages split panes and nested surfaces.
 @MainActor
@@ -5091,6 +5295,12 @@ final class Workspace: Identifiable, ObservableObject {
     /// NSObject subclass, so KVO has to live on this composed helper. (C11-6)
     private var chromeScaleObserver: ChromeScaleObserver?
 
+    /// Keeps the Bonsplit Browser / Markdown spawn buttons in sync with the
+    /// persisted surface-availability toggles for any writer (Settings UI,
+    /// `defaults write`). Same composed-NSObject KVO pattern as
+    /// `chromeScaleObserver`.
+    private var surfaceAvailabilityObserver: SurfaceAvailabilityObserver?
+
     /// Operator-authored workspace metadata (e.g. "description", "icon").
     /// Workspace-scoped; not to be confused with surface-scoped
     /// `SurfaceMetadataStore`. Persisted across restart via
@@ -5106,6 +5316,15 @@ final class Workspace: Identifiable, ObservableObject {
 
     /// Mapping from bonsplit TabID to our Panel instances
     @Published private(set) var panels: [UUID: any Panel] = [:]
+
+    /// C11-163 events stream: single create/close chokepoint. Subscribing to
+    /// `$panels` and diffing keys catches every surface lifecycle transition
+    /// through one path — split, tab, restore, reattach, rollback, bulk
+    /// teardown, detach — so no emit site can be missed (amendments C, D). A
+    /// `@Published` property can't carry a `didSet` observer, hence the Combine
+    /// subscription. `lastKnownPanelIds` is the diff baseline.
+    private var panelEventsCancellable: AnyCancellable?
+    private var lastKnownPanelIds: Set<UUID> = []
 
     /// Monotonically incrementing token used by the sidebar workspace row to
     /// observe focus flashes targeting any panel in this workspace. Bumped
@@ -5260,6 +5479,12 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var metadataBlocks: [String: SidebarMetadataBlock] = [:]
     @Published var logEntries: [SidebarLogEntry] = []
     @Published var progress: SidebarProgressState?
+    /// TEL-4: per-surface derived-liveness state, the @Published bridge the
+    /// sidebar observes. Written by `setDerivedActivity` (which
+    /// `SurfaceLivenessDeriver` calls from the derived-liveness backend) and
+    /// pruned alongside the other per-surface metadata. Absence of a key means
+    /// "no derived signal yet."
+    @Published var derivedActivityBySurface: [UUID: SidebarActivityState] = [:]
     @Published var gitBranch: SidebarGitBranchState?
     @Published var panelGitBranches: [UUID: SidebarGitBranchState] = [:]
     /// C11-104 — per-panel resolved worktree+branch context for the
@@ -5297,6 +5522,10 @@ final class Workspace: Identifiable, ObservableObject {
         return formatter
     }()
     private var panelShellActivityStates: [UUID: PanelShellActivityState] = [:]
+    /// C11-144: per-surface queue of framed `<c11-msg>` blocks that arrived
+    /// while the recipient shell was busy. Flushed when the surface returns to
+    /// `.promptIdle` (see `flushBufferedMailboxStdin`). Main-actor-confined.
+    private var mailboxStdinBuffer = MailboxStdinBuffer()
     /// PIDs associated with agent status entries (e.g. claude_code), keyed by status key.
     /// Used for stale-session detection: if the PID is dead, the status entry is cleared.
     var agentPIDs: [String: pid_t] = [:]
@@ -5530,6 +5759,22 @@ final class Workspace: Identifiable, ObservableObject {
         bonsplitController.configuration = nextConfiguration
     }
 
+    /// Live-update path for the surface-availability toggles. Pulls the current
+    /// Bonsplit configuration, recomputes the Browser / Markdown spawn-button
+    /// visibility from `SurfaceTypeAvailability`, and reassigns only on a real
+    /// change so redundant toggles don't churn the configuration. Existing
+    /// surfaces are untouched — this only governs the spawn affordances.
+    func applySurfaceAvailability() {
+        let browserOn = SurfaceTypeAvailability.isEnabled(.browser)
+        let markdownOn = SurfaceTypeAvailability.isEnabled(.markdown)
+        var next = bonsplitController.configuration
+        guard next.showsBrowserSpawnButton != browserOn
+            || next.showsMarkdownSpawnButton != markdownOn else { return }
+        next.showsBrowserSpawnButton = browserOn
+        next.showsMarkdownSpawnButton = markdownOn
+        bonsplitController.configuration = next
+    }
+
     func applyGhosttyChrome(from config: GhosttyConfig, reason: String = "unspecified") {
         applyGhosttyChrome(
             backgroundColor: config.backgroundColor,
@@ -5682,6 +5927,11 @@ final class Workspace: Identifiable, ObservableObject {
             // right-edge hit-collision bug and matches native macOS
             // Cocoa tab convention (Finder, Terminal.app, Notes).
             simplifiedTabContextMenu: true,
+            // Hide the Browser / Markdown spawn buttons when the operator has
+            // disabled those surface types. `applySurfaceAvailability()` keeps
+            // these live as the toggles change.
+            showsBrowserSpawnButton: SurfaceTypeAvailability.isEnabled(.browser),
+            showsMarkdownSpawnButton: SurfaceTypeAvailability.isEnabled(.markdown),
             appearance: appearance
         )
         self.bonsplitController = BonsplitController(configuration: config)
@@ -5695,6 +5945,13 @@ final class Workspace: Identifiable, ObservableObject {
         // can safely read/write `bonsplitController.configuration`. (C11-6)
         self.chromeScaleObserver = ChromeScaleObserver { [weak self] in
             self?.applyChromeScale(reason: "userdefaults-change")
+        }
+
+        // Mirror the chrome-scale observer: react to surface-availability
+        // toggles so the Browser / Markdown spawn buttons appear/disappear
+        // live, without an app restart.
+        self.surfaceAvailabilityObserver = SurfaceAvailabilityObserver { [weak self] in
+            self?.applySurfaceAvailability()
         }
 
         // Remove the default "Welcome" tab that bonsplit creates
@@ -5738,6 +5995,10 @@ final class Workspace: Identifiable, ObservableObject {
         bonsplitController.onTabCloseRequest = { [weak self] tabId, _ in
             self?.markExplicitClose(surfaceId: tabId)
         }
+        bonsplitController.surfaceRefProvider = { [weak self] tabId in
+            guard let self, let panelId = self.panelIdFromSurfaceId(tabId) else { return nil }
+            return TerminalController.shared.surfaceRefOnly(forSurfaceUUID: panelId)
+        }
 
         // Set ourselves as delegate
         bonsplitController.delegate = self
@@ -5760,6 +6021,45 @@ final class Workspace: Identifiable, ObservableObject {
             }
             bonsplitController.selectTab(initialTabId)
         }
+
+        // C11-134: breadcrumb this workspace's surface shape (per-type panel
+        // counts) whenever it changes, so Sentry hang reports can answer "how
+        // many browser surfaces were open?". Counts only — never titles or
+        // URLs. removeDuplicates keeps it to genuine state changes; debounce
+        // coalesces bulk transitions like session restore.
+        surfaceShapeBreadcrumbCancellable = $panels
+            .map { panels -> SurfaceShapeCounts in
+                var counts = SurfaceShapeCounts()
+                for panel in panels.values {
+                    switch panel.panelType {
+                    case .terminal: counts.terminals += 1
+                    case .browser: counts.browsers += 1
+                    case .markdown: counts.markdown += 1
+                    }
+                }
+                return counts
+            }
+            .removeDuplicates()
+            .debounce(for: .milliseconds(500), scheduler: DispatchQueue.main)
+            .sink { [weak self] counts in
+                guard let self else { return }
+                sentryBreadcrumb("surface.shape", category: "shape", data: [
+                    "workspace": String(self.id.uuidString.prefix(8)),
+                    "terminals": counts.terminals,
+                    "browsers": counts.browsers,
+                    "markdown": counts.markdown,
+                ])
+            }
+
+        // C11-163: emit surface.created / surface.closed by diffing $panels.
+        // Subscribing fires once synchronously with the current set (the seed
+        // terminal), then on every subsequent mutation — a single chokepoint
+        // that no create/close/reattach/teardown path can bypass. No debounce:
+        // events must be observable within 1s (EVT-6).
+        panelEventsCancellable = $panels
+            .sink { [weak self] newPanels in
+                self?.reconcilePanelEvents(newPanels)
+            }
     }
 
     deinit {
@@ -5779,6 +6079,29 @@ final class Workspace: Identifiable, ObservableObject {
             }
             persistentFlashPanels.removeAll()
         }
+    }
+
+    /// C11-163: diff the panel set against the last-known ids and publish
+    /// surface lifecycle events. Runs synchronously inside `$panels` delivery
+    /// (main actor); `EventEmitter.emit` is fire-and-forget so this never
+    /// blocks. A rolled-back create surfaces as a balanced created→closed pair;
+    /// a cross-pane detach→reattach as closed→created (amendment D move policy).
+    private func reconcilePanelEvents(_ newPanels: [UUID: any Panel]) {
+        let newIds = Set(newPanels.keys)
+        guard newIds != lastKnownPanelIds else { return }
+        for createdId in newIds.subtracting(lastKnownPanelIds) {
+            guard let panel = newPanels[createdId] else { continue }
+            EventEmitter.shared.emitSurfaceCreated(
+                workspace: id,
+                surface: createdId,
+                kind: panel.panelType.rawValue,
+                title: panel.displayTitle
+            )
+        }
+        for closedId in lastKnownPanelIds.subtracting(newIds) {
+            EventEmitter.shared.emitSurfaceClosed(workspace: id, surface: closedId)
+        }
+        lastKnownPanelIds = newIds
     }
 
     /// Creates a per-workspace mailbox dispatcher bound to this workspace's
@@ -5828,16 +6151,14 @@ final class Workspace: Identifiable, ObservableObject {
         dispatcher.registerHandler(name: "silent") { _, _, _ in
             .init(outcome: .ok)
         }
-        let stdinHandler = StdinMailboxHandler { [weak self] surfaceId, text in
+        let stdinHandler = StdinMailboxHandler { [weak self] surfaceId, envelopeId, recipientName, text in
             guard let self else { return .surfaceNotFound }
-            guard let panel = self.panels[surfaceId] else {
-                return .surfaceNotFound
-            }
-            guard let terminalPanel = panel as? TerminalPanel else {
-                return .surfaceNotTerminal
-            }
-            TextBoxSubmit.send(text, via: terminalPanel.surface)
-            return .ok(bytes: text.utf8.count)
+            return self.deliverOrBufferMailboxStdin(
+                surfaceId: surfaceId,
+                envelopeId: envelopeId,
+                recipientName: recipientName,
+                block: text
+            )
         }
         dispatcher.registerHandler(
             name: "stdin",
@@ -5845,6 +6166,82 @@ final class Workspace: Identifiable, ObservableObject {
         )
         dispatcher.start()
         mailboxDispatcher = dispatcher
+    }
+
+    /// C11-144 delivery safety: decide whether to inject a framed `<c11-msg>`
+    /// block into the recipient PTY now or buffer it. Runs on the main actor
+    /// (the handler's writer hop). Pasting into a PTY that has a foreground
+    /// command running (a build, `vim`, a REPL) corrupts that program's stdin,
+    /// so we gate on the recipient's already-tracked `PanelShellActivityState`:
+    /// `.promptIdle` injects immediately; `.commandRunning`/`.unknown` buffer
+    /// the block to flush at the next prompt. The dispatcher has already copied
+    /// the envelope into the recipient's filesystem inbox, so a buffered (or
+    /// even dropped) block is still reachable via `c11 mailbox recv --drain`.
+    func deliverOrBufferMailboxStdin(
+        surfaceId: UUID,
+        envelopeId: String,
+        recipientName: String,
+        block: String
+    ) -> StdinMailboxHandler.WriteOutcome {
+        guard let panel = panels[surfaceId] else { return .surfaceNotFound }
+        guard let terminalPanel = panel as? TerminalPanel else { return .surfaceNotTerminal }
+
+        let state = panelShellActivityStates[surfaceId] ?? .unknown
+        switch MailboxStdinBuffer.decide(state: state) {
+        case .injectNow:
+            TextBoxSubmit.send(block, via: terminalPanel.surface)
+            return .ok(bytes: block.utf8.count)
+        case .buffer:
+            let entry = MailboxStdinBuffer.Entry(
+                id: envelopeId,
+                recipientName: recipientName,
+                block: block,
+                bufferedAt: Date()
+            )
+            if let evicted = mailboxStdinBuffer.enqueue(surfaceId: surfaceId, entry: entry) {
+                mailboxDispatcher?.logStdinLifecycle(
+                    id: evicted.id,
+                    recipient: evicted.recipientName,
+                    outcome: .evicted
+                )
+            }
+            return .buffered(bytes: block.utf8.count)
+        }
+    }
+
+    /// C11-144: flush any buffered `<c11-msg>` blocks for a surface that just
+    /// returned to `.promptIdle`. Fresh entries are injected in FIFO order;
+    /// stale ones (older than the buffer's freshness window) are dropped — they
+    /// were already delivered via the inbox/pull floor, and pasting them onto a
+    /// now-bare shell after a long-lived foreground process exited would only
+    /// produce junk. Each step is logged to the dispatch log so the message's
+    /// full lifecycle stays visible in `c11 mailbox trace`.
+    private func flushBufferedMailboxStdin(surfaceId: UUID) {
+        let flush = mailboxStdinBuffer.drainForFlush(surfaceId: surfaceId, now: Date())
+        guard !flush.fresh.isEmpty || !flush.expired.isEmpty else { return }
+
+        for entry in flush.expired {
+            mailboxDispatcher?.logStdinLifecycle(
+                id: entry.id,
+                recipient: entry.recipientName,
+                outcome: .expired
+            )
+        }
+
+        guard !flush.fresh.isEmpty else { return }
+        // The surface could have changed type/closed between buffering and the
+        // transition; if it's no longer a terminal, the entries are already
+        // drained and the inbox floor still holds them.
+        guard let terminalPanel = panels[surfaceId] as? TerminalPanel else { return }
+        for entry in flush.fresh {
+            TextBoxSubmit.send(entry.block, via: terminalPanel.surface)
+            mailboxDispatcher?.logStdinLifecycle(
+                id: entry.id,
+                recipient: entry.recipientName,
+                outcome: .flushed,
+                bytes: entry.block.utf8.count
+            )
+        }
     }
 
     func refreshSplitButtonTooltips() {
@@ -5900,6 +6297,7 @@ final class Workspace: Identifiable, ObservableObject {
 #endif
     private var layoutFollowUpObservers: [NSObjectProtocol] = []
     private var layoutFollowUpPanelsCancellable: AnyCancellable?
+    private var surfaceShapeBreadcrumbCancellable: AnyCancellable?
     private var layoutFollowUpTimeoutWorkItem: DispatchWorkItem?
     private var layoutFollowUpReason: String?
     private var layoutFollowUpTerminalFocusPanelId: UUID?
@@ -6641,6 +7039,52 @@ final class Workspace: Identifiable, ObservableObject {
             "panel=\(panelId.uuidString.prefix(5)) from=\(previousState.rawValue) to=\(state.rawValue)"
         )
 #endif
+        // C11-144: a recipient returning to its prompt is the safe moment to
+        // inject any blocks that were buffered while it was busy.
+        if state == .promptIdle {
+            flushBufferedMailboxStdin(surfaceId: panelId)
+        }
+        // TEL-3: feed the shell-activity transition into the derived-liveness
+        // backend, which resolves it (with its own debounce/heuristics) back
+        // into `derivedActivityBySurface` via `setDerivedActivity`.
+        SurfaceLivenessDeriver.onShellActivityChanged(
+            surfaceId: panelId,
+            workspaceId: id,
+            state: state,
+            workspace: self
+        )
+    }
+
+    // MARK: - TEL-4 Derived Activity
+
+    /// TEL-4: main-actor setter for a surface's derived-liveness state. Passing
+    /// `nil` removes the key (surface has no derived signal); any other value
+    /// overwrites it. The enclosing type is `@MainActor`, so this publishes on
+    /// the main actor. Cheap and I/O-free.
+    func setDerivedActivity(_ state: SidebarActivityState?, forSurface surfaceId: UUID) {
+        if let state {
+            if derivedActivityBySurface[surfaceId] != state {
+                derivedActivityBySurface[surfaceId] = state
+            }
+        } else if derivedActivityBySurface[surfaceId] != nil {
+            derivedActivityBySurface.removeValue(forKey: surfaceId)
+        }
+    }
+
+    /// TEL-4: workspace-level rollup of per-surface derived activity. `.working`
+    /// if ANY surface is working, else `.idle` if any surface is idle, else
+    /// `nil` when there are no derived signals at all.
+    var aggregatedDerivedActivity: SidebarActivityState? {
+        var sawIdle = false
+        for state in derivedActivityBySurface.values {
+            switch state {
+            case .working:
+                return .working
+            case .idle:
+                sawIdle = true
+            }
+        }
+        return sawIdle ? .idle : nil
     }
 
     func panelNeedsConfirmClose(panelId: UUID, fallbackNeedsConfirmClose: Bool) -> Bool {
@@ -7101,20 +7545,14 @@ final class Workspace: Identifiable, ObservableObject {
     /// the precedence chain (the snapshot IS the prior session's source of
     /// truth). Runs before `pruneSurfaceMetadata` so anything not in the
     /// current panel set gets cleaned up on the same tick.
-    ///
-    /// Respects `CMUX_DISABLE_METADATA_PERSIST=1` as a rollback safety net —
-    /// when set, the snapshot's metadata is ignored and surfaces start with
-    /// an empty store.
     private func restoreSurfaceMetadataFromSnapshot(
-        panels snapshotPanels: [SessionPanelSnapshot],
-        oldToNewPanelIds: [UUID: UUID]
+        panels snapshotPanels: [SessionPanelSnapshot]
     ) {
-        if PersistedMetadataBridge.isPersistDisabled { return }
         for panelSnapshot in snapshotPanels {
             guard let persistedValues = panelSnapshot.metadata else { continue }
             let persistedSources = panelSnapshot.metadataSources ?? [:]
-            let newPanelId = oldToNewPanelIds[panelSnapshot.id] ?? panelSnapshot.id
-            guard panels[newPanelId] != nil else { continue }
+            let panelId = panelSnapshot.id
+            guard panels[panelId] != nil else { continue }
             var values = PersistedMetadataBridge.decodeValues(persistedValues)
             var sources = PersistedMetadataBridge.decodeSources(persistedSources)
             // CMUX-10: persistent-flash timers are process-local and never
@@ -7125,7 +7563,7 @@ final class Workspace: Identifiable, ObservableObject {
             sources.removeValue(forKey: FlashState.metadataKey)
             SurfaceMetadataStore.shared.restoreFromSnapshot(
                 workspaceId: id,
-                surfaceId: newPanelId,
+                surfaceId: panelId,
                 values: values,
                 sources: sources
             )
@@ -7138,13 +7576,9 @@ final class Workspace: Identifiable, ObservableObject {
     /// new pane UUID, preserving the original `(source, ts)` records so the
     /// precedence chain survives the restart. Silent — same contract as the
     /// surface restore path.
-    ///
-    /// Skipped when `CMUX_DISABLE_METADATA_PERSIST=1` is set in the app's
-    /// launch environment.
     private func restorePaneMetadataFromSnapshot(
         leafEntries: [SessionPaneRestoreEntry]
     ) {
-        if PersistedMetadataBridge.isPersistDisabled { return }
         for entry in leafEntries {
             guard let persistedValues = entry.snapshot.metadata,
                   !persistedValues.isEmpty else { continue }
@@ -7198,6 +7632,10 @@ final class Workspace: Identifiable, ObservableObject {
         surfaceListeningPorts = surfaceListeningPorts.filter { validSurfaceIds.contains($0.key) }
         surfaceTTYNames = surfaceTTYNames.filter { validSurfaceIds.contains($0.key) }
         panelShellActivityStates = panelShellActivityStates.filter { validSurfaceIds.contains($0.key) }
+        // TEL-4: drop derived-activity for surfaces that no longer exist so the
+        // @Published map doesn't leak stale liveness for pruned surfaces.
+        derivedActivityBySurface = derivedActivityBySurface.filter { validSurfaceIds.contains($0.key) }
+        mailboxStdinBuffer.retainOnly(surfaceIds: validSurfaceIds)
         panelPullRequests = panelPullRequests.filter { validSurfaceIds.contains($0.key) }
         SurfaceMetadataStore.shared.pruneWorkspace(workspaceId: id, validSurfaceIds: validSurfaceIds)
         titleBarCollapsed = titleBarCollapsed.filter { validSurfaceIds.contains($0.key) }
@@ -7800,6 +8238,113 @@ final class Workspace: Identifiable, ObservableObject {
         }
 
         return nil
+    }
+
+    // MARK: - Size-aware split policy
+
+    /// The result of evaluating a split request against the active size policy.
+    struct SplitSizeEvaluation {
+        let decision: PaneSizePolicy.Decision
+        /// The pane that would be split — the fallback target when the decision is `addTab`.
+        let targetPaneId: PaneID
+        let sourceKind: String?
+        let kindLabel: String
+    }
+
+    /// Read a surface's declared `terminal_type` (canonical metadata key), if any.
+    func surfaceTerminalKind(panelId: UUID) -> String? {
+        let md = SurfaceMetadataStore.shared.getMetadata(workspaceId: id, surfaceId: panelId).metadata
+        return md[MetadataKey.terminalType] as? String
+    }
+
+    /// Optional per-surface minimum override (`min_cols` / `min_rows` metadata) —
+    /// lets a status strip or log tail declare itself usable smaller than its kind default.
+    private func surfaceMinCellsOverride(panelId: UUID) -> (cols: Int?, rows: Int?) {
+        let md = SurfaceMetadataStore.shared.getMetadata(workspaceId: id, surfaceId: panelId).metadata
+        func intVal(_ key: String) -> Int? {
+            if let i = md[key] as? Int { return i }
+            if let n = md[key] as? NSNumber { return n.intValue }
+            if let s = md[key] as? String { return Int(s) }
+            return nil
+        }
+        return (intVal("min_cols"), intVal("min_rows"))
+    }
+
+    /// The source pane's current font cell size **in points**, falling back to a
+    /// default when the surface has not reported metrics yet or is not a terminal.
+    ///
+    /// Ghostty reports the cell size in backing pixels, while pane frames from
+    /// `layoutSnapshot()` are in AppKit points, so divide by the backing scale
+    /// factor to keep the two in the same unit before deriving columns × rows.
+    private func sourceCellSize(panelId: UUID) -> CGSize {
+        guard let host = terminalPanel(for: panelId)?.hostedView else {
+            return PaneSizePolicy.fallbackCellSize
+        }
+        let cs = host.cellSize
+        guard cs.width > 0, cs.height > 0 else { return PaneSizePolicy.fallbackCellSize }
+        let scale = host.window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? 2.0
+        let s = scale > 0 ? scale : 2.0
+        return CGSize(width: cs.width / s, height: cs.height / s)
+    }
+
+    /// Evaluate a split request against the active size policy. Returns nil when the
+    /// pane's geometry is not yet known (no layout) — callers should then proceed
+    /// without size enforcement rather than block.
+    func evaluateSplitSize(
+        sourcePanelId: UUID,
+        requested: SplitAxis,
+        newIsTerminal: Bool,
+        force: Bool
+    ) -> SplitSizeEvaluation? {
+        guard let paneId = paneIdForPanel(sourcePanelId) else { return nil }
+        let snapshot = bonsplitController.layoutSnapshot()
+        guard let geom = snapshot.panes.first(where: { $0.paneId == paneId.id.uuidString }) else {
+            return nil
+        }
+        let frame = CGSize(width: geom.frame.width, height: geom.frame.height)
+        guard frame.width > 0, frame.height > 0 else { return nil }
+
+        let kind = surfaceTerminalKind(panelId: sourcePanelId)
+        let cell = sourceCellSize(panelId: sourcePanelId)
+
+        // Existing child keeps the source kind (with optional metadata override).
+        let baseMin = PaneSizePolicy.minCells(forKind: kind)
+        let (ovCols, ovRows) = surfaceMinCellsOverride(panelId: sourcePanelId)
+        let minCells = PaneCellSize(cols: ovCols ?? baseMin.cols, rows: ovRows ?? baseMin.rows)
+        let minExistingPts = PaneSizePolicy.points(minCells, cellSize: cell)
+
+        // New child: a terminal split inherits the source kind (the orchestrator
+        // fan-out case — every spawned agent pane must stay usable); a browser /
+        // markdown pane uses the point floor.
+        let minNewPts: CGSize
+        if newIsTerminal {
+            minNewPts = minExistingPts
+        } else {
+            minNewPts = CGSize(
+                width: max(minExistingPts.width, PaneSizePolicy.nonTerminalMinPoints.width),
+                height: max(minExistingPts.height, PaneSizePolicy.nonTerminalMinPoints.height)
+            )
+        }
+        let minPts = CGSize(
+            width: max(minExistingPts.width, minNewPts.width),
+            height: max(minExistingPts.height, minNewPts.height)
+        )
+
+        let decision = PaneSizePolicy.decide(
+            paneFrame: frame,
+            requested: requested,
+            minPoints: minPts,
+            mode: PaneSizeSettings.effectiveMode(),
+            force: force
+        )
+        return SplitSizeEvaluation(
+            decision: decision,
+            targetPaneId: paneId,
+            sourceKind: kind,
+            kindLabel: PaneSizePolicy.kindLabel(forKind: kind)
+        )
     }
 
     /// Create a new split with a terminal panel.
@@ -11091,6 +11636,7 @@ extension Workspace: BonsplitDelegate {
         manualUnreadMarkedAt.removeValue(forKey: panelId)
         panelSubscriptions.removeValue(forKey: panelId)
         panelShellActivityStates.removeValue(forKey: panelId)
+        mailboxStdinBuffer.removeSurface(panelId)
         surfaceTTYNames.removeValue(forKey: panelId)
         restoredTerminalScrollbackByPanelId.removeValue(forKey: panelId)
         titleBarCollapsed.removeValue(forKey: panelId)
@@ -11272,6 +11818,7 @@ extension Workspace: BonsplitDelegate {
                 manualUnreadPanelIds.remove(panelId)
                 panelSubscriptions.removeValue(forKey: panelId)
                 panelShellActivityStates.removeValue(forKey: panelId)
+                mailboxStdinBuffer.removeSurface(panelId)
                 surfaceTTYNames.removeValue(forKey: panelId)
                 surfaceListeningPorts.removeValue(forKey: panelId)
                 restoredTerminalScrollbackByPanelId.removeValue(forKey: panelId)
@@ -11513,8 +12060,13 @@ extension Workspace: BonsplitDelegate {
         case "terminal":
             _ = newTerminalSurface(inPane: pane)
         case "browser":
+            // Defense in depth: the spawn button is already hidden when the
+            // internal browser is disabled, but no-op safely if the request
+            // reaches us anyway.
+            guard SurfaceTypeAvailability.isEnabled(.browser) else { return }
             _ = newBrowserSurface(inPane: pane)
         case "markdown":
+            guard SurfaceTypeAvailability.isEnabled(.markdown) else { return }
             _ = newMarkdownSurface(inPane: pane)
         case "agent":
             launchAgentSurface(inPane: pane)
@@ -11545,12 +12097,55 @@ extension Workspace: BonsplitDelegate {
             inPane: pane,
             startupEnvironment: resolved.launch.envOverrides
         ) else { return }
-        // The launch command goes to bash; for claude-code the initial prompt
-        // is already baked in as a positional arg by the resolver. Other
-        // agents preserve the prompt in their config but don't auto-deliver
-        // (different TUI input contracts; per-agent post-ready delivery is
-        // a follow-up).
+        // By default no orientation prompt is baked (see `c11OrientPrompt`),
+        // so the agent boots straight to ready with no dead-time. c11 stamps
+        // the identity the sidebar needs itself — no agent round-trip: the
+        // type comes from `AgentDetector`, and we stamp the pinned model plus
+        // a placeholder title here. An operator who configured a launch prompt
+        // still gets it delivered below (baked positional for claude-code,
+        // post-ready sendText for other TUIs is a follow-up).
+        stampLaunchIdentity(
+            surfaceId: panel.id,
+            agent: resolved.agent,
+            userDefault: userDefault,
+            projectConfig: projectConfig
+        )
         panel.sendText(resolved.launch.command + "\n")
+    }
+
+    /// Populate a freshly launched agent surface with the identity the sidebar
+    /// would otherwise wait on the agent to report: the pinned model (which
+    /// process detection can't infer) and a placeholder title. Written with
+    /// source `.declare` so a later explicit `set-agent` / `set-title` from the
+    /// agent or operator cleanly wins. The agent *type* is intentionally not
+    /// stamped here — `AgentDetector` owns it authoritatively.
+    private func stampLaunchIdentity(
+        surfaceId: UUID,
+        agent: AgentType,
+        userDefault: DefaultAgentConfig,
+        projectConfig: DefaultAgentConfig?
+    ) {
+        var partial: [String: Any] = [
+            MetadataKey.title: String(
+                localized: "agent.launch.placeholderTitle",
+                defaultValue: "Awaiting first task"
+            )
+        ]
+        // Mirror the resolver's per-agent config pick so the chip shows the
+        // model c11 launched with. Reads config only; no mutation.
+        let cfg = projectConfig?.agents[agent] ?? userDefault.config(for: agent)
+        let model = cfg.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !model.isEmpty {
+            partial[MetadataKey.model] = model
+        }
+        _ = try? SurfaceMetadataStore.shared.setMetadata(
+            workspaceId: id,
+            surfaceId: surfaceId,
+            partial: partial,
+            mode: .merge,
+            source: .declare
+        )
+        syncPanelTitleFromMetadata(panelId: surfaceId)
     }
 
     func splitTabBar(_ controller: BonsplitController, menuItemsForNewTabKind kind: String, inPane pane: PaneID) -> [BonsplitNewTabMenuItem] {
@@ -11729,11 +12324,13 @@ extension Workspace: BonsplitDelegate {
         let selectedPanelId = effectiveSelectedPanelId(inPane: pane)
         let panel = selectedPanelId.flatMap { panels[$0] }
         switch panel?.panelType {
-        case .browser:
+        case .browser where SurfaceTypeAvailability.isEnabled(.browser):
             _ = newBrowserSurface(inPane: pane)
-        case .markdown:
+        case .markdown where SurfaceTypeAvailability.isEnabled(.markdown):
             _ = newMarkdownSurface(inPane: pane)
-        case .terminal, .none:
+        case .terminal, .browser, .markdown, .none:
+            // Terminal kinds, and any disabled non-terminal kind whose surface
+            // is still open, fall back to a terminal so "+" stays useful.
             _ = newTerminalSurface(inPane: pane)
         }
     }
@@ -11794,9 +12391,52 @@ extension Workspace: BonsplitDelegate {
         case .chooseCustomColor:
             guard let panelId = panelIdFromSurfaceId(tab.id) else { return }
             promptCustomTabColor(panelId: panelId)
+        case .surfaceDetails:
+            showSurfaceDetails(forSurfaceId: tab.id)
+        case .copySurfaceRef:
+            copySurfaceRef(forSurfaceId: tab.id)
         @unknown default:
             break
         }
+    }
+
+    /// Copy the tab's `surface:N` handle to the clipboard and show a brief
+    /// confirmation HUD. Routed from the tab right-click menu's copy item.
+    func copySurfaceRef(forSurfaceId surfaceId: TabID) {
+        guard let panel = panel(for: surfaceId) else { return }
+        let ref = TerminalController.shared.surfaceRefOnly(forSurfaceUUID: panel.id)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(ref, forType: .string)
+        let copied = String(localized: "copyHUD.copiedPrefix", defaultValue: "Copied")
+        CopyConfirmationHUD.show(message: "\(copied) \(ref)")
+    }
+
+    /// Open the Surface Details panel for the surface backing a tab. Routed
+    /// from the tab right-click menu; the panel shows the `surface:N` /
+    /// `tab:N` handles plus the surface metadata manifest.
+    func showSurfaceDetails(forSurfaceId surfaceId: TabID) {
+        guard let panel = panel(for: surfaceId) else { return }
+        showSurfaceDetails(for: panel)
+    }
+
+    /// Open the Surface Details panel for a specific panel. Routed from the
+    /// command palette (which targets the focused panel directly).
+    func showSurfaceDetails(for panel: any Panel) {
+        let kind: SurfaceManifestKind
+        switch panel.panelType {
+        case .terminal:
+            kind = .terminal
+        case .browser:
+            kind = .browser
+        case .markdown:
+            kind = .markdown
+        }
+        SurfaceManifestViewerWindowController.show(
+            workspaceId: id,
+            surfaceId: panel.id,
+            kind: kind
+        )
     }
 
     func splitTabBar(_ controller: BonsplitController, didSelectTabColorPaletteEntry hex: String, for tab: Bonsplit.Tab, inPane pane: PaneID) {

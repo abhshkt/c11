@@ -30,15 +30,16 @@ These keys have a defined shape and render in the sidebar or title bar. Any writ
 | `task` | string | ≤ 128 chars | sidebar: monospace tag |
 | `model` | string | kebab-case, ≤ 64 chars | sidebar chip |
 | `progress` | number | 0.0 – 1.0 | sidebar: progress bar |
-| `terminal_type` | string | kebab-case, ≤ 32 chars | sidebar chip. Canonical values: `claude-code`, `codex`, `kimi`, `opencode`, `shell`, `unknown`. Open-ended. |
+| `terminal_type` | string | kebab-case, ≤ 32 chars | sidebar chip. Canonical values: `claude-code`, `codex`, `grok`, `kimi`, `opencode`, `github-copilot`, `pi`, `omp`, `shell`, `unknown`. Open-ended. |
 | `title` | string | plain text, ≤ 256 chars | title bar + sidebar tab label (truncated) |
 | `description` | string | Markdown subset (bold/italic, inline `code`, lists, headings, blockquotes, links, rules — no images, fenced code, or tables), ≤ 2048 chars | title bar expanded region |
 | `worktree` | string | ≤ 128 chars (basename) | sidebar chip with colored-dot prefix. Only rendered when the surface's cwd is inside a *linked* git worktree (`git worktree add ...`). Color is a stable hash of the absolute worktree path. **Derived** — written by c11 runtime, not by agents. |
 | `branch` | string | ≤ 64 chars (branch name, `(detached @ <short-sha>)`, or `(no branch)`) | sidebar chip. Renders for main checkouts and linked worktrees. Dimmed for branch ∈ {`main`, `master`, `trunk`}. **Derived** — written by c11 runtime, not by agents. |
+| `activity` | string | `working` \| `idle`, ≤ 16 chars | Per-surface **derived liveness** (C11-162). Sidebar shows it as a visually-distinct *derived* pill when an explicit `status` has aged past expiry (or was never set). **Derived** — written by the c11 runtime from shell-integration prompt state, not by agents; recomputed on state change and not persisted across relaunch. See [Liveness, age & decay](#liveness-age--decay). |
 
-**Sidebar rendering order** when present: `model` → `terminal_type` → `role` → `status` → `task` → `progress` → `worktree` + `branch` chips row. `title` and `description` render in the title bar, not the sidebar — the sidebar tab label is a truncated projection of `title`.
+**Sidebar rendering order** when present: `model` → `terminal_type` → `role` → `status` → `task` → `progress` → `worktree` + `branch` chips row. `title` and `description` render in the title bar, not the sidebar — the sidebar tab label is a truncated projection of `title`. The `status` and `progress` pills [decay by age](#liveness-age--decay); when `status` is past expiry the derived `activity` pill takes its place.
 
-**Worktree + branch chips (C11-104).** Both keys are projections of `cwd` + gitfs state — agents should not write them directly. They are computed off-main by `GitContextDeriver` on cwd updates (the `report_pwd` socket path) and rendered automatically. Inside a submodule, both the superproject context and the submodule context render as two stacked rows. Settings → Sidebar → "Show worktree + branch chips in sidebar" (preserved `sidebarShowBranchDirectory` AppStorage key — the legacy text branch+directory row was retired in C11-104 v2) gates the entire row (default on, live-toggleable). The branch chip carries a `*` suffix when the working tree is dirty.
+**Worktree + branch chips.** Both keys are projections of `cwd` + gitfs state — agents should not write them directly. They are computed off-main by `GitContextDeriver` on cwd updates (the `report_pwd` socket path) and rendered automatically. Inside a submodule, both the superproject context and the submodule context render as two stacked rows. Settings → Sidebar → "Show worktree + branch chips in sidebar" gates the entire row (default on, live-toggleable). The branch chip carries a `*` suffix when the working tree is dirty.
 
 ### `MetadataDeriver` seam
 
@@ -100,7 +101,14 @@ c11 clear-metadata --key task
 c11 clear-metadata                   # clear everything (requires explicit source)
 ```
 
-### Agent-declaration sugar (M1)
+> **Always pass `--surface "$C11_SURFACE_ID"` explicitly on surface-write commands** — `set-metadata`, `set-agent`, `set-title`, `set-description`, `rename-tab`, `clear-metadata`, etc. As of C11-165 a surface-scoped write with a missing or empty ref is **rejected** (`missing_ref` / `empty_ref`) rather than falling back to the operator-focused surface — so an omitted or empty flag now fails loudly instead of silently stomping a peer agent's metadata. Pass a valid ref: `--surface "$C11_SURFACE_ID"`, or the literal `surface:<n>` from `c11 identify --json` if the env var is empty. (On older, pre-C11-165 binaries the missing-ref default silently misrouted to the focused surface — the defensive form costs one flag and is correct on every version.)
+>
+> ```bash
+> c11 set-metadata --surface "$C11_SURFACE_ID" --key status --value "running"
+> c11 set-title    --surface "$C11_SURFACE_ID" "TICKET-42 :: Impl"
+> ```
+
+### Agent-declaration sugar
 
 `c11 set-agent` is a wrapper over `set-metadata` with `source: declare`:
 
@@ -111,7 +119,7 @@ c11 set-agent --type codex --task lat-412 --role reviewer
 
 Writes `terminal_type`, and optionally `model`, `task`, `role` with `source: declare`. Declaration overrides heuristic auto-detection but not user-explicit writes. Clear with `c11 clear-metadata --key terminal_type`.
 
-### Title & description sugar (M7)
+### Title & description sugar
 
 ```bash
 c11 set-title "My Surface Title"
@@ -130,6 +138,22 @@ Writes canonical `title` or `description` with `source: explicit`. `c11 rename-t
 The description renders with MarkdownUI at 11pt with a compact heading hierarchy (13/12/11). Links render styled but are **not navigable** in v1 (`OpenURLAction { .discarded }`). Images, fenced code blocks, and table rows are stripped at render time; the raw string still round-trips through the store unchanged. Content over ~5 lines scrolls internally inside a 90pt-capped region.
 
 When `description` is empty the title bar renders as collapsed regardless of the flag (`effective_collapsed = collapsed || description.isEmpty`) — this is what the socket payload's `effective_collapsed` field reports.
+
+## Surface flash — asynchronous attention
+
+Flash is c11's per-surface attention primitive: a brief or persistent visual pulse on the pane content and the sidebar workspace row. Reach for it when an agent produces something the operator should look at but doesn't want to steal focus to show.
+
+```bash
+c11 trigger-flash --surface <ref>                              # one-shot pulse on a non-focused surface
+c11 trigger-flash --surface <ref> --persistent                 # repeats until dismissed
+c11 trigger-flash --surface <ref> --persistent --color "#FF5C5C"  # per-call sRGB hex override
+c11 cancel-flash  --surface <ref>                              # clear an in-flight persistent pulse
+```
+
+- **`--persistent`** repeats until *either* the operator dismisses it (clicking the pane content or the sidebar workspace row) *or* an agent calls `c11 cancel-flash`. Use it for "look at this eventually," not "look right now" — the recurring pulse is what makes the surface findable when the operator is deep in another workspace. A `--persistent` call on an already-focused surface degrades to a one-shot pulse.
+- **`--color`** distinguishes signals from different agents on the same workspace. Default `#F5C518` (Stage 11 warm yellow). Validation accepts `#RRGGBB` or `#RRGGBBAA` (case-insensitive, optional `#`); anything else errors. Tints the pane ring and the sidebar row pulse; the Bonsplit tab-strip pulse keeps its internal accent.
+- **`flash_state` metadata key.** A persistent flash writes `flash_state=persistent` into the surface manifest; cancellation clears it. Poll it instead of subscribing to per-frame visual state: `c11 get-metadata --surface <ref> --key flash_state`. Treat it as a forward-compatible enum — match the value you care about, don't assume it's binary. Cancel when stale: an agent that flashed to wait on a long task should `cancel-flash` if the task completes by another path.
+- **Duration is operator-tuned.** Settings → Notifications → Flash Duration (500–4000ms, default 1500ms) scales every channel together. Agents fire the signal; c11 paces it.
 
 ## Socket methods
 
@@ -153,7 +177,7 @@ Merge a partial metadata object into the surface's blob.
 
 | Param | Required | Notes |
 |-------|----------|-------|
-| `surface_id` | yes | UUID or ref; defaults to focused surface |
+| `surface_id` | yes | UUID or ref. **Required for writes** — a missing/empty ref is rejected (`missing_ref`/`empty_ref`), never defaulted to the focused surface (C11-165). |
 | `metadata` | yes | Partial or full object; ≤ 64 KiB post-merge |
 | `mode` | no | `"merge"` (default, shallow) or `"replace"` (requires `source: explicit`) |
 | `source` | no | Default `"explicit"`; other values: `"declare"`, `"osc"`, `"heuristic"` |
@@ -206,9 +230,9 @@ Every canonical key's value carries a parallel `metadata_sources[key]` record de
 
 | Value | Writer | Notes |
 |-------|--------|-------|
-| `heuristic` | c11 internal process-tree scan (M1) | Best-effort auto-detection. Never overwrites higher-precedence values. |
-| `derived` | c11 internal projections of ground-truth state (M-C11-104) | System-computed from cwd, gitfs, or other ambient state. Agents do not write `derived` keys directly; they're recomputed on state change. Ranks above `heuristic`, below `osc`. |
-| `osc` | Terminal emulator OSC 0/1/2 sequence (M7) | Writes `title` only. Newer OSC writes overwrite older `osc` writes. |
+| `heuristic` | c11 internal process-tree scan | Best-effort auto-detection. Never overwrites higher-precedence values. |
+| `derived` | c11 internal projections of ground-truth state | System-computed from cwd, gitfs, or other ambient state. Agents do not write `derived` keys directly; they're recomputed on state change. Ranks above `heuristic`, below `osc`. |
+| `osc` | Terminal emulator OSC 0/1/2 sequence | Writes `title` only. Newer OSC writes overwrite older `osc` writes. |
 | `declare` | Agent declaration (`c11 set-agent`, env vars) | Explicit agent self-identification. |
 | `explicit` | User CLI (`c11 set-metadata`, `c11 set-title`, inline edit) | Highest precedence; user intent wins. |
 
@@ -221,12 +245,44 @@ explicit > declare > osc > derived > heuristic
 - **`explicit` always wins.** `c11 set-metadata` overwrites any prior value.
 - **`declare` overwrites `osc`, `derived`, and `heuristic`**, not `explicit`.
 - **`osc` overwrites `derived` and `heuristic`** and older `osc`, not `declare` or `explicit`.
-- **`derived` overwrites `heuristic`**, not `osc`/`declare`/`explicit`. Used for worktree/branch chips (C11-104).
+- **`derived` overwrites `heuristic`**, not `osc`/`declare`/`explicit`. Used for worktree/branch chips.
 - **`heuristic` only writes when the key is unset or current source is `heuristic`.**
 
 A write that fails the precedence check returns `ok: true` with `result.applied[key]: false` and `result.reasons[key]: "lower_precedence"`. The current value is left untouched.
 
 **Clear semantics.** `clear_metadata` with `source: explicit` always succeeds. A clear from a lower-precedence writer only succeeds if the current source is at or below the caller's.
+
+## Liveness, age & decay
+
+*C11-162 — the sidebar stops lying about how fresh a status is, and fills in an honest activity read when an agent goes silent. Two deterministic mechanisms, no model inference.*
+
+### Last-updated timestamps
+
+Every canonical key's `metadata_sources[key]` record carries a `ts` (seconds since 1970) marking when that value was last **changed**. It is set on every applied write, **persists across relaunch** (it round-trips through the workspace snapshot alongside the value), and is returned by `get_metadata` when `include_sources: true`. A same-value + same-source rewrite is an idempotent no-op that *preserves* the original `ts` — the canonical `ts` is "last changed," not "last touched."
+
+**Sidebar freshness is "last reported," not "last changed."** The visible sidebar status pill (`set-status` / `set_status`) tracks the last time the agent *reported* the value: re-reporting the same status is a **heartbeat** that refreshes its freshness clock, so a live agent that keeps asserting the same status never false-decays. (Only the visible sidebar entry works this way; the canonical `metadata_sources` `ts` stays "last changed.") Progress freshness is likewise stamped on every write and round-trips across relaunch.
+
+**`set-status` / `set-progress` also mirror the canonical key into the surface store.** When the entry's key is a canonical agent-reportable key (`status`, `task`, `role`, `model`, `progress`), the fast path writes it through the evented `SurfaceMetadataStore` at the `explicit` tier — so `get-metadata` returns it with a last-changed `ts`, and a `status` change emits a `metadata.changed` event (`progress` records a `ts` but is deliberately not evented, for flood-control). Arbitrary display-only chips (e.g. `build`, `deploy`) stay in the sidebar store only. The mirror targets the explicit `--surface` (resolved from a ref) when you pass one, else the workspace's focused surface — pass `--surface "$C11_SURFACE_ID"` so your status lands on *your* surface in a multi-agent workspace.
+
+### Status/progress decay
+
+Sidebar `status`/`progress` pills decay visually as they age against two operator-tunable thresholds:
+
+| Stage | When | Rendering |
+|-------|------|-----------|
+| **fresh** | age < *stale* | normal |
+| **stale** | *stale* ≤ age < *expiry* | dimmed + a relative-age hint (e.g. `5m`) |
+| **expired** | age ≥ *expiry* | grayed out; derived `activity` (if any) takes over the pill |
+
+Defaults: **stale 5m / expiry 15m**. Tune under **Settings → Sidebar** ("Stale After" / "Expire After"). For scripted demos/tests, the env vars `C11_SIDEBAR_STALE_SECONDS` and `C11_SIDEBAR_EXPIRE_SECONDS` (read at launch, not persisted) override the thresholds so decay is observable in seconds.
+
+### Derived liveness (`activity`)
+
+c11 derives a per-surface activity state — `working` or `idle` — from signals it already observes (shell-integration prompt state: a command running ⇒ `working`, back at the prompt ⇒ `idle`), reconciled on a coarse timer. It is written to the canonical `activity` key at the **`derived`** precedence tier, so it **never overwrites a fresh `explicit` status** and is not persisted (it recomputes on relaunch). No agent cooperation is required — a surface that never self-reports but produces output still shows a derived `working`.
+
+**Takeover.** While an explicit `status` is fresh, it renders as the agent claimed. Once it ages past *expiry*, the sidebar shows the derived `activity` instead, styled **visually distinct** (a "derived/sensed" pill, not agent-claimed). When the agent reports again, the fresh `explicit` status resumes. This is a render-layer decision keyed on `ts`; the store still holds the last `explicit` value at its own tier.
+
+Agents do not (and cannot) write `activity` over the external socket — it is runtime-derived, like `worktree`/`branch`.
 
 ## Errors
 

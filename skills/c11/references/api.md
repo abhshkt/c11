@@ -16,7 +16,7 @@ Full command surface for c11. The main `SKILL.md` covers what you reach for most
 - [Sidebar reporting](#sidebar-reporting)
 - [Spatial layout (`c11 tree`)](#spatial-layout-c11-tree)
 - [Notifications](#notifications)
-- [Installation (`c11 install`)](#installation-c11-install)
+- [Skill Management (`c11 skill`)](#skill-management-c11-skill)
 - [Troubleshooting](#troubleshooting)
 
 ## Addressing & targeting
@@ -43,26 +43,26 @@ Most commands default to the caller's context via env vars — no flags needed w
 
 ## Environment variables
 
-`C11_*` variants are the primary names going forward; the legacy `CMUX_*` names continue to work via dual-read. The table below lists the legacy names because they're still what you'll see exported in most environments today.
+Auto-exported into every c11 surface child process.
 
 | Var | Purpose |
 |-----|---------|
-| `CMUX_WORKSPACE_ID` | Auto-set in c11 terminals; default for `--workspace` |
-| `CMUX_SURFACE_ID` | Auto-set; default for `--surface` |
-| `CMUX_TAB_ID` | Optional alias for tab commands |
-| `CMUX_SOCKET_PATH` | Override socket path (default `/tmp/cmux.sock`; auto-discovers tagged/debug sockets) |
-| `CMUX_SOCKET_PASSWORD` | Socket auth password (if set in Settings) |
-| `CMUX_SHELL_INTEGRATION` | Set to `1` in c11 terminals — use to detect you're inside c11 (also exported as `C11_SHELL_INTEGRATION=1`) |
-| `CMUX_AGENT_TYPE` | Declared agent TUI type (`claude-code`, `codex`, `kimi`, `opencode`, kebab-case custom); read at surface start |
-| `CMUX_AGENT_MODEL` | Declared agent model identifier |
-| `CMUX_AGENT_TASK` | Declared agent task ID |
+| `C11_WORKSPACE_ID` | Auto-set in c11 terminals; default for `--workspace` |
+| `C11_SURFACE_ID` | Auto-set; default for `--surface` |
+| `C11_TAB_ID` | Optional alias for tab commands |
+| `C11_SOCKET_PATH` | Override socket path (auto-discovers tagged/debug sockets) |
+| `C11_SOCKET_PASSWORD` | Socket auth password (if set in Settings) |
+| `C11_SHELL_INTEGRATION` | Set to `1` in c11 terminals — use to detect you're inside c11 |
+| `C11_AGENT_TYPE` | Declared agent TUI type (`claude-code`, `codex`, `grok`, `kimi`, `opencode`, `github-copilot`, `pi`, `omp`, kebab-case custom); read at surface start |
+| `C11_AGENT_MODEL` | Declared agent model identifier |
+| `C11_AGENT_TASK` | Declared agent task ID |
 
 ## Discovery & state
 
 ```bash
 c11 identify                         # JSON: caller's workspace/surface/pane refs + focused context
 c11 tree                             # Current workspace with ASCII floor plan (default)
-c11 tree --window                    # All workspaces in current window (pre-M8 default)
+c11 tree --window                    # All workspaces in current window
 c11 tree --all                       # Every window
 c11 tree --json                      # Structured JSON with pixel/percent coordinates
 c11 list-workspaces                  # Workspace list (* = selected)
@@ -81,9 +81,9 @@ The `caller` block in `c11 identify` always reflects the pane invoking the comma
 ```bash
 # Create
 c11 <path>                           # Open directory in new workspace (launches c11 if needed)
-c11 new-workspace [--cwd <path>] [--command <text>]
-c11 new-split <left|right|up|down>   # Split any pane; the new pane is always a terminal
-c11 new-pane [--type <terminal|browser|markdown>] [--direction <dir>] [--url <url>]
+c11 new-workspace [--cwd <path>] [--command <text>] [--title <text>] [--layout <path|name>]
+c11 new-split <left|right|up|down> [--cwd <path|inherit>]   # Split any pane; the new pane is always a terminal
+c11 new-pane [--type <terminal|browser|markdown>] [--direction <dir>] [--url <url>] [--cwd <path|inherit>]
 c11 new-surface [--type <terminal|browser|markdown>] [--pane <id|ref>] [--workspace <id|ref>]
 
 # Navigate
@@ -116,12 +116,28 @@ c11 new-split down
 c11 new-split down --surface surface:10
 ```
 
+### `--cwd` — set the new shell's working directory
+
+`new-split` and `new-pane` spawn a terminal whose default working directory is inherited from the parent surface. Pass `--cwd <path>` to start the shell in a specific directory instead — set at creation, before the PTY is wired up, so the agent lands there with no `cd`:
+
+```bash
+c11 new-split right --cwd /Users/me/project   # new shell starts in /Users/me/project
+c11 new-split down --cwd .                     # relative path, resolved against your cwd
+c11 new-pane --cwd ~/code/api                  # tilde-expanded
+```
+
+- The path is resolved relative to where the CLI runs (so `--cwd .` is your current dir) and validated server-side: a nonexistent path or a file (not a directory) returns a clear error rather than silently falling back to `$HOME`.
+- Omitting `--cwd` — or passing `--cwd inherit` — keeps the default: inherit the parent surface's cwd.
+- Browser/markdown panes have no shell, so `--cwd` has no effect there (it's still validated if supplied).
+
+This removes the orchestrator habit of prefixing every spawned command with `cd /path && …` just to keep a sub-agent out of `~`.
+
 ### `new-surface` targeting (gotcha — opposite of `new-split`)
 
 `new-surface` does **not** default to the caller's pane. With no `--pane`, it adds the tab to whichever pane is currently *focused* — often **not** the pane your agent is running in. To add a tab to your own pane, read `caller.pane_ref` from `c11 identify` and pass it:
 
 ```bash
-CALLER_PANE=$(c11 identify --surface "$CMUX_SURFACE_ID" | grep -o '"pane_ref" : "pane:[0-9]*"' | head -1 | cut -d'"' -f4)
+CALLER_PANE=$(c11 identify --surface "$C11_SURFACE_ID" | grep -o '"pane_ref" : "pane:[0-9]*"' | head -1 | cut -d'"' -f4)
 c11 new-surface --type terminal --pane "$CALLER_PANE"
 ```
 
@@ -147,11 +163,26 @@ c11 read-screen --workspace workspace:2 --surface surface:3 --lines 50
 # Send text to a terminal
 c11 send "echo hello"                # Types text AND submits (default behavior)
 c11 send --no-submit "cd /tmp/"      # Types text only, no Return — for partial-line construction
-c11 send-key enter                   # Send a keypress directly (no text)
+c11 send-key down                    # Send a keypress directly (no text) — drives TUI menus
 c11 send --workspace workspace:2 --surface surface:3 "ls"
+c11 send --surface surface:3 -- "$(cat brief.md)"   # Multi-line brief: one paste, one turn
 ```
 
-**`c11 send` types the text and submits.** A synthetic Return is dispatched on the same turn as the text, so the receiving TUI sees one user turn. Pass `--no-submit` to type into the prompt without executing — typically to build a partial line across multiple sends, or to stage text before the operator hits Enter manually.
+**`c11 send` delivers the payload as a paste, then submits it with a separate Return.** The Return is a real key event dispatched after the target has ingested the paste, so paste-detecting TUIs (Claude Code, codex) register a submit rather than swallowing it. This holds whether or not the target's workspace is the one on screen — a send into a background agent lands exactly like one into the focused pane.
+
+**Interior newlines are content; a trailing newline means "and press Enter".** A multi-line brief arrives whole and becomes *one* turn — you don't need to stage it in a file and send a pointer. `send --no-submit "cmd\n"` still runs `cmd`, because the trailing newline is the Enter.
+
+**Targeting is strict.** An empty or unresolvable ref (`--surface ""`, a stale `surface:99`) is an error — `send` never falls back to whatever pane happens to be focused. For `send` / `send-key`, a surface ref is a global handle: `--surface` alone reaches a pane in any workspace of the window. (Other commands, `read-screen` included, still resolve a surface within the caller's workspace, so pass `--workspace` alongside it there.)
+
+Naming only a workspace (`send --workspace workspace:3 "ls"`, no `--surface`) still targets that workspace's focused pane — you named a target, just a coarser one.
+
+**`c11 send-key <key>` dispatches a single keypress** to the surface's PTY, encoded for the terminal's current mode (so arrow keys drive arrow-select menus like codex's hooks-trust prompt). Vocabulary:
+
+- Submission / editing: `enter`/`return`, `tab`, `escape`, `space`, `backspace`, `delete`
+- Arrows: `up`, `down`, `left`, `right`
+- Navigation: `home`, `end`, `pageup`, `pagedown`
+- Function keys: `f1`–`f12`
+- Control: `ctrl-c`, `ctrl-d`, `ctrl-z`, and generic `ctrl-<letter>`
 
 ## Per-surface metadata
 
@@ -174,14 +205,14 @@ c11 set-agent --type codex --task lat-412
 c11 set-agent --type opencode --model <model-id>
 ```
 
-- `--type` accepts canonical values (`claude-code`, `codex`, `kimi`, `opencode`) and any kebab-case custom value.
-- Writes land as `source: declare` in the M2 metadata store, overriding heuristic auto-detection but not user-explicit writes.
-- Environment declaration: `CMUX_AGENT_TYPE`, `CMUX_AGENT_MODEL`, `CMUX_AGENT_TASK` in the surface's startup env are read once at surface-child-process start. `C11_*` variants are the primary names going forward; `CMUX_*` still works.
+- `--type` accepts canonical values (`claude-code`, `codex`, `grok`, `kimi`, `opencode`, `github-copilot`, `pi`, `omp`) and any kebab-case custom value.
+- Writes land as `source: declare` in the metadata store, overriding heuristic auto-detection but not user-explicit writes.
+- Environment declaration: `C11_AGENT_TYPE`, `C11_AGENT_MODEL`, `C11_AGENT_TASK` in the surface's startup env are read once at surface-child-process start.
 - Clear with `c11 clear-metadata --key terminal_type` (no `c11 unset-agent`).
 
 ## Title & description
 
-Sugar over metadata writes to the canonical `title` and `description` keys. Rendered in the surface's title bar (M7).
+Sugar over metadata writes to the canonical `title` and `description` keys. Rendered in the surface's title bar.
 
 ```bash
 c11 set-title "SIG Delegator — reviewing PR #42"
@@ -209,6 +240,29 @@ c11 clear-log
 
 **Constraint:** these must be called from a direct c11 child process. Subprocesses spawned by `claude -p` get reparented to `launchd`, breaking the auth chain. Interactive `claude --dangerously-skip-permissions` keeps it intact.
 
+## Resize panes
+
+Binary splits aren't balanced automatically. Two `new-split right` calls give you `[A 50% | B 25% | C 25%]`, not equal thirds. Use `resize-pane` to rebalance.
+
+```bash
+c11 resize-pane --pane <ref> --workspace <ref> (-L|-R|-U|-D) --amount <px>
+```
+
+- `-R <px>` grows the pane by pushing its **right** border rightward (shrinks the right neighbor).
+- `-L <px>` grows the pane by pushing its **left** border leftward (shrinks the left neighbor).
+- `-U` / `-D` are the vertical equivalents.
+- A direction toward the workspace edge fails with `Pane has no adjacent border in direction <dir>`: the leftmost pane cannot `-L`, the topmost cannot `-U`, etc. Resize from the neighbor instead.
+
+**Compound-split cascade.** When you resize a pane whose nearest matching border belongs to an *outer* split (not the split that directly separates it from its closest sibling), the resize moves the outer boundary; both children of the inner split grow **proportionally**, preserving their existing ratio. Example: given `[A 50%] | [B 25% | C 25%]` (outer horizontal split, right half split again), `resize-pane --pane B -L 500` pulls 500px across the outer boundary — B and C each gain 250px because their inner ratio is 1:1. Resize again across the inner boundary (`-R` on B) to equalize B and C without touching A.
+
+**Recipe: equal thirds from two right-splits.** After `new-split right` twice on a workspace of width `W`, you have `[A W/2 | B W/4 | C W/4]`. One resize lands thirds, because the cascade does the inner redistribution for free:
+
+```bash
+# W = workspace content width (read from `c11 tree --json` or the ASCII floor plan header)
+c11 resize-pane --workspace $WS --pane $B -L $((W / 6))
+# → A shrinks by W/6 to W/3; B and C each grow by W/12 (inner ratio preserved) to W/3 each.
+```
+
 ## Spatial layout (`c11 tree`)
 
 ```bash
@@ -235,25 +289,29 @@ c11 trigger-flash [--surface <id|ref>]     # Visual flash on a surface
 
 Also responds to standard terminal escape sequences: OSC 9, OSC 99, OSC 777.
 
-## Skill Management (`c11 skill`)
+## Skill + Plugin Management (`c11 skill`)
 
-`c11 skill` helps an operator inspect, install, update, or remove the bundled c11 skill files for supported agent tools. It does not install lifecycle shims into tenant configuration; agents should still self-report with `c11 set-agent` / metadata commands from inside their own session.
+`c11 skill` helps an operator inspect, install, update, or remove the bundled c11 skill files for supported agent tools. For OpenCode, it can also install the bundled notification/status plugin. It does not install lifecycle shims or edit tenant settings files; agents should still self-report with `c11 set-agent` / metadata commands from inside their own session.
 
 ```bash
-c11 skill path                       # Print the bundled skill source directory
-c11 skill status                     # Show supported targets and install state
-c11 skill install --tool claude-code # Install/update the c11 skill for one tool
+c11 skill path                         # Print the bundled skill source directory
+c11 skill status [--json]              # Show supported targets and install state
+c11 skill install --tool claude-code   # Install/update the c11 skill for one tool
+c11 skill install --tool opencode      # Install skill + OpenCode notification plugin
 c11 skill install --tool codex --dry-run
-c11 skill remove --tool claude-code  # Remove a c11-installed skill
+c11 skill remove --tool opencode       # Remove c11-installed OpenCode skill + plugin
 ```
 
+For OpenCode, the installer copies `c11-notify.js` into `~/.config/opencode/plugins/`. The plugin bridges `session.idle`, `permission.asked`, `session.error`, and `session.status` events into c11 notifications and sidebar status updates. OpenCode auto-loads plugins from that directory at startup; no `opencode.json` edit is required.
+
+> **Historical note:** `c11 install <tui>` (without the `skill` subcommand) is not a real command — it was aspirational in earlier docs. The actual install path is `c11 skill install --tool <tui>`.
 ## Troubleshooting
 
 - **"Connection refused" / socket errors** — c11 app may not be running. Launch it, then retry.
 - **"Surface not found"** — target surface was closed or the ref is stale. Run `c11 tree --all` for current refs.
 - **"Surface is not a terminal"** — you used `--surface` without `--workspace`. Always pass both when targeting remote surfaces.
 - **Browser commands fail with "not a browser"** — you're targeting a terminal surface. Find the browser surface ref with `c11 tree` and pass `--surface <ref>`.
-- **Commands do nothing** — check `CMUX_SOCKET_PATH` matches the running instance. Default is `/tmp/cmux.sock`; tagged debug builds use `/tmp/cmux-debug-<tag>.sock`. (`C11_SOCKET_PATH` is the primary name going forward; `CMUX_SOCKET_PATH` still works.)
+- **Commands do nothing** — check `C11_SOCKET_PATH` matches the running instance. Tagged debug builds use a per-tag socket path; the CLI auto-discovers it when launched from a tagged surface.
 - **Surface doesn't respond after creation** — it may not be initialized. Run `c11 select-workspace --workspace workspace:N && sleep 2` to trigger the layout pass.
 - **Sub-agent can't call `c11`** — happens with `claude -p` (headless). Interactive `claude --dangerously-skip-permissions` launched via `c11 send "claude --dangerously-skip-permissions"` maintains the auth chain.
 - **Metadata write returns `applied: false` with `lower_precedence`** — a higher-precedence source already owns that key. See [metadata.md](metadata.md) precedence table.
@@ -261,4 +319,4 @@ c11 skill remove --tool claude-code  # Remove a c11-installed skill
 ## Notes
 
 - c11 is a **local** multiplexer — not a remote session manager. For SSH work, install tmux on the remote.
-- Socket access modes: disabled, c11-spawned processes only (`cmuxOnly`), or all local processes. Check with `c11 capabilities`.
+- Socket access modes: disabled, c11-spawned processes only (`c11Only`), or all local processes. Check with `c11 capabilities`.

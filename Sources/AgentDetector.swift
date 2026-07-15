@@ -94,6 +94,16 @@ final class AgentDetector: @unchecked Sendable {
                 return
             }
             self.runScan(panelsToWrite: Set(self.ttyNames.keys))
+            // C11-162 (TEL-5) — coarse liveness recompute rides the existing
+            // 10 s sweep on this utility queue: zero new timer, zero hot-path
+            // work. Decays stale `working` surfaces to `idle` as a backstop
+            // for missed prompt reports.
+            for key in self.ttyNames.keys {
+                SurfaceLivenessDeriver.reconcile(
+                    surfaceId: key.panelId,
+                    workspaceId: key.workspaceId
+                )
+            }
         }
         sweepTimer = timer
         timer.resume()
@@ -217,33 +227,29 @@ final class AgentDetector: @unchecked Sendable {
         let c = comm.lowercased()
         let a = args.lowercased()
 
-        // Exact comm match on first-class TUIs.
-        switch c {
-        case "claude", "claude-code":
-            return "claude-code"
-        case "codex", "codex-cli":
-            return "codex"
-        case "kimi", "kimi-cli":
-            return "kimi"
-        case "opencode", "opencode-cli":
-            return "opencode"
-        default:
-            break
+        // Exact comm match against any agent manifest's declared binaries.
+        for manifest in AgentRegistry.shared.all where manifest.detectComms.contains(c) {
+            return manifest.kind
         }
 
-        // Node-wrapped CLIs: comm truncated to `node`, match via args substring.
-        if c == "node" {
-            if a.contains("claude-code") || a.contains("anthropic-ai/claude-code") || a.contains("/claude") {
-                return "claude-code"
+        // JS/TS-runtime-wrapped CLIs: comm is the runtime (node/bun/deno) and
+        // the agent identity lives in the args. Two invocation shapes:
+        //  - module path (`node …/@anthropic-ai/claude-code/cli.js`) → match a
+        //    distinctive args substring.
+        //  - shim/symlink (`bun /Users/x/.bun/bin/omp`, `node /Users/x/.bun/bin/pi`)
+        //    → the module path isn't in argv, but the invoked script's basename
+        //    is the agent's binary name. (Matching only the *last* path
+        //    component avoids false positives from mid-path directory names.)
+        if c == "node" || c == "bun" || c == "deno" {
+            for manifest in AgentRegistry.shared.all
+            where manifest.detectNodeArgsSubstrings.contains(where: { a.contains($0) }) {
+                return manifest.kind
             }
-            if a.contains("codex-cli") || a.contains("openai/codex") || a.contains("/codex") {
-                return "codex"
-            }
-            if a.contains("kimi-cli") || a.contains("moonshot/kimi") || a.contains("/kimi") {
-                return "kimi"
-            }
-            if a.contains("opencode-cli") || a.contains("sst/opencode") || a.contains("/opencode") {
-                return "opencode"
+            for token in a.split(separator: " ") {
+                let base = String(token.split(separator: "/").last ?? token)
+                for manifest in AgentRegistry.shared.all where manifest.detectComms.contains(base) {
+                    return manifest.kind
+                }
             }
         }
 

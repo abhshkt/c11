@@ -147,6 +147,31 @@ final class MailboxDispatcher {
         gcTimer = nil
     }
 
+    /// C11-144: append a `handler` event for a buffered-stdin lifecycle step
+    /// (`flushed`/`expired`/`evicted`) that happens *outside* the normal
+    /// handler-invocation path — i.e. when the recipient shell transitions back
+    /// to a prompt and `Workspace` flushes its buffer, or when an entry is
+    /// dropped. The `buffered` event itself is logged inline by the dispatcher
+    /// when the handler returns `.buffered`. Routed through the log's own queue;
+    /// safe to call from the main actor (the log append is async).
+    func logStdinLifecycle(
+        id: String,
+        recipient: String,
+        outcome: MailboxDispatchLog.HandlerOutcome,
+        bytes: Int? = nil
+    ) {
+        log.append(
+            .handler(
+                id: id,
+                recipient: recipient,
+                handler: "stdin",
+                outcome: outcome,
+                bytes: bytes,
+                elapsedMs: nil
+            )
+        )
+    }
+
     // MARK: - Stale-tmp GC
 
     /// Deletes dot-prefixed `.tmp` files in `_outbox/` older than
@@ -264,10 +289,36 @@ final class MailboxDispatcher {
                 topic: envelope.topic
             )
         )
+        // C11-163: mailbox envelope accepted → events stream.
+        EventEmitter.shared.emitMailboxAccepted(
+            workspace: workspaceId,
+            id: envelope.id,
+            from: envelope.from,
+            to: envelope.to,
+            topic: envelope.topic
+        )
 
         // Step 3: resolve recipients. Stage 2 = `to` only.
         let recipients = resolveRecipients(envelope: envelope)
         log.append(.resolved(id: envelope.id, recipients: recipients.map(\.name)))
+
+        // Step 3a: a `to`-addressed envelope that resolves to nobody must NOT
+        // be silently cleaned-and-discarded. Quarantine it like a validation
+        // failure so the drop is observable: `_rejected/<id>.msg` + a `.err`
+        // sidecar + a `rejected` event in the dispatch log. The CLI sender
+        // resolves recipients up front and refuses to send to an unknown name,
+        // so in normal operation this fires only for raw-bash writers or a
+        // recipient that closed between send and dispatch. Topic-only
+        // envelopes (no `to`) keep the Stage-2 accept-but-empty contract and
+        // fall through to the no-op copy/handler steps below.
+        if envelope.to != nil && recipients.isEmpty {
+            rejectUnresolved(
+                id: envelope.id,
+                processingURL: processingURL,
+                to: envelope.to ?? ""
+            )
+            return
+        }
 
         // Step 4: copy into each recipient inbox.
         let envelopeBytes = (try? envelope.encode()) ?? Data()
@@ -294,7 +345,14 @@ final class MailboxDispatcher {
     ) -> [MailboxSurfaceResolver.SurfaceMetadata] {
         guard let to = envelope.to else { return [] }
         let all = resolver.surfacesWithMailboxMetadata()
-        return all.filter { $0.name == to }
+        // Same matcher the cross-workspace resolver uses, so local delivery
+        // agrees with global routing on who `to` resolves to (precedence
+        // address > role > title; `surface:`/`role:` qualifiers honored).
+        return MailboxMatcher.select(
+            MailboxAddress.parse(to),
+            from: all,
+            identity: { $0.identity }
+        )
     }
 
     // MARK: - Inbox copy
@@ -320,6 +378,13 @@ final class MailboxDispatcher {
             )
             try MailboxIO.atomicWrite(data: envelopeBytes, to: target)
             log.append(.copied(id: envelope.id, recipient: recipient.name))
+            // C11-163: mailbox envelope delivered to a recipient inbox.
+            EventEmitter.shared.emitMailboxDelivered(
+                workspace: workspaceId,
+                id: envelope.id,
+                recipient: recipient.name,
+                surface: recipient.surfaceId
+            )
         } catch {
             // The `resolved` event already lists the recipient; failure to
             // copy is logged as a handler-style failure so the operator can
@@ -410,6 +475,32 @@ final class MailboxDispatcher {
                 elapsedMs: result.elapsedMs ?? elapsedMs
             )
         )
+    }
+
+    // MARK: - Unresolved-recipient rejection
+
+    /// A well-formed envelope whose `to` matches no live surface in this
+    /// workspace. Mirrors `quarantine` (rejected dir + `.err` sidecar +
+    /// `rejected` event) so an undeliverable message leaves a trail instead of
+    /// vanishing. Distinct reason string so `c11 mailbox trace` can tell a
+    /// malformed envelope from an unknown recipient.
+    private func rejectUnresolved(id: String, processingURL: URL, to: String) {
+        let reason = "no live surface named '\(to)' in workspace \(workspaceId.uuidString)"
+        let rejectedDir = MailboxLayout.rejectedURL(state: stateURL, workspaceId: workspaceId)
+        let rejectedMsg = rejectedDir.appendingPathComponent(
+            MailboxLayout.envelopeFilename(id: id)
+        )
+        let rejectedErr = rejectedDir.appendingPathComponent(
+            MailboxLayout.rejectedErrorFilename(id: id)
+        )
+        try? FileManager.default.createDirectory(
+            at: rejectedDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? FileManager.default.moveItem(at: processingURL, to: rejectedMsg)
+        try? Data(reason.utf8).write(to: rejectedErr)
+        log.append(.rejected(id: id, reason: reason))
     }
 
     // MARK: - Quarantine

@@ -211,6 +211,53 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertNil(decoded.customTitle)
     }
 
+    // MARK: - C11-164 (RES-2): lastActivityAt persistence
+
+    /// A NON-NIL activity floor must survive save→load. This specifically
+    /// guards the `CodingKeys` trap: `SessionPanelSnapshot` has an explicit
+    /// `CodingKeys` enum, so a new field absent from it would compile and
+    /// decode-tolerate yet silently never encode (a persistence no-op a naive
+    /// nil-on-both-sides test would pass). Asserting the JSON key is present
+    /// AND a real value round-trips catches that.
+    func testSessionPanelSnapshotLastActivityAtRoundTrip() throws {
+        let panelId = UUID()
+        let floor = Date(timeIntervalSince1970: 1_700_000_123)
+        var snapshot = SessionPanelSnapshot(
+            id: panelId, type: .terminal, title: nil, customTitle: nil,
+            customColor: nil, directory: nil, isPinned: false, isManuallyUnread: false,
+            gitBranch: nil, listeningPorts: [], ttyName: nil, terminal: nil,
+            browser: nil, markdown: nil, metadata: nil, metadataSources: nil
+        )
+        snapshot.lastActivityAt = floor
+
+        let encoded = try JSONEncoder().encode(snapshot)
+        let json = try XCTUnwrap(String(data: encoded, encoding: .utf8))
+        XCTAssertTrue(json.contains("\"last_activity_at\""),
+                      "lastActivityAt must be in CodingKeys or it silently never encodes")
+
+        let decoded = try JSONDecoder().decode(SessionPanelSnapshot.self, from: encoded)
+        XCTAssertEqual(decoded.lastActivityAt, floor)
+    }
+
+    /// Pre-C11-164 snapshots have no `last_activity_at` key; they must decode
+    /// with `lastActivityAt == nil` (no floor, prior behaviour) — not throw.
+    func testSessionPanelSnapshotDecodesLegacyJSONWithoutLastActivity() throws {
+        let panelId = UUID()
+        let legacyJSON = """
+        {
+          "id": "\(panelId.uuidString)",
+          "type": "terminal",
+          "isPinned": false,
+          "isManuallyUnread": false,
+          "listeningPorts": []
+        }
+        """
+        let data = try XCTUnwrap(legacyJSON.data(using: .utf8))
+        let decoded = try JSONDecoder().decode(SessionPanelSnapshot.self, from: data)
+        XCTAssertEqual(decoded.id, panelId)
+        XCTAssertNil(decoded.lastActivityAt)
+    }
+
     func testWorkspaceCustomColorDecodeSupportsMissingLegacyField() throws {
         var snapshot = makeSnapshot(version: SessionSnapshotSchema.currentVersion)
         snapshot.windows[0].tabManager.workspaces[0].customColor = nil
@@ -276,6 +323,72 @@ final class SessionPersistenceTests: XCTestCase {
         )
 
         XCTAssertFalse(shouldRestore)
+    }
+
+    // MARK: - QA launch policy
+
+    func testQALaunchPolicyOffWhenUnset() {
+        XCTAssertEqual(QALaunchPolicy.current(environment: [:]), .off)
+        XCTAssertEqual(QALaunchPolicy.current(environment: ["C11_QA_LAUNCH": "  "]), .off)
+        XCTAssertFalse(QALaunchPolicy.current(environment: [:]).isActive)
+    }
+
+    func testQALaunchPolicyFreshForNonResumeValues() {
+        for value in ["fresh", "FRESH", "none", "0", "1", "yes", "clean"] {
+            let policy = QALaunchPolicy.current(environment: ["C11_QA_LAUNCH": value])
+            XCTAssertEqual(policy, .on(.fresh), "value=\(value)")
+            XCTAssertTrue(policy.isActive)
+            XCTAssertTrue(policy.shouldStartFresh)
+            XCTAssertFalse(policy.shouldResume)
+        }
+    }
+
+    func testQALaunchPolicyResumeValues() {
+        for value in ["resume", "RESUME", " restore ", "Resume"] {
+            let policy = QALaunchPolicy.current(environment: ["C11_QA_LAUNCH": value])
+            XCTAssertEqual(policy, .on(.resume), "value=\(value)")
+            XCTAssertTrue(policy.isActive)
+            XCTAssertTrue(policy.shouldResume)
+            XCTAssertFalse(policy.shouldStartFresh)
+        }
+    }
+
+    func testQALaunchPolicyDualReadsLegacyKeyButC11Wins() {
+        XCTAssertEqual(
+            QALaunchPolicy.current(environment: ["CMUX_QA_LAUNCH": "resume"]),
+            .on(.resume)
+        )
+        // C11_* is canonical and wins when both are present.
+        XCTAssertEqual(
+            QALaunchPolicy.current(environment: [
+                "C11_QA_LAUNCH": "fresh",
+                "CMUX_QA_LAUNCH": "resume",
+            ]),
+            .on(.fresh)
+        )
+    }
+
+    func testRestorePolicyFreshQALaunchSkipsRestore() {
+        // QA fresh: no snapshot load even though there are no explicit args.
+        let shouldRestore = SessionRestorePolicy.shouldAttemptRestore(
+            arguments: ["/Applications/cmux.app/Contents/MacOS/cmux"],
+            environment: ["C11_QA_LAUNCH": "fresh"]
+        )
+        XCTAssertFalse(shouldRestore)
+    }
+
+    func testRestorePolicyResumeQALaunchForcesRestore() {
+        // QA resume wins even over markers that would normally skip restore
+        // (test detection, disable flag), so the resume decision is the flag's.
+        let shouldRestore = SessionRestorePolicy.shouldAttemptRestore(
+            arguments: ["/Applications/cmux.app/Contents/MacOS/cmux"],
+            environment: [
+                "C11_QA_LAUNCH": "resume",
+                "CMUX_DISABLE_SESSION_RESTORE": "1",
+                "XCTestConfigurationFilePath": "/tmp/xctest.xctestconfiguration",
+            ]
+        )
+        XCTAssertTrue(shouldRestore)
     }
 
     func testSidebarWidthSanitizationClampsToPolicyRange() {

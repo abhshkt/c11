@@ -15,9 +15,9 @@ Patterns for running multiple agents in parallel panes: layout, tab naming, laun
 
 ## Layout philosophy
 
-**Workspace = project. Panes = concerns. Surfaces = individual agents or views.**
+**By default: workspace ≈ project, panes ≈ concerns, surfaces ≈ individual agents or views.** This is a sensible starting layout, not a law; how the operator maps workspaces to projects overall is their call (see the c11 skill).
 
-Do **not** create one workspace per agent. A workspace is a project; agents are surfaces (tabs) within panes of that workspace.
+Within a single orchestration run, keep the agents as surfaces (tabs) within panes of the run's workspace rather than spawning a fresh workspace per agent. One workspace per agent fragments the run across the sidebar and makes it hard to read; grouping them keeps the whole run legible in one place.
 
 Standard orchestration layout for a single project:
 
@@ -186,13 +186,15 @@ Supported status values: `Idle` (prompt waiting), `Running` (processing a turn),
 
 Additional notes on the polling signal:
 - The signal only exists when claude was launched through c11's bundled PATH. A `claude` invocation that bypasses the PATH wrapper will not emit status. For sub-agents you orchestrate from inside a c11 surface this is almost always fine — the wrapper is the default for `claude` in that context.
-- Codex also has a c11 PATH wrapper. It starts interactive sessions with a c11-owned `--profile-v2 c11` hook layer under c11 Application Support, so Codex's own hook-review UI can trust the bridge without c11 mutating `~/.codex` or project `.codex` files. Before those hook commands are trusted, the wrapper still injects c11 completion notifications through Codex's `notify` setting, marks c11-launched initial prompts as `Running`, and captures `codex.session_id` when it can do so unambiguously. It pins Codex to the pane's effective project dir (`--cd` when supplied, otherwise launch cwd) and ignores hook payloads from a different cwd so nested/background Codex work does not overwrite the parent pane. The generated profile keeps only low-frequency trusted hooks by default: `SessionStart` for resume metadata and `PermissionRequest` for `Needs input`. It deliberately avoids per-turn/tool hooks (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`) because Codex renders hook execution inline in the terminal; the wrapper's `notify` bridge owns the normal completion notification and idle update. Self-reporting with `c11 set-status` remains the portable fallback for Codex and for other TUIs.
+- Codex also has a c11 PATH wrapper. It starts interactive sessions with a c11-owned `--profile-v2 c11` hook layer under c11 Application Support, so Codex's own hook-review UI can trust the bridge without c11 mutating `~/.codex` or project `.codex` files. Before those hook commands are trusted, the wrapper still injects c11 completion notifications through Codex's `notify` setting, marks c11-launched initial prompts as `Running`, and captures `codex.session_id` when it can do so unambiguously. It pins Codex to the pane's effective project dir (`--cd` when supplied, otherwise launch cwd) and ignores hook payloads from a different cwd so nested/background Codex work does not overwrite the parent pane. The generated profile keeps only low-frequency trusted hooks by default: `SessionStart` for resume metadata and `PermissionRequest` for `Needs input`. It deliberately avoids per-turn/tool hooks (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`) because Codex renders hook execution inline in the terminal; the wrapper's `notify` bridge owns the normal completion notification and idle update.
+- OpenCode can get sidebar status through the bundled notification plugin installed by `c11 skill install --tool opencode`. Without that plugin, OpenCode follows the portable self-reporting path with `c11 set-status` / metadata commands.
+- For TUIs without a wrapper or plugin, skill-driven self-reporting is still how status gets populated. If an agent has not been taught to self-report and has no plugin, you will not see status for it — that's expected.
 
 **Do not** regex for `❯`, `> `, or `Welcome to Claude Code`. Those patterns drift across Claude Code releases and produce silent stalls when they miss (v2.1.114 dropped the box prompt and changed the banner, breaking every previous recipe). Use one-shot argv delivery, or poll the status row when it's safe to do so.
 
 ### Why the wrapper boundary stays narrow
 
-The wrappers at `Resources/bin/claude` and `Resources/bin/codex` are PATH-scoped inside c11 terminals. They do not write to tenant-owned persistent config such as `~/.claude`, `~/.codex`, project `.codex` files, or shell rc files. Codex's wrapper may write a c11-owned CODEX_HOME overlay under c11 Application Support and point the child Codex process at that overlay for `--profile-v2 c11`; it copies `config.toml` into the overlay when missing, refreshes `auth.json`, copies `AGENTS.md` and `instructions.md` if present, and seeds a missing local plugin cache into the overlay so Codex does not start as a fresh pluginless install. It still does not mirror mutable runtime state such as `state_5.sqlite`, sessions, history, or logs. If the real `auth.json` is removed, the stale overlay copy is removed on the next managed launch. The host remains unopinionated about the terminal: c11 provides the surface, the socket, the wrapper session-resume rail, and the skill file. For TUIs without a wrapper (kimi, opencode, etc.), skill-driven self-reporting is still how status gets populated.
+The wrappers at `Resources/bin/claude` and `Resources/bin/codex` are PATH-scoped inside c11 terminals. They do not write to tenant-owned persistent config such as `~/.claude`, `~/.codex`, project `.codex` files, or shell rc files. Codex's wrapper may write a c11-owned CODEX_HOME overlay under c11 Application Support and point the child Codex process at that overlay for `--profile-v2 c11`; it copies `config.toml` into the overlay when missing, refreshes `auth.json`, copies `AGENTS.md` and `instructions.md` if present, and seeds a missing local plugin cache into the overlay so Codex does not start as a fresh pluginless install. It still does not mirror mutable runtime state such as `state_5.sqlite`, sessions, history, or logs. If the real `auth.json` is removed, the stale overlay copy is removed on the next managed launch. The host remains unopinionated about the terminal: c11 provides the surface, the socket, the wrapper session-resume rail, the OpenCode plugin when explicitly installed, and the skill file. For TUIs without a wrapper or plugin, skill-driven self-reporting is still how status gets populated.
 
 ## Per-agent launch quirks
 
@@ -210,10 +212,22 @@ The wrappers at `Resources/bin/claude` and `Resources/bin/codex` are PATH-scoped
 - **Wrapper on PATH.** Inside a c11 surface, `codex` resolves to `Resources/bin/codex`, a PATH-scoped wrapper that marks the surface as Codex, launches with a reviewed c11-owned `--profile-v2 c11` hook layer, injects c11 completion notifications, marks c11-launched initial prompts as `Running`, pins/restores the pane project dir with `--cd`, and captures `codex.session_id` when a trusted hook payload, explicit `codex resume <id>`, or guarded one-candidate state lookup provides one. It does not mutate `~/.codex` or bypass Codex hook trust.
 - **Self-reporting still helps.** Codex can now notify completion through the wrapper, and trusted hooks provide richer lifecycle status. For long orchestrations, explicit `c11 set-status` / `c11 set-metadata` calls are still useful when you want highly specific task/progress wording.
 
-### opencode, kimi, others
+### grok
 
-- **No PATH wrapper.** Status comes from skill-driven self-reporting. If an agent hasn't been taught to self-report, the sidebar won't show status for it; that is expected, not a bug.
+- **Use `grok --always-approve`.** Grok Build's auto-approve flag (parallel to claude's `--dangerously-skip-permissions` and codex's `--yolo`). TUI alias is `/yolo`. Headless mode is `grok agent` or `grok -p`; do not use either for a visible c11 surface.
+- **Auth gotcha.** OIDC-acquired tokens (`grok login` browser flow) currently 403 at the chat endpoint for non-Heavy SuperGrok tiers. Use an `XAI_API_KEY` from console.x.ai instead; it bypasses the Heavy-only gate.
+- **No PATH wrapper.** Status comes from skill-driven self-reporting, same as codex/opencode/kimi.
+
+### opencode
+
+- **Bundled notification plugin.** OpenCode has a clean plugin API (`session.idle`, `permission.asked`, `session.status`, `session.error`). `c11 skill install --tool opencode` copies a bundled plugin (`c11-notify.js`) into `~/.config/opencode/plugins/` that bridges these events into c11 notifications + sidebar status — same workflow as Claude Code's hooks. No PATH wrapper, no `opencode.json` modification.
+- **No PATH wrapper.** Like codex, status comes from the plugin (if installed) or skill-driven self-reporting. If neither is set up, the sidebar won't show status for opencode; that is expected, not a bug.
 - **Launch command is operator-configured** under Settings → Agents & Automation → Agent Launcher Button. The resolver materializes whatever the operator chose into `$C11_DEFAULT_AGENT_LAUNCH` at shell-spawn time. Preference changes only take effect on newly-spawned shells, not already-running ones.
+
+### kimi, others
+
+- **No PATH wrapper, no plugin.** Status comes from skill-driven self-reporting only. If an agent hasn't been taught to self-report, the sidebar won't show status for it; that is expected, not a bug.
+- **Launch command is operator-configured** under Settings → Agents & Automation → Agent Launcher Button. The resolver materializes whatever the operator chose into `$C11_DEFAULT_AGENT_LAUNCH` at shell-spawn time.
 
 ### Banner-string scraping is always wrong
 

@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "EULA — cmux",
-  description: "End-User License Agreement for cmux",
+  title: "EULA — c11",
+  description: "End-User License Agreement for c11",
   alternates: { canonical: "./" },
 };
 
@@ -14,7 +14,7 @@ export default function EulaPage() {
 
       <p>
         Please read this End-User License Agreement carefully before
-        downloading or using cmux.
+        downloading or using c11.
       </p>
 
       <h2>Interpretation and Definitions</h2>
@@ -26,13 +26,13 @@ export default function EulaPage() {
           regarding the use of the Application.
         </li>
         <li>
-          <strong>&ldquo;Application&rdquo;</strong> means the cmux desktop
+          <strong>&ldquo;Application&rdquo;</strong> means the c11 desktop
           application for macOS, a native terminal application built on Ghostty.
         </li>
         <li>
           <strong>&ldquo;Company&rdquo;</strong> (referred to as &ldquo;the
           Company&rdquo;, &ldquo;We&rdquo;, &ldquo;Us&rdquo; or
-          &ldquo;Our&rdquo;) refers to Manaflow.
+          &ldquo;Our&rdquo;) refers to Stage 11 Agentics.
         </li>
         <li>
           <strong>&ldquo;Content&rdquo;</strong> refers to content such as text,
@@ -199,7 +199,7 @@ export default function EulaPage() {
       <ul>
         <li>
           Email us at{" "}
-          <a href="mailto:founders@manaflow.com">founders@manaflow.com</a>
+          <a href="mailto:founders@stage11.ai">founders@stage11.ai</a>
         </li>
       </ul>
     </>

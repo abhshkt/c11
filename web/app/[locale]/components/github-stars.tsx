@@ -45,11 +45,11 @@ export function GitHubStarsBadge({
 
   return (
     <a
-      href="https://github.com/manaflow-ai/cmux"
+      href="https://github.com/Stage-11-Agentics/c11"
       target="_blank"
       rel="noopener noreferrer"
       onClick={() =>
-        posthog.capture("cmuxterm_github_clicked", { location })
+        posthog.capture("c11_github_clicked", { location })
       }
       className={className ?? "inline-flex items-center gap-1.5 pr-1 text-sm text-muted hover:text-foreground transition-colors animate-fade-in"}
     >

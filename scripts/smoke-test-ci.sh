@@ -114,6 +114,7 @@ import time
 
 socket_path = sys.argv[1]
 marker = "C11_ENV_PROBE_DONE"
+leak_prefix = "C11_ENV_" + "LEAK:"
 next_request_id = 1
 
 def request(command: str, timeout: float = 5.0) -> str:
@@ -145,12 +146,12 @@ def request_v2(method: str, params: dict, timeout: float = 5.0) -> dict:
         raise RuntimeError(f"v2 {method} failed: {decoded!r}")
     return decoded
 
-request_v2("surface.send_text", {"text": "stty -echo"})
-time.sleep(0.5)
+# Split sentinels inside the terminal command so echoed input cannot masquerade
+# as sanitizer output if the shell has not disabled echo yet.
 probe = (
     "env | awk -F= '/^(CODEX_|HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|"
-    "ALL_PROXY|NO_PROXY|all_proxy|no_proxy)=/ { print \"C11_ENV_LEAK:\" $1 }'; "
-    f"echo {marker}; stty echo"
+    "ALL_PROXY|NO_PROXY|all_proxy|no_proxy)=/ { print \"C11_ENV_\" \"LEAK:\" $1 }'; "
+    "printf '%s%s\\n' C11_ENV_PROBE_ DONE"
 )
 request_v2("surface.send_text", {"text": probe})
 
@@ -159,7 +160,7 @@ last_screen = ""
 while time.time() < deadline:
     time.sleep(0.5)
     last_screen = request("read_screen --scrollback --lines 200")
-    if "C11_ENV_LEAK:" in last_screen:
+    if leak_prefix in last_screen:
         print("ERROR: terminal inherited poisoned Codex/proxy environment", file=sys.stderr)
         print(last_screen, file=sys.stderr)
         sys.exit(1)

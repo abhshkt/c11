@@ -21,53 +21,6 @@ enum SessionPersistencePolicy {
     static let maxScrollbackLinesPerTerminal: Int = 4000
     static let maxScrollbackCharactersPerTerminal: Int = 400_000
 
-    /// Tier 1 persistence, Phase 1: stable panel UUIDs across app restarts.
-    ///
-    /// When `true` (default), session-restore injects each `SessionPanelSnapshot.id`
-    /// into the restored panel's constructor so external consumers (Lattice, CLI,
-    /// scripted tests) can cache panel IDs across restarts.
-    ///
-    /// Setting `CMUX_DISABLE_STABLE_PANEL_IDS=1` reverts to the old behavior (fresh
-    /// UUID per restored panel + `oldToNewPanelIds` remap inside the workspace).
-    /// Kept as a one-release rollback safety net; delete in a followup PR.
-    static var stablePanelIdsEnabled: Bool {
-        !envFlagEnabled("CMUX_DISABLE_STABLE_PANEL_IDS")
-    }
-
-    /// Tier 1 persistence, Phase 1.5: stable workspace UUIDs across app restarts.
-    ///
-    /// When `true` (default), `TabManager.restoreSessionSnapshot` injects each
-    /// `SessionWorkspaceSnapshot.id` into the restored workspace's constructor so
-    /// external consumers (Lattice, CLI, scripted tests) can cache the
-    /// `(workspaceId, surfaceId)` tuple across restarts. This is a hard
-    /// prerequisite for Phase 2 (persistent `SurfaceMetadataStore`), which keys
-    /// on that tuple.
-    ///
-    /// Setting `CMUX_DISABLE_STABLE_WORKSPACE_IDS=1` reverts to the old behavior
-    /// (fresh UUID per restored workspace). App launch scope only — set via
-    /// `launchctl setenv` or the parent shell before launching the app; setting
-    /// it on the `cmux` CLI invocation has no effect. Kept as a one-release
-    /// rollback safety net; delete in a followup PR.
-    static var stableWorkspaceIdsEnabled: Bool {
-        !envFlagEnabled("CMUX_DISABLE_STABLE_WORKSPACE_IDS")
-    }
-
-    /// Tier 1 persistence, Phase 3: persist `statusEntries` across app restart.
-    ///
-    /// When `true` (default), restored workspaces rebuild their `statusEntries`
-    /// from the session snapshot with each entry stamped `staleFromRestart: true`.
-    /// The sidebar renders stale entries with reduced emphasis until the agent
-    /// re-announces the status; the first fresh write clears the flag.
-    ///
-    /// Setting `CMUX_DISABLE_STATUS_ENTRY_PERSIST=1` reverts to the pre-Phase-3
-    /// behavior (discard `statusEntries` on restore). App-launch-scope only —
-    /// set via `launchctl setenv` or the parent shell before launching the app;
-    /// setting it on the `cmux` CLI invocation has no effect. Kept as a
-    /// one-release rollback safety net.
-    static var statusEntryPersistEnabled: Bool {
-        !envFlagEnabled("CMUX_DISABLE_STATUS_ENTRY_PERSIST")
-    }
-
     /// C11-24: startup-restore agent restart.
     ///
     /// When `true` (default), `Workspace.restoreSessionSnapshot` consults the
@@ -94,6 +47,18 @@ enum SessionPersistencePolicy {
     /// regime that has been hand-tested rather than relying purely on
     /// queue semantics.
     static let agentRestartDelay: TimeInterval = 2.5
+
+    /// C11-156: per-agent spacing applied on top of `agentRestartDelay` when a
+    /// restore resumes more than one agent. Without it, every restored agent's
+    /// resume command is typed in the same main-queue turn, so N agents boot
+    /// and fire their SessionStart hooks (each a `conversation.push` +
+    /// `set_agent_pid` socket round-trip onto the main thread) simultaneously —
+    /// a thundering herd that, on a multi-agent workspace, beachballs the app
+    /// right after a crash-restore (observed: a fresh process stalled 44s on
+    /// resume; see ~/Library/Logs/c11/hang.log). Spreading the resumes by this
+    /// interval flattens that burst. The Nth agent resumes at
+    /// `agentRestartDelay + N * agentRestartStagger`.
+    static let agentRestartStagger: TimeInterval = 0.35
 
     private static func envFlagEnabled(_ name: String) -> Bool {
         guard let raw = ProcessInfo.processInfo.environment[name] else { return false }
@@ -204,6 +169,14 @@ enum SessionRestorePolicy {
         arguments: [String] = CommandLine.arguments,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Bool {
+        // QA launch (`C11_QA_LAUNCH`) is the deterministic override: in QA
+        // mode the resume decision comes straight from the flag — load the
+        // snapshot iff resume was requested, regardless of args or test
+        // markers. This wins over everything below so QA runs are reproducible.
+        let qa = QALaunchPolicy.current(environment: environment)
+        if qa.isActive {
+            return qa.shouldResume
+        }
         if environment["CMUX_DISABLE_SESSION_RESTORE"] == "1" {
             return false
         }
@@ -307,6 +280,10 @@ struct SessionLogEntrySnapshot: Codable, Sendable {
 struct SessionProgressSnapshot: Codable, Sendable {
     var value: Double
     var label: String?
+    /// C11-162 (TEL-2): wall-clock stamp (seconds since 1970) of when this
+    /// progress value was written, so decay freshness survives relaunch instead
+    /// of resetting to "now". Optional so pre-existing snapshots still decode.
+    var timestamp: TimeInterval?
 }
 
 struct SessionGitBranchSnapshot: Codable, Sendable {
@@ -344,16 +321,22 @@ struct SessionMarkdownPanelSnapshot: Codable, Sendable {
     /// MarkdownPanel.setMarkdownFontSize clamps to the valid range on restore.
     var markdownFontSize: Double?
 
+    /// Upstream font-scale multiplier. Optional for compatibility with
+    /// Stage-11 snapshots that predate fork-local point-size persistence.
+    var fontScale: Double?
+
     private enum CodingKeys: String, CodingKey {
         case filePath
         case editMode
         case markdownFontSize
+        case fontScale
     }
 
-    init(filePath: String?, editMode: Bool?, markdownFontSize: Double?) {
+    init(filePath: String?, editMode: Bool?, markdownFontSize: Double?, fontScale: Double? = nil) {
         self.filePath = filePath
         self.editMode = editMode
         self.markdownFontSize = markdownFontSize
+        self.fontScale = fontScale
     }
 
     init(from decoder: Decoder) throws {
@@ -365,6 +348,7 @@ struct SessionMarkdownPanelSnapshot: Codable, Sendable {
         // SessionPersistenceStore.load — a wrong type resolves to nil and the
         // panel restores at the default size instead of dropping every surface.
         self.markdownFontSize = try? container.decodeIfPresent(Double.self, forKey: .markdownFontSize)
+        self.fontScale = try? container.decodeIfPresent(Double.self, forKey: .fontScale)
     }
 }
 
@@ -395,6 +379,38 @@ struct SessionPanelSnapshot: Codable, Sendable {
     /// Parallel sidecar: per-key `(source, ts)` record preserving the
     /// precedence chain across restarts. See `PersistedMetadataSource`.
     var metadataSources: [String: PersistedMetadataSource]?
+
+    /// C11-24: per-surface ConversationRefs for the active conversation
+    /// (and v1.x history). Embedded directly on the panel snapshot so the
+    /// conversation follows the panel across a restart naturally. Optional
+    /// for backcompat with pre-C11-24 snapshots; the
+    /// read-side bridge in `WorkspaceSnapshotConversationBridge` lifts
+    /// legacy `claude.session_id` reserved metadata into a ConversationRef
+    /// for one release window (removed in 0.46.0 / v1.1).
+    ///
+    /// `history: []` is written explicitly as an empty array (not omitted)
+    /// for stable JSON output across v1/v2.
+    var surfaceConversations: SurfaceConversations? = nil
+
+    /// C11-164 (RES-2): persisted `SurfaceActivityTracker.lastActivity` floor
+    /// for this surface. The Codex/pi/omp scrape filters use "candidate mtime
+    /// ≥ surface lastActivityTimestamp" to disambiguate which on-disk session
+    /// belongs to which pane after a crash. The live tracker is in-memory only,
+    /// so without persisting this the floor was lost on every restart and the
+    /// restore-time scrape ran with `lastActivityTimestamp: nil` (widening the
+    /// candidate set → spurious ambiguity). Optional for backcompat: pre-C11-164
+    /// snapshots decode with `lastActivityAt == nil` (no floor, prior behaviour).
+    /// Keyed implicitly by this panel's `id` — the same id the store and
+    /// `ScrapeCaptureContext` key on across a restart.
+    var lastActivityAt: Date? = nil
+
+    private enum CodingKeys: String, CodingKey {
+        case id, type, title, customTitle, customColor, directory, isPinned,
+             isManuallyUnread, gitBranch, listeningPorts, ttyName,
+             terminal, browser, markdown, metadata, metadataSources
+        case surfaceConversations = "surface_conversations"
+        case lastActivityAt = "last_activity_at"
+    }
 }
 
 enum SessionSplitOrientation: String, Codable, Sendable {

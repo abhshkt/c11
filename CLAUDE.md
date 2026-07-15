@@ -36,6 +36,19 @@ c11's value to an agent is **the skill** — `skills/c11/SKILL.md` plus the peer
 
 **Therefore:** every change to the CLI, socket protocol, metadata schema, or surface model is incomplete until the skill is updated to match. If you add a command, add it to the skill. If you rename a command, rename it in the skill. If you change defaults, update the examples. The skill is the contract; let it rot and agents get worse at using c11. Invest there first, not last.
 
+### Editing a skill source is incomplete until the installed copy is synced (HARD RULE)
+
+c11 installs its skills (Settings → Agent Skills) as **one-time copies** into `~/.claude/skills/<name>/`, each stamped with a `.c11-skill.json` marker. **The app does not track the repo source after install.** So editing — or committing — a skill under `skills/` does *nothing* to the copy an agent actually loads on any machine where that skill is already installed. The committed source and the live skill are two different files; fixing one leaves the other stale. This has bitten us before: a fix lands in `skills/c11/SKILL.md`, the commit is green, and agents keep reading the old wording for weeks because nobody refreshed the install.
+
+**Whenever you edit any installable skill** (the list lives in `skills/MANIFEST.json` — c11 and its peers, `lattice-orchestrator`, the `tone-*` stages, `venture-partner`), the change is not done until you run:
+
+```bash
+scripts/sync-installed-skills.sh            # refresh every installed installable skill from source
+scripts/sync-installed-skills.sh c11        # or just one
+```
+
+The script mirrors `skills/<name>/` → `~/.claude/skills/<name>/` (preserving the app's `.c11-skill.json` marker) and is idempotent. Treat it as the skill-editing equivalent of `reload.sh` after a code change: source edit → commit → **sync** → verify the live copy. A skill PR that updates source without the maintainer syncing their own machine ships a fix that isn't actually live for them.
+
 ## Computer use is a maintainer validation skill, not the c11 operating skill
 
 There are two different genres here; do not blur them:
@@ -64,7 +77,7 @@ c11 is **host and primitive, not configurator.** It provides surfaces, panes, a 
 
 **One narrow exception: session-resume wrappers under `Resources/bin/`.** When a TUI's lifecycle is otherwise opaque to c11, c11 may ship a PATH-scoped wrapper that captures the minimum lifecycle signal needed for *session resume* across c11 reboots. The wrapper must:
 
-- Live in c11's own bundle, prepended to PATH **only inside c11 terminals** (gated on `CMUX_SURFACE_ID` + a live socket).
+- Live in c11's own bundle, prepended to PATH **only inside c11 terminals** (gated on `C11_SURFACE_ID` + a live socket).
 - Make **no persistent writes** to tenant config, dotfiles, or any path outside c11's own runtime (`/tmp` is fine; `~/.claude/`, `~/.codex/`, etc. are not).
 - Capture only the minimum needed for session resume — usually a session id and `terminal_type`, plus lifecycle status where the TUI exposes it (Claude Code does via hooks; codex does not).
 - Fall through to the real binary unchanged when outside a c11 terminal or when the c11 socket is unreachable.
@@ -96,8 +109,15 @@ See `skills/c11-hotload/SKILL.md` for the full workflow — `reload.sh --tag` bu
 
 The one-liner: after any code change, `./scripts/reload.sh --tag <your-branch-slug>`. Never `open` an untagged `c11 DEV.app`.
 
+**QA / automation launch — ALWAYS suppress the startup dialogs when an agent launches a dev build.** A normal launch blocks on two modals before the GUI is usable: the Agent Skills install/update sheet and the "Resume previous session?" picker. Any agent launching a tagged/dev build to validate or automate **must** turn these off — launching bare leaves both dialogs in the way and stalls coordinate-driven UI checks (a real time sink to avoid). Set `C11_QA_LAUNCH`: `fresh` (or any non-`resume` value) starts clean, `resume` silently restores the prior session, unset is normal interactive behavior. Read per-launch, never persisted. Prefer `./scripts/launch-tagged-automation.sh <tag> --qa [fresh|resume]`, which sets it for you. Note `reload.sh --tag` builds **and** launches but does NOT set the flag, so for a validation pass either launch through `launch-tagged-automation.sh --qa` or export `C11_QA_LAUNCH` before the app starts. Lives in `Sources/QALaunchPolicy.swift`; full table in `skills/c11-hotload/SKILL.md`.
+
+## Diagnostics
+
+- **Portal lifecycle (C11-18):** launch c11 with `C11_PORTAL_DEBUG=1` to write structured `bind`/`detach`/`sync.skip.orphan`/`sync.result`/`orphan.hide`/`geom.external` events to `/tmp/c11-portal.log` (override path with `C11_PORTAL_LOG`). The log truncates on first call after process start; one repro run per file. Drive churn with `scripts/repro-c11-18.sh [iterations]` and attach the log range covering the artifact to the C11-18 ticket.
+
 ## Pitfalls
 
+- **`dlog` is DEBUG-only.** It's bonsplit's `DebugEventLog` free function, defined inside `#if DEBUG`. Every call site must be `#if DEBUG`-gated or the Release configuration fails to compile — and CI's `build` job compiles Debug, so an ungated `dlog` sails through PR CI and only breaks at release-staging time (v0.51.0 staging caught four of these from PR #95). Gate the logging, not the surrounding logic.
 - **Custom UTTypes** for drag-and-drop must be declared in `Resources/Info.plist` under `UTExportedTypeDeclarations` (e.g. `com.stage11.c11.tabtransfer`, `com.stage11.c11.sidebar-tab-reorder`).
 - Do not add an app-level display link or manual `ghostty_surface_draw` loop; rely on Ghostty wakeups/renderer to avoid typing lag.
 - **Typing-latency-sensitive paths** (read carefully before touching these areas):
@@ -106,6 +126,7 @@ The one-liner: after any code change, `./scripts/reload.sh --tag <your-branch-sl
   - `TerminalSurface.forceRefresh()` in `GhosttyTerminalView.swift`: called on every keystroke. Do not add allocations, file I/O, or formatting here.
 - **Terminal find layering contract:** `SurfaceSearchOverlay` must be mounted from `GhosttySurfaceScrollView` in `Sources/GhosttyTerminalView.swift` (AppKit portal layer), not from SwiftUI panel containers such as `Sources/Panels/TerminalPanelView.swift`. Portal-hosted terminal views can sit above SwiftUI during split/workspace churn.
 - **Submodule safety:** When modifying a submodule (ghostty, vendor/bonsplit, etc.), always push the submodule commit to its remote `main` branch BEFORE committing the updated pointer in the parent repo. Never commit on a detached HEAD or temporary branch — the commit will be orphaned and lost. Verify with: `cd <submodule> && git merge-base --is-ancestor HEAD origin/main`.
+- **A fresh `git worktree add` cannot build until you provision it.** A new worktree has neither the submodules nor the prebuilt `GhosttyKit.xcframework` symlink, so xcodebuild fails in sequence with "Could not resolve package dependencies" (bonsplit), "Ghostty submodule is missing", then "no XCFramework found" — none of which are code problems. Before the first build in any new worktree: `git submodule update --init --recursive ghostty vendor/bonsplit` and symlink the framework from the main checkout (`ln -s <main-checkout>/GhosttyKit.xcframework GhosttyKit.xcframework`) to skip a ~10-min Zig rebuild. Both are gitignored, so neither dirties the branch. (Per-delegator worktrees in the orchestrator workflow inherit this — provision before building, not after the first red.)
 - **pbxproj edits via the `xcodeproj` Ruby gem normalize formatting on save** (3-tab → 2-tab indent, reordered `PBXBuildFile` entries, re-issued some object IDs). A "small" semantic edit can produce a multi-thousand-line diff; line-by-line review is not the right gate. Reviewers of future pbxproj-touching tickets should expect the diff bloat and gate on `xcodebuild -list` + file-membership counts + `xcodebuild -showBuildSettings` spot-checks instead. Don't fight the gem by hand-restoring whitespace; that just compounds churn on the next save.
 - **c11 CLI socket can go unreachable while the prod app is still alive.** Symptom: every `c11 <cmd>` errors with `Socket not found at ~/Library/Application Support/c11/c11.sock`, but the c11.app process is still running and the macOS UI / panes / agents are fully interactive. `lsof` shows the process is still bound to the path; the file has been unlinked from the filesystem. **Recovery (non-destructive):** Cmd+Shift+P → run **"Restart CLI Listener"** from the command palette. Invokes `AppDelegate.restartSocketListener(_:)` which stops + re-binds the socket without touching `TabManager`, workspaces, panes, or PTYs. **Root cause (C11-105):** `TerminalControllerSocketSecurityTests.swift` was a member of the `c11LogicTests` target (despite living in `c11Tests/` on disk). The test's `setUp` calls `TerminalController.shared.stop()`, and `TerminalController.socketPath` was default-initialized to `SocketControlSettings.stableDefaultSocketPath` — so any local `xcodebuild -scheme c11-logic test` run would `unlink()` the prod c11's bind dentry while its FD stayed live in-kernel. The fix moves the test back into `c11Tests`, empties the field's default, and gates `stop()`'s unlink on a non-empty path. The kqueue diagnostic at `tools/socket-watcher/` + `docs/c11-socket-unlink-diagnostic.md` remains as a canary for any future unlink source.
 
@@ -140,7 +161,7 @@ c11 has two unit-test targets. The split is the whole point of C11-27.
 
   Expected wall time on a warm cache: around 30 seconds, dominated by `xcodebuild`'s ~10–15 s of inherent overhead rather than test execution (the test phase itself is ~5–10 s for 74 tests). Compare to the host scheme's ~35 s, where most of the gap is the DEV.app launch. **First invocation after a clean checkout pays the c11 app build cost** (multi-minute) because `c11-logic` depends on the `c11` target — Strategy B needs `c11.debug.dylib` available for the test bundle's `BUNDLE_LOADER` + rpath. Subsequent warm-build runs are ~30 s. Use this for any iteration on Mailbox, Theme, Workspace snapshot, Health parser, CLI runtime, persistence, and parser code.
 
-- **`c11Tests` (scheme: `c11-unit`)** — host-required. Spawns a `c11 DEV.app` XCTest host whose main thread is monopolized for ~22 s and whose window beachballs until the run completes. The host previously stomped the operator's running c11 by binding (and on teardown, unlinking) `/tmp/c11-debug.sock`; C11-99 Area B added a per-PID socket guard in `SocketControlSettings.socketPath()` keyed on `XCTestConfigurationFilePath`, plus a `CMUX_TAG=local-xctest` env var on the scheme's TestAction, plus a `scripts/test-unit-local.sh` wrapper that exports a per-PID `CMUX_SOCKET_PATH`. **Use `scripts/test-unit-local.sh` for local c11-unit iteration** — it's safe to run with `/Applications/c11.app` and a `c11 DEV.app` already running. CI still drives the full host-bound suite via `ci.yml`. The `c11-unit` scheme builds both targets but its TestAction runs both `c11Tests` and `c11LogicTests` sequentially in one invocation.
+- **`c11Tests` (scheme: `c11-unit`)** — host-required. Spawns a `c11 DEV.app` XCTest host whose main thread is monopolized for ~22 s and whose window beachballs until the run completes. The host previously stomped the operator's running c11 by binding (and on teardown, unlinking) `/tmp/c11-debug.sock`; C11-99 Area B added a per-PID socket guard in `SocketControlSettings.socketPath()` keyed on `XCTestConfigurationFilePath`, plus a `C11_TAG=local-xctest` env var on the scheme's TestAction, plus a `scripts/test-unit-local.sh` wrapper that exports a per-PID `C11_SOCKET_PATH`. **Use `scripts/test-unit-local.sh` for local c11-unit iteration** — it's safe to run with `/Applications/c11.app` and a `c11 DEV.app` already running. CI still drives the full host-bound suite via `ci.yml`. The `c11-unit` scheme builds both targets but its TestAction runs both `c11Tests` and `c11LogicTests` sequentially in one invocation.
 
   ```
   scripts/test-unit-local.sh                                             # full c11-unit
@@ -149,11 +170,13 @@ c11 has two unit-test targets. The split is the whole point of C11-27.
 
   Schemes that build c11-unit (or `c11-ci`) without the `test` action are safe — they only compile.
 
-- **Python socket tests (`tests_v2/`)** — connect to a running c11 instance's socket. Never launch an untagged `c11 DEV.app` to run them. If you must test locally, use a tagged build's socket (`/tmp/c11-debug-<tag>.sock`) with `C11_SOCKET=/tmp/c11-debug-<tag>.sock` (or `CMUX_SOCKET=…` as compat).
+- **Python socket tests (`tests_v2/`)** — connect to a running c11 instance's socket. Never launch an untagged `c11 DEV.app` to run them. If you must test locally, use a tagged build's socket (`/tmp/c11-debug-<tag>.sock`) with `C11_SOCKET=/tmp/c11-debug-<tag>.sock`.
 
 - **E2E / UI tests** — trigger via `gh workflow run test-e2e.yml`. Never run locally.
 
 - **Never `open` an untagged `c11 DEV.app`** from DerivedData. It conflicts with the user's running debug instance.
+
+- **`build-for-testing` compiles tests; it does not run them.** A green `xcodebuild build-for-testing` proves the test target *links*, not that any assertion passes — a logic regression sails through it and only surfaces in CI's `build` gate (which runs `test`). To actually exercise logic locally, run the `test` action on the safe `c11-logic` scheme, narrowed for speed: `xcodebuild -scheme c11-logic ... test -only-testing:c11LogicTests/<Class>`. Don't report a fix "verified" off `build-for-testing` alone. (Also: never trust a trailing `grep`'s exit code as the build result — parse the log for `** TEST BUILD SUCCEEDED/FAILED **` / `** TEST SUCCEEDED/FAILED **`.)
 
 **Rule of thumb:** if you're touching parsers, snapshots, persistence, or any pure model code, `c11-logic` is your local loop. If you're touching window/view/event/IME code, your iteration loop is `xcodebuild build` + a tagged reload (`./scripts/reload.sh --tag <tag>`), and tests go to CI.
 

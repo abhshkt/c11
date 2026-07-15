@@ -21,14 +21,83 @@ final class DefaultAgentConfigTests: XCTestCase {
     func testFactoryClaudeCommandIncludesDangerouslySkipPermissions() {
         let entry = AgentConfig.factory(for: .claudeCode)
         XCTAssertEqual(entry.command, "claude --dangerously-skip-permissions")
-        XCTAssertEqual(entry.initialPrompt, "you are operating inside a c11 workspace. load the skill.")
+        XCTAssertEqual(entry.initialPrompt, "")
+    }
+
+    func testFactoryClaudePinsOpusModel() {
+        // Claude Code ships pinned to the Opus family so agents launched from
+        // c11 stay on Opus regardless of the operator's ambient Claude default.
+        XCTAssertEqual(AgentConfig.factory(for: .claudeCode).model, "opus")
+        XCTAssertEqual(AgentType.claudeCode.factoryModel, ClaudeModelFamily.opus.rawValue)
+    }
+
+    func testFactoryNonClaudeAgentsHaveNoPinnedModel() {
+        // Only claude-code carries a factory model; everyone else inherits.
+        for type in AgentType.allCases where type != .claudeCode {
+            XCTAssertEqual(AgentConfig.factory(for: type).model, "", "\(type) should not pin a model")
+        }
+    }
+
+    func testClaudeModelFamilyRawValuesAreCliAliases() {
+        // These raw values are passed verbatim to `claude --model`; they must
+        // stay the family aliases the CLI resolves to the latest version.
+        XCTAssertEqual(ClaudeModelFamily.allCases.map(\.rawValue),
+                       ["opus", "sonnet", "haiku", "fable"])
+    }
+
+    func testFactoryAgentsHaveNoPinnedEffort() {
+        // Effort is opt-in: nothing ships with a pinned effort, so every agent
+        // inherits its ambient effort until the operator chooses one.
+        for type in AgentType.allCases {
+            XCTAssertEqual(AgentConfig.factory(for: type).effort, "", "\(type) should not pin an effort")
+        }
+    }
+
+    func testClaudeEffortRawValuesAreCliLevels() {
+        // Passed verbatim to `claude --effort`; must stay the CLI's levels.
+        XCTAssertEqual(ClaudeEffort.allCases.map(\.rawValue),
+                       ["low", "medium", "high", "xhigh", "max"])
+    }
+
+    func testCodableRoundTripPreservesEffort() throws {
+        var agents: [AgentType: AgentConfig] = [:]
+        agents[.claudeCode] = AgentConfig(command: "claude", initialPrompt: "", envOverridesText: "", effort: "high")
+        let cfg = DefaultAgentConfig(defaultAgent: .claudeCode, agents: agents)
+        let data = try JSONEncoder().encode(cfg)
+        let decoded = try JSONDecoder().decode(DefaultAgentConfig.self, from: data)
+        XCTAssertEqual(decoded.agents[.claudeCode]?.effort, "high")
+    }
+
+    func testDecodeAgentConfigWithoutEffortDefaultsToInherit() throws {
+        // A per-agent blob written before the effort field existed must decode
+        // to "" (inherit), preserving its prior launch behavior on upgrade.
+        let json = #"{"command":"claude","initialPrompt":"","envOverridesText":"","model":"opus"}"#
+        let decoded = try JSONDecoder().decode(AgentConfig.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.effort, "")
     }
 
     func testFactoryCodexCommandIncludesYolo() {
         let entry = AgentConfig.factory(for: .codex)
         XCTAssertEqual(entry.command, "codex --yolo")
-        XCTAssertEqual(entry.initialPrompt, "you are operating inside a c11 workspace. load the skill.")
+        XCTAssertEqual(entry.initialPrompt, "")
     }
+
+    func testFactoryGrokCommandIncludesAlwaysApprove() {
+        let entry = AgentConfig.factory(for: .grok)
+        XCTAssertEqual(entry.command, "grok --always-approve")
+        XCTAssertEqual(entry.initialPrompt, "")
+    }
+
+    func testFactoryGitHubCopilotCommandIncludesAllowAllAndAutopilot() {
+        let entry = AgentConfig.factory(for: .githubCopilot)
+        XCTAssertEqual(entry.command, "copilot --allow-all --autopilot")
+        XCTAssertEqual(entry.initialPrompt, "")
+    }
+
+    func testAgentTypeGitHubCopilotRawValueIsKebabCase() {
+        XCTAssertEqual(AgentType.githubCopilot.rawValue, "github-copilot")
+    }
+
 
     func testFactoryCustomHasEmptyDefaults() {
         let entry = AgentConfig.factory(for: .custom)
@@ -58,6 +127,23 @@ final class DefaultAgentConfigTests: XCTestCase {
         XCTAssertEqual(decoded.agents[.codex]?.command, "codex --yolo")
     }
 
+    func testCodableRoundTripPreservesModel() throws {
+        var agents: [AgentType: AgentConfig] = [:]
+        agents[.claudeCode] = AgentConfig(command: "claude", initialPrompt: "", envOverridesText: "", model: "fable")
+        let cfg = DefaultAgentConfig(defaultAgent: .claudeCode, agents: agents)
+        let data = try JSONEncoder().encode(cfg)
+        let decoded = try JSONDecoder().decode(DefaultAgentConfig.self, from: data)
+        XCTAssertEqual(decoded.agents[.claudeCode]?.model, "fable")
+    }
+
+    func testDecodeAgentConfigWithoutModelDefaultsToInherit() throws {
+        // A per-agent blob written before the model field existed must decode
+        // to "" (inherit), preserving its prior launch behavior on upgrade.
+        let json = #"{"command":"claude","initialPrompt":"","envOverridesText":""}"#
+        let decoded = try JSONDecoder().decode(AgentConfig.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.model, "")
+    }
+
     func testLenientDecodeFillsMissingFields() throws {
         let json = #"{"defaultAgent":"codex"}"#
         let data = Data(json.utf8)
@@ -71,6 +157,48 @@ final class DefaultAgentConfigTests: XCTestCase {
         let data = Data(json.utf8)
         let decoded = try JSONDecoder().decode(DefaultAgentConfig.self, from: data)
         XCTAssertEqual(decoded.defaultAgent, .claudeCode)
+        // A corrupt value is not a usable selection, so it must not act as a
+        // project-level override either — same fall-through as an absent key.
+        XCTAssertFalse(decoded.hasExplicitDefaultAgent)
+        XCTAssertNil(decoded.overrideDefaultAgent)
+    }
+
+    func testDecodeWithDefaultAgentMarksItExplicit() throws {
+        let decoded = try JSONDecoder().decode(
+            DefaultAgentConfig.self,
+            from: Data(#"{"defaultAgent":"codex"}"#.utf8)
+        )
+        XCTAssertTrue(decoded.hasExplicitDefaultAgent)
+        XCTAssertEqual(decoded.overrideDefaultAgent, .codex)
+    }
+
+    func testDecodeWithoutDefaultAgentHasNoOverride() throws {
+        // Falls back to claude-code for `defaultAgent`, but exposes no override
+        // so a project consumer keeps its own selection.
+        let decoded = try JSONDecoder().decode(
+            DefaultAgentConfig.self,
+            from: Data(#"{"agents":{}}"#.utf8)
+        )
+        XCTAssertEqual(decoded.defaultAgent, .claudeCode)
+        XCTAssertFalse(decoded.hasExplicitDefaultAgent)
+        XCTAssertNil(decoded.overrideDefaultAgent)
+    }
+
+    func testLegacyArrayAgentsShapeIsRejected() {
+        // Pre-v0.48 `~/.c11/agents.json`: an array of {id,displayName,command}
+        // with no `defaultAgent`. Must fail to decode rather than silently
+        // become an empty-but-valid claude-code override (the A-button bug).
+        let legacy = #"{"agents":[{"id":"claudeCode","displayName":"Claude Code","command":"claude --dangerously-skip-permissions"}]}"#
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(DefaultAgentConfig.self, from: Data(legacy.utf8))
+        )
+    }
+
+    func testProgrammaticConfigIsExplicit() {
+        // The memberwise init always represents a deliberate selection.
+        let cfg = DefaultAgentConfig(defaultAgent: .kimi, agents: [:])
+        XCTAssertTrue(cfg.hasExplicitDefaultAgent)
+        XCTAssertEqual(cfg.overrideDefaultAgent, .kimi)
     }
 
     // MARK: - envMap parsing
@@ -121,7 +249,7 @@ final class DefaultAgentConfigTests: XCTestCase {
         let (store, _) = makeStore()
         XCTAssertEqual(store.current.defaultAgent, .claudeCode)
         XCTAssertEqual(store.current.config(for: .claudeCode).command, "claude --dangerously-skip-permissions")
-        XCTAssertEqual(store.current.config(for: .claudeCode).initialPrompt, "you are operating inside a c11 workspace. load the skill.")
+        XCTAssertEqual(store.current.config(for: .claudeCode).initialPrompt, "")
     }
 
     func testStoreReturnsFactoryOnGarbageData() {
@@ -222,5 +350,134 @@ final class DefaultAgentConfigTests: XCTestCase {
             .appendingPathComponent("DefaultAgentConfigTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return URL(fileURLWithPath: url.resolvingSymlinksInPath().path, isDirectory: true)
+    }
+}
+
+/// Gating logic for the Agent Skills onboarding/update sheet — the dialog that
+/// was over-firing for skill authors. Two fixes are covered:
+///   B. `isLocalDevBuild` suppresses the auto-popup on Debug / tagged builds.
+///   A. "Later" persists a hash-pinned dismissal for every offered row, so it
+///      survives restarts and only re-surfaces when skill content changes.
+final class AgentSkillsOnboardingGatingTests: XCTestCase {
+
+    // MARK: - Fix B: dev/tagged-build suppression
+
+    func testTaggedReleaseBuildCountsAsDev() {
+        // `reload.sh --tag` / automation exports CMUX_TAG; a Release build with
+        // a tag is still a developer build → suppress the auto-popup.
+        XCTAssertTrue(
+            AgentSkillsOnboarding.isLocalDevBuild(
+                environment: ["CMUX_TAG": "feat-foo"],
+                isCompiledDebug: false
+            )
+        )
+    }
+
+    func testUntaggedReleaseBuildIsNotDev() {
+        // The shipped end-user case: Release, no tag → the sheet must still
+        // be offered (function returns false = not a dev build).
+        XCTAssertFalse(
+            AgentSkillsOnboarding.isLocalDevBuild(environment: [:], isCompiledDebug: false)
+        )
+    }
+
+    func testWhitespaceTagDoesNotCountAsDev() {
+        // launchTag() trims to nil for blank values, so a stray empty CMUX_TAG
+        // must not flip a release build into dev-suppressed mode.
+        XCTAssertFalse(
+            AgentSkillsOnboarding.isLocalDevBuild(
+                environment: ["CMUX_TAG": "   "],
+                isCompiledDebug: false
+            )
+        )
+    }
+
+    func testDebugBuildAlwaysCountsAsDevRegardlessOfTag() {
+        XCTAssertTrue(
+            AgentSkillsOnboarding.isLocalDevBuild(environment: [:], isCompiledDebug: true)
+        )
+    }
+
+    @MainActor
+    func testShouldPresentSuppressedOnLocalDevBuild() throws {
+        let tmp = try makeTempDir()
+        let suite = "AgentSkillsGating-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        // Injected dev=true short-circuits before any source/dismissal work.
+        XCTAssertFalse(
+            AgentSkillsOnboarding.shouldPresent(
+                home: tmp,
+                sourceDir: tmp,
+                defaults: defaults,
+                environment: [:],
+                isLocalDevBuild: true
+            )
+        )
+    }
+
+    private func makeTempDir() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AgentSkillsOnboardingGatingTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return URL(fileURLWithPath: url.resolvingSymlinksInPath().path, isDirectory: true)
+    }
+
+    // MARK: - Fix A: "Later" persists a hash-pinned dismissal
+
+    func testLaterRecordsHashPinnedDismissalForEveryOfferedRow() throws {
+        let suite = "AgentSkillsGating-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let offered = [
+            makeStatus(skill: "c11", state: .installedOutdated, hash: "h-c11"),
+            makeStatus(skill: "c11-browser", state: .notInstalled, hash: "h-browser"),
+            makeStatus(skill: "c11-markdown", state: .installedCurrent, hash: "h-current"),
+        ]
+
+        // Mirrors installLater(): empty selection → record every *offerable* row
+        // at its current bundled hash.
+        AgentSkillsOnboarding.recordDismissalsForUncheckedRows(
+            offered: offered,
+            selectedKeys: [],
+            defaults: defaults
+        )
+
+        let dismissals = AgentSkillsOnboarding.loadDismissals(defaults: defaults)
+        XCTAssertEqual(
+            dismissals[AgentSkillsOnboarding.dismissalKey(for: .claude, skillName: "c11")],
+            "h-c11"
+        )
+        XCTAssertEqual(
+            dismissals[AgentSkillsOnboarding.dismissalKey(for: .claude, skillName: "c11-browser")],
+            "h-browser"
+        )
+        // .installedCurrent is not offerable, so it must not be pinned.
+        XCTAssertNil(
+            dismissals[AgentSkillsOnboarding.dismissalKey(for: .claude, skillName: "c11-markdown")]
+        )
+    }
+
+    private func makeStatus(
+        skill: String,
+        target: SkillInstallerTarget = .claude,
+        state: SkillInstallerState,
+        hash: String
+    ) -> SkillInstallerPackageStatus {
+        SkillInstallerPackageStatus(
+            package: SkillInstallerPackage(
+                name: skill,
+                version: "1",
+                description: nil,
+                sourceDir: URL(fileURLWithPath: "/tmp/src/\(skill)", isDirectory: true)
+            ),
+            target: target,
+            destinationDir: URL(fileURLWithPath: "/tmp/dst/\(skill)", isDirectory: true),
+            state: state,
+            record: nil,
+            sourceContentHash: hash
+        )
     }
 }

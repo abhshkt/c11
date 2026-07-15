@@ -1,0 +1,358 @@
+import Foundation
+
+/// Single source of truth for one terminal coding agent c11 knows how to host.
+///
+/// Today (Phase 0) the manifest is **additive**: it carries the per-agent facts
+/// that are currently re-declared across `DefaultAgentConfig`, `AgentDetector`,
+/// `AgentChip`, `AgentRestartRegistry`, `SurfaceMetadataStore`, and the
+/// conversation `StrategyRegistry`. The existing switches still drive behavior;
+/// `AgentManifestTests` golden-locks each manifest field against those switches
+/// so a later phase can delete a switch and read the manifest with zero
+/// behavior change. See `docs/agent-registry-design.md`.
+///
+/// The manifest grows fields as each consumer is migrated (config roots,
+/// reserved metadata keys, capture rails, runtime TOML decoding). It is kept
+/// deliberately small in Phase 0 — only the facts the golden tests can pin
+/// against an existing source of truth belong here yet.
+struct AgentManifest: Sendable, Equatable, Identifiable {
+    /// Canonical kind string. For launchable agents this equals
+    /// `AgentType.rawValue` and the sidebar `terminal_type` (`"claude-code"`,
+    /// `"opencode"`, …). The one string every subsystem keys on.
+    let kind: String
+
+    /// Bridge to the compile-time enum. Phase 0 keeps `AgentType`; a later
+    /// phase may replace enum usages with registry-validated `kind` strings
+    /// (design §11 Q2 — phased, enum-first).
+    let agentType: AgentType
+
+    /// English display label (picker, A-button tooltip, Settings subheading).
+    /// Built-in agents keep their literal-key `String(localized:)` lookup in
+    /// `AgentType.displayName` so xcstrings extraction still works; this field
+    /// is the English source of truth and what runtime (TOML) agents use.
+    let displayName: String
+
+    /// Factory launch command (the operator-editable default).
+    let factoryCommand: String
+
+    /// Factory initial prompt typed after launch (empty for `custom`).
+    let factoryInitialPrompt: String
+
+    /// Exact `comm` names that classify a process as this agent
+    /// (`AgentDetector.classify`).
+    let detectComms: [String]
+
+    /// `args` substrings that classify a node-wrapped process as this agent.
+    let detectNodeArgsSubstrings: [String]
+
+    /// Sidebar icon asset name (`"AgentIcons/<kind>"`), or `nil` for agents
+    /// with no branded chip (e.g. `custom`).
+    let iconAsset: String?
+
+    /// SF Symbol shown until a real asset ships, or `nil` when unbranded.
+    let sfSymbolFallback: String?
+
+    /// How a snapshot/crash restart resumes this agent.
+    let resume: ResumeSpec
+
+    /// Whether `kind` is a recognized `terminal_type`
+    /// (`SurfaceMetadataKeys.canonicalTerminalTypes`). `custom` is not.
+    let isCanonicalTerminalType: Bool
+
+    /// Whether a `ConversationStrategy` is registered for `kind`
+    /// (`ConversationStrategyRegistry.v1`).
+    let hasConversationStrategy: Bool
+
+    var id: String { kind }
+
+    /// Reproduces the matching `AgentRestartRegistry.phase1` row for this agent.
+    /// Pure; same belt-and-braces id/path re-validation as the existing rows so
+    /// the synthesized string can never become a command-injection vector.
+    func resumeCommand(sessionId: String?, metadata: [String: String]) -> String? {
+        switch resume {
+        case .none:
+            return nil
+        case .fixed(let command):
+            return command
+        case .codexExact:
+            return codexExactResumeCommand(metadata: metadata)
+        case .uuidById(let command, let projectDirKey):
+            guard let raw = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty,
+                  isValidClaudeSessionId(raw) else { return nil }
+            let resumeCmd = "\(command) \(raw)"
+            if let key = projectDirKey,
+               let dir = metadata[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !dir.isEmpty,
+               isValidClaudeSessionProjectDir(dir) {
+                return "cd \(shellSingleQuote(dir)) && \(resumeCmd)\n"
+            }
+            return "\(resumeCmd)\n"
+        }
+    }
+}
+
+/// How a captured session is resumed on restart. Mirrors today's
+/// `AgentRestartRegistry.phase1` rows as data.
+enum ResumeSpec: Sendable, Equatable {
+    /// No resume row — restart launches fresh via the normal launch path
+    /// (`github-copilot`, `custom`).
+    case none
+    /// Codex-specific exact resume from captured `codex.session_*`
+    /// metadata, with legacy `--last` only when no trusted id exists.
+    case codexExact
+    /// A fixed best-effort command, independent of session id (`grok`,
+    /// `opencode`, `kimi`, `pi`). Trailing `\n` preserved to match the rows.
+    case fixed(String)
+    /// Resume a specific UUID session, optionally `cd`-ing into a recorded
+    /// project dir first. Reproduces the `claude-code` row.
+    case uuidById(command: String, projectDirKey: String?)
+}
+
+private func codexExactResumeCommand(metadata: [String: String]) -> String? {
+    if metadata.keys.contains(SurfaceMetadataKeyName.codexRestartBlocked) {
+        return nil
+    }
+
+    func recordedProjectDir() -> String? {
+        guard let rawDir = metadata[SurfaceMetadataKeyName.codexSessionProjectDir]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawDir.isEmpty,
+              isValidCodexSessionProjectDir(rawDir) else {
+            return nil
+        }
+        return rawDir
+    }
+
+    let sessionStore: String
+    if metadata.keys.contains(SurfaceMetadataKeyName.codexSessionStore) {
+        guard let candidate = metadata[SurfaceMetadataKeyName.codexSessionStore]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              candidate == SurfaceMetadataKeyName.codexSessionStoreManagedOverlay ||
+                candidate == SurfaceMetadataKeyName.codexSessionStoreRealHome else {
+            return nil
+        }
+        sessionStore = candidate
+    } else {
+        sessionStore = SurfaceMetadataKeyName.codexSessionStoreManagedOverlay
+    }
+
+    let raw: String
+    if metadata.keys.contains(SurfaceMetadataKeyName.codexSessionId) {
+        guard let candidate = metadata[SurfaceMetadataKeyName.codexSessionId]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !candidate.isEmpty else {
+            return nil
+        }
+        raw = candidate
+    } else {
+        // Older snapshots or disabled hooks retain the historical best-effort
+        // behavior. `resume --last` must read the operator's real Codex state;
+        // c11's managed CODEX_HOME overlay intentionally does not mirror
+        // sessions/state DBs. The wrapper also detects this argv shape for
+        // manual runs, but the env marker keeps restored legacy snapshots
+        // explicit.
+        let resumeLast = "env CMUX_CODEX_LEGACY_RESUME_LAST=1 codex resume --last"
+        if let rawDir = recordedProjectDir() {
+            return "cd \(shellSingleQuote(rawDir)) 2>/dev/null || true; \(resumeLast)\n"
+        }
+        return "\(resumeLast)\n"
+    }
+    guard isValidCodexSessionId(raw) else { return nil }
+
+    let resume: String
+    if sessionStore == SurfaceMetadataKeyName.codexSessionStoreRealHome {
+        resume = "env CMUX_CODEX_REAL_HOME_RESUME=1 codex resume \(raw)"
+    } else {
+        resume = "env CMUX_CODEX_MANAGED_RESUME=1 codex resume \(raw)"
+    }
+    if let rawDir = recordedProjectDir() {
+        return "cd \(shellSingleQuote(rawDir)) 2>/dev/null || true; \(resume)\n"
+    }
+    return "\(resume)\n"
+}
+
+/// Immutable, kind-keyed registry of built-in agent manifests. Adding an agent
+/// is one manifest here (plus, until the consumers are migrated, the existing
+/// switches the golden tests pin against).
+struct AgentRegistry: Sendable {
+    private let byKind: [String: AgentManifest]
+
+    /// Every built-in manifest, in `AgentType.allCases` order.
+    let all: [AgentManifest]
+
+    init(_ manifests: [AgentManifest]) {
+        self.all = manifests
+        var map: [String: AgentManifest] = [:]
+        for m in manifests { map[m.kind] = m }
+        self.byKind = map
+    }
+
+    func manifest(forKind kind: String) -> AgentManifest? { byKind[kind] }
+
+    func manifest(for agent: AgentType) -> AgentManifest? { byKind[agent.rawValue] }
+
+    func contains(kind: String) -> Bool { byKind[kind] != nil }
+
+    /// The shared, app-wide registry. One manifest per `AgentType.allCases`
+    /// (the coverage golden test fails if a new enum case lacks a manifest).
+    static let shared = AgentRegistry([
+        AgentManifest(
+            kind: "claude-code",
+            agentType: .claudeCode,
+            displayName: "Claude Code",
+            factoryCommand: "claude --dangerously-skip-permissions",
+            factoryInitialPrompt: c11OrientPrompt,
+            detectComms: ["claude", "claude-code"],
+            detectNodeArgsSubstrings: ["claude-code", "anthropic-ai/claude-code", "/claude"],
+            iconAsset: "AgentIcons/claude-code",
+            sfSymbolFallback: "sparkles",
+            resume: .uuidById(
+                command: "claude --dangerously-skip-permissions --resume",
+                projectDirKey: SurfaceMetadataKeyName.claudeSessionProjectDir
+            ),
+            isCanonicalTerminalType: true,
+            hasConversationStrategy: true
+        ),
+        AgentManifest(
+            kind: "codex",
+            agentType: .codex,
+            displayName: "Codex",
+            factoryCommand: "codex --yolo",
+            factoryInitialPrompt: c11OrientPrompt,
+            detectComms: ["codex", "codex-cli"],
+            detectNodeArgsSubstrings: ["codex-cli", "openai/codex", "/codex"],
+            iconAsset: "AgentIcons/codex",
+            sfSymbolFallback: "chevron.left.forwardslash.chevron.right",
+            resume: .codexExact,
+            isCanonicalTerminalType: true,
+            hasConversationStrategy: true
+        ),
+        AgentManifest(
+            kind: "grok",
+            agentType: .grok,
+            displayName: "Grok Build",
+            factoryCommand: "grok --always-approve",
+            factoryInitialPrompt: c11OrientPrompt,
+            detectComms: ["grok", "grok-cli", "grok-pager"],
+            detectNodeArgsSubstrings: [],
+            iconAsset: "AgentIcons/grok",
+            sfSymbolFallback: "bolt.fill",
+            resume: .fixed("grok --always-approve --resume\n"),
+            isCanonicalTerminalType: true,
+            hasConversationStrategy: true
+        ),
+        AgentManifest(
+            kind: "kimi",
+            agentType: .kimi,
+            displayName: "Kimi",
+            factoryCommand: "kimi",
+            factoryInitialPrompt: c11OrientPrompt,
+            detectComms: ["kimi", "kimi-cli"],
+            detectNodeArgsSubstrings: ["kimi-cli", "moonshot/kimi", "/kimi"],
+            iconAsset: "AgentIcons/kimi",
+            sfSymbolFallback: "moon.stars",
+            resume: .fixed("kimi\n"),
+            isCanonicalTerminalType: true,
+            hasConversationStrategy: true
+        ),
+        AgentManifest(
+            kind: "opencode",
+            agentType: .opencode,
+            displayName: "OpenCode",
+            factoryCommand: "opencode run --dangerously-skip-permissions",
+            factoryInitialPrompt: c11OrientPrompt,
+            detectComms: ["opencode", "opencode-cli"],
+            detectNodeArgsSubstrings: ["opencode-cli", "sst/opencode", "/opencode"],
+            iconAsset: "AgentIcons/opencode",
+            sfSymbolFallback: "curlybraces",
+            resume: .fixed("opencode run --dangerously-skip-permissions\n"),
+            isCanonicalTerminalType: true,
+            hasConversationStrategy: true
+        ),
+        AgentManifest(
+            kind: "github-copilot",
+            agentType: .githubCopilot,
+            displayName: "GitHub Copilot",
+            factoryCommand: "copilot --allow-all --autopilot",
+            factoryInitialPrompt: c11OrientPrompt,
+            detectComms: ["copilot"],
+            detectNodeArgsSubstrings: ["@github/copilot", "/copilot"],
+            iconAsset: "AgentIcons/github-copilot",
+            sfSymbolFallback: "paperplane.fill",
+            // No phase1 row today → fresh launch via the normal path.
+            resume: .none,
+            isCanonicalTerminalType: true,
+            hasConversationStrategy: true
+        ),
+        AgentManifest(
+            kind: "pi",
+            agentType: .pi,
+            displayName: "Pi",
+            // No documented auto-approve flag — launches bare (documented
+            // degradation, same as opencode/kimi historically).
+            factoryCommand: "pi",
+            factoryInitialPrompt: c11OrientPrompt,
+            detectComms: ["pi"],
+            detectNodeArgsSubstrings: ["@earendil-works/pi"],
+            iconAsset: nil,
+            sfSymbolFallback: "p.circle",
+            // `pi -c` continues the most recent session in cwd (best-effort
+            // phase-1 fallback, same shape as codex --last). Exact-session
+            // resume is handled by the scrape rail: the pi wrapper
+            // (`Resources/bin/pi`) mints a wrapper-claim whose time floor lets
+            // `PiScraper` + `PiStrategy` resolve a specific
+            // `~/.pi/agent/sessions/` id and type `pi --session '<id>'` even
+            // when the cwd holds several sessions.
+            resume: .fixed("pi -c\n"),
+            isCanonicalTerminalType: true,
+            hasConversationStrategy: true
+        ),
+        AgentManifest(
+            kind: "omp",
+            agentType: .omp,
+            displayName: "oh-my-pi",
+            factoryCommand: "omp",
+            factoryInitialPrompt: c11OrientPrompt,
+            detectComms: ["omp"],
+            detectNodeArgsSubstrings: ["@oh-my-pi/"],
+            iconAsset: nil,
+            sfSymbolFallback: "o.circle",
+            // Exact-session resume via the conversation rail: the omp wrapper
+            // (`Resources/bin/omp`) mints a wrapper-claim whose time floor lets
+            // `OmpScraper` (JSONL metadata over ~/.omp/agent/sessions/) feed
+            // `OmpStrategy`, which emits `omp --resume='<id>'`. No fixed-command
+            // fallback exists for the legacy `resume` path (the TUI offers
+            // `/resume` only), so `resume` stays `.none` while the strategy owns
+            // exact resume — same split as the codex row.
+            resume: .none,
+            isCanonicalTerminalType: true,
+            hasConversationStrategy: true
+        ),
+        AgentManifest(
+            kind: "custom",
+            agentType: .custom,
+            displayName: "Custom",
+            factoryCommand: "",
+            factoryInitialPrompt: "",
+            detectComms: [],
+            detectNodeArgsSubstrings: [],
+            iconAsset: nil,
+            sfSymbolFallback: nil,
+            resume: .none,
+            isCanonicalTerminalType: false,
+            hasConversationStrategy: false
+        )
+    ])
+}
+
+/// The factory initial prompt for c11-launched agents — empty by design.
+/// A freshly launched agent boots straight to ready with no orientation
+/// turn, so there is no dead-time before the operator can give it a task.
+/// c11 supplies the identity the sidebar needs itself: the agent type comes
+/// from `AgentDetector` (process inspection) and the pinned model plus a
+/// placeholder title are stamped at launch in `Workspace.launchAgentSurface`.
+/// The c11 skill loads on demand — when a task actually drives the workspace.
+/// Mirrors `AgentType.factoryInitialPrompt` for non-custom agents; an
+/// operator who wants a launch prompt can still set one per-agent in
+/// Default Agent settings.
+let c11OrientPrompt = ""
